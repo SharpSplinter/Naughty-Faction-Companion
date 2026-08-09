@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.0.3
+// @version      5.0.4
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -20,7 +20,7 @@
 // @match        https://torn.com/bazaar.php*
 // @match        https://www.torn.com/forums.php*
 // @match        https://torn.com/forums.php*
-// @source       https://github.com/xf4k31tx/Naughty-Torn-Companion/blob/main/Naughty%20Torn%20Companion.js
+// @source       https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.js
 // @updateURL    https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.js
 // @downloadURL  https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.js
 // @grant        GM_xmlhttpRequest

@@ -1,11 +1,27 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    http://tampermonkey.net
-// @version      5.0
+// @version      5.0.1
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
-// @match        https://www.torn.com/*
-// @match        https://torn.com/*
+// @match        https://www.torn.com/index.php*
+// @match        https://torn.com/index.php*
+// @match        https://www.torn.com/item.php*
+// @match        https://torn.com/item.php*
+// @match        https://www.torn.com/factions.php*
+// @match        https://torn.com/factions.php*
+// @match        https://www.torn.com/companies.php*
+// @match        https://torn.com/companies.php*
+// @match        https://www.torn.com/page.php?sid=ItemMarket*
+// @match        https://torn.com/page.php?sid=ItemMarket*
+// @match        https://www.torn.com/jobs.php*
+// @match        https://torn.com/jobs.php*
+// @match        https://www.torn.com/bazaar.php*
+// @match        https://torn.com/bazaar.php*
+// @match        https://www.torn.com/forums.php*
+// @match        https://torn.com/forums.php*
+// @updateURL    https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.js
+// @downloadURL  https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.js
 // @grant        GM_xmlhttpRequest
 // @connect      api.torn.com
 // ==/UserScript==
@@ -24,7 +40,7 @@
     ];
 
     const LOANABLE_CATEGORIES = new Set([
-        "temporary", "melee", "primary", "secondary", "tool", "defensive"
+        "temporary", "melee", "primary", "secondary", "defensive"
     ]);
 
     const APP_STORAGE = {

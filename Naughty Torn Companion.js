@@ -20,6 +20,7 @@
 // @match        https://torn.com/bazaar.php*
 // @match        https://www.torn.com/forums.php*
 // @match        https://torn.com/forums.php*
+// @source       https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.js
 // @updateURL    https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.js
 // @downloadURL  https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.js
 // @grant        GM_xmlhttpRequest

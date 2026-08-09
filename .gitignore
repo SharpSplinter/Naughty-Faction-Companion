@@ -1,0 +1,5 @@
+### Ignore test files for Chrome console F12
+chrome-consolef12-test.js*
+
+### Ignore Torn openapi files
+openapi.json*

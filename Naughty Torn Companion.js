@@ -4,10 +4,8 @@
 // @version      5.0
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
-// @match        https://www.torn.com/item.php*
-// @match        https://torn.com/item.php*
-// @match        https://www.torn.com/page.php?sid=ItemMarket*
-// @match        https://torn.com/page.php?sid=ItemMarket*
+// @match        https://www.torn.com/*
+// @match        https://torn.com/*
 // @grant        GM_xmlhttpRequest
 // @connect      api.torn.com
 // ==/UserScript==

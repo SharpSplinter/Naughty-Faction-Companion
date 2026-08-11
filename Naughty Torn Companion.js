@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.0.4
+// @version      5.5.0
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -24,6 +24,8 @@
 // @updateURL    https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.js
 // @downloadURL  https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.js
 // @grant        GM_xmlhttpRequest
+// @grant        GM.getValue
+// @grant        GM.setValue
 // @connect      api.torn.com
 // ==/UserScript==
 
@@ -44,25 +46,59 @@
         "temporary", "melee", "primary", "secondary", "defensive"
     ]);
 
-    const APP_STORAGE = {
+    // Legacy localStorage keys — read once during migration, then never touched again.
+    const LEGACY_STORAGE = {
         key: "TORN_V2_USER_KEY",
         inventory: "TORN_V2_INVENTORY_DATA",
         position: "TORN_V2_WIDGET_POS",
         dashboard: "TORN_V2_DASHBOARD_STATE"
     };
 
+    // GM-storage keys (Tampermonkey GM.getValue/GM.setValue — shared across all matched
+    // domains/pages, unlike localStorage which is scoped per-origin).
+    const APP_STORAGE = {
+        key: "TORN_V2_USER_KEY",
+        position: "TORN_V2_WIDGET_POS",
+        dashboard: "TORN_V2_DASHBOARD_STATE",
+        migrated: "TORN_V2_GM_MIGRATED_V1",
+        sections: {
+            overview: "TORN_V2_CACHE_OVERVIEW",
+            personal: "TORN_V2_CACHE_PERSONAL",
+            faction: "TORN_V2_CACHE_FACTION",
+            company: "TORN_V2_CACHE_COMPANY",
+            inventory: "TORN_V2_CACHE_INVENTORY",
+            activity: "TORN_V2_CACHE_ACTIVITY"
+        }
+    };
+
     const AUTO_REFRESH_MS = 15 * 60 * 1000;
     const QUICK_REFRESH_MS = 5 * 60 * 1000;
     const LOG_REFRESH_MS = 2 * 60 * 1000;
+
+    // Staleness thresholds checked ONLY when restoring a section's cache at dashboard
+    // init (i.e. "is this cached data too old to show without refreshing first?").
+    // This is separate from the ongoing periodic auto-refresh cadence above.
+    // "company" is intentionally absent — its staleness uses day-boundary logic via
+    // isCompanyUpdateDue() instead of a rolling duration.
+    const SECTION_STALENESS_MS = {
+        overview: QUICK_REFRESH_MS,   // 5 min
+        personal: QUICK_REFRESH_MS,   // 5 min
+        faction: QUICK_REFRESH_MS,    // 5 min
+        inventory: QUICK_REFRESH_MS,  // 5 min
+        activity: 30 * 1000           // 30 sec
+    };
 
     const state = {
         sortState: { key: "value", direction: "desc" },
         expandedCategories: new Set(),
         currentTab: "overview",
         settingsSubTab: "controls",
+        apiKey: "",
+        widgetPosition: null,
         dashboard: null,
         lastRefresh: null,
         autoRefreshTimer: null,
+        chainCountdownTimer: null,
         lastRefreshBySection: {
             overview: 0,
             personal: 0,
@@ -99,6 +135,15 @@
         if (!Number.isFinite(value)) return "0";
         return Math.round(value).toLocaleString();
     };
+    const formatDuration = (totalSeconds) => {
+        const seconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = seconds % 60;
+        if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m ${String(s).padStart(2, "0")}s`;
+        if (m > 0) return `${m}m ${String(s).padStart(2, "0")}s`;
+        return `${s}s`;
+    };
     const debugLog = (...args) => {
         if (typeof console !== "undefined" && console.log) {
             console.log("[Torn Companion]", ...args);
@@ -112,41 +157,141 @@
         "'": '&#39;'
     }[char]));
 
-    const getStoredKey = () => localStorage.getItem(APP_STORAGE.key) || "";
-    const setStoredKey = (key) => localStorage.setItem(APP_STORAGE.key, String(key || "").trim());
-
-    const getStoredInventory = () => {
+    // --- GM-backed persistent storage ---
+    // Design: writes are fire-and-forget async (GM.setValue), but every write ALSO
+    // updates an in-memory mirror (state.*) synchronously first. Reads are therefore
+    // synchronous throughout the rest of the file — render functions etc. don't need
+    // to become async. The only genuinely async step is the one-time bootstrap load.
+    const gmGetValue = async (key, fallback) => {
         try {
-            const raw = localStorage.getItem(APP_STORAGE.inventory);
-            return raw ? JSON.parse(raw) : null;
-        } catch (e) { return null; }
+            return await GM.getValue(key, fallback);
+        } catch (e) {
+            debugLog("GM.getValue failed", key, e);
+            return fallback;
+        }
     };
-
-    const setStoredInventory = (payload) => {
-        localStorage.setItem(APP_STORAGE.inventory, JSON.stringify(payload));
-    };
-
-    const getStoredPosition = () => {
+    const gmSetValue = async (key, value) => {
         try {
-            const raw = localStorage.getItem(APP_STORAGE.position);
-            return raw ? JSON.parse(raw) : null;
-        } catch (e) { return null; }
+            await GM.setValue(key, value);
+        } catch (e) {
+            debugLog("GM.setValue failed", key, e);
+        }
     };
 
+    const getStoredKey = () => state.apiKey || "";
+    const setStoredKey = (key) => {
+        state.apiKey = String(key || "").trim();
+        void gmSetValue(APP_STORAGE.key, state.apiKey);
+    };
+
+    const getStoredPosition = () => state.widgetPosition || null;
     const setStoredPosition = (pos) => {
-        localStorage.setItem(APP_STORAGE.position, JSON.stringify(pos));
+        state.widgetPosition = pos;
+        void gmSetValue(APP_STORAGE.position, pos);
     };
 
-    const getStoredDashboardState = () => {
-        try {
-            const raw = localStorage.getItem(APP_STORAGE.dashboard);
-            return raw ? JSON.parse(raw) : { currentTab: "overview" };
-        } catch (e) { return { currentTab: "overview" }; }
-    };
-
+    const getStoredDashboardState = () => ({
+        currentTab: state.currentTab,
+        settingsSubTab: state.settingsSubTab
+    });
     const setStoredDashboardState = (payload) => {
-        localStorage.setItem(APP_STORAGE.dashboard, JSON.stringify(payload));
+        if (payload && payload.currentTab) state.currentTab = payload.currentTab;
+        if (payload && payload.settingsSubTab) state.settingsSubTab = payload.settingsSubTab;
+        void gmSetValue(APP_STORAGE.dashboard, getStoredDashboardState());
     };
+
+    // Generic per-section cache writer: updates the in-memory cache, stamps the
+    // refresh time, and persists a {data, lastRefresh, status} bundle for that section.
+    function setSectionCache(name, data) {
+        state.caches[name] = data;
+        state.lastRefreshBySection[name] = Date.now();
+        const sectionKey = APP_STORAGE.sections[name];
+        if (!sectionKey) return;
+        void gmSetValue(sectionKey, {
+            data,
+            lastRefresh: state.lastRefreshBySection[name],
+            status: state.sectionStatus[name]
+        });
+    }
+
+    const getStoredInventory = () => state.caches.inventory;
+    const setStoredInventory = (payload) => setSectionCache("inventory", payload);
+
+    // Is this section's restored cache too old to trust without a background refresh?
+    // "company" uses day-boundary logic (isCompanyUpdateDue, defined later in this
+    // file — safe to call here due to function-declaration hoisting).
+    function isSectionStale(name, now = Date.now()) {
+        if (name === "company") return isCompanyUpdateDue(now);
+        const threshold = SECTION_STALENESS_MS[name];
+        if (!threshold) return false;
+        const last = state.lastRefreshBySection[name] || 0;
+        return now - last >= threshold;
+    }
+
+    // One-time migration from the old localStorage keys into GM storage, then loads
+    // everything (api key, position, dashboard state, all six section caches) into
+    // the in-memory state before the dashboard renders for the first time.
+    async function loadPersistedState() {
+        try {
+            const alreadyMigrated = await gmGetValue(APP_STORAGE.migrated, false);
+            if (!alreadyMigrated) {
+                let legacyKey = null, legacyInventory = null, legacyPosition = null, legacyDashboard = null;
+                try { legacyKey = localStorage.getItem(LEGACY_STORAGE.key); } catch (e) { /* ignore */ }
+                try {
+                    const raw = localStorage.getItem(LEGACY_STORAGE.inventory);
+                    legacyInventory = raw ? JSON.parse(raw) : null;
+                } catch (e) { /* ignore */ }
+                try {
+                    const raw = localStorage.getItem(LEGACY_STORAGE.position);
+                    legacyPosition = raw ? JSON.parse(raw) : null;
+                } catch (e) { /* ignore */ }
+                try {
+                    const raw = localStorage.getItem(LEGACY_STORAGE.dashboard);
+                    legacyDashboard = raw ? JSON.parse(raw) : null;
+                } catch (e) { /* ignore */ }
+
+                if (legacyKey) await gmSetValue(APP_STORAGE.key, legacyKey);
+                if (legacyPosition) await gmSetValue(APP_STORAGE.position, legacyPosition);
+                if (legacyDashboard) await gmSetValue(APP_STORAGE.dashboard, legacyDashboard);
+                if (legacyInventory) {
+                    await gmSetValue(APP_STORAGE.sections.inventory, {
+                        data: legacyInventory,
+                        lastRefresh: Date.now(),
+                        status: "Migrated from legacy storage"
+                    });
+                }
+                await gmSetValue(APP_STORAGE.migrated, true);
+                debugLog("Legacy localStorage migrated to GM storage", {
+                    hadKey: !!legacyKey, hadInventory: !!legacyInventory,
+                    hadPosition: !!legacyPosition, hadDashboard: !!legacyDashboard
+                });
+            }
+        } catch (e) {
+            debugLog("Legacy migration check failed", e);
+        }
+
+        state.apiKey = (await gmGetValue(APP_STORAGE.key, "")) || "";
+        state.widgetPosition = await gmGetValue(APP_STORAGE.position, null);
+
+        const dashboardState = await gmGetValue(APP_STORAGE.dashboard, { currentTab: "overview" });
+        state.currentTab = dashboardState.currentTab || "overview";
+        state.settingsSubTab = dashboardState.settingsSubTab || state.settingsSubTab;
+
+        const sectionNames = Object.keys(APP_STORAGE.sections);
+        await Promise.all(sectionNames.map(async (name) => {
+            const bundle = await gmGetValue(APP_STORAGE.sections[name], null);
+            if (bundle && bundle.data) {
+                state.caches[name] = bundle.data;
+                state.lastRefreshBySection[name] = bundle.lastRefresh || 0;
+                if (bundle.status) state.sectionStatus[name] = bundle.status;
+            }
+        }));
+
+        debugLog("Persisted state restored", {
+            hasKey: !!state.apiKey,
+            restoredSections: sectionNames.filter((n) => !!state.caches[n])
+        });
+    }
 
     function secureCustomFetch(url) {
         return new Promise((resolve, reject) => {
@@ -252,43 +397,50 @@
         return uniqueMods.slice(0, 4).join(", ") + (uniqueMods.length > 4 ? ", ..." : "");
     }
 
+    function normalizeModsText(mods) {
+        if (!Array.isArray(mods) || mods.length === 0) return "";
+
+        const formatted = mods
+            .map((mod) => {
+                if (!mod) return "";
+                if (typeof mod === "string") return mod.trim();
+                const name = String(mod.name || mod.title || "").trim();
+                return name;
+            })
+            .filter(Boolean);
+
+        const uniqueMods = [...new Set(formatted.map((mod) => String(mod).trim()))].filter(Boolean);
+        if (uniqueMods.length === 0) return "";
+        return uniqueMods.slice(0, 4).join(", ") + (uniqueMods.length > 4 ? ", ..." : "");
+    }
+
     async function fetchEquipmentBonusMap(apiKey) {
         try {
             const equipmentData = await fetchJson(withKey(`${BASE_URL}user/equipment`, apiKey)).catch(() => ({ equipment: [], clothing: [] }));
             const equipmentItems = Array.isArray(equipmentData.equipment) ? equipmentData.equipment : [];
             const bonusMap = {};
+            const modsMap = {};
 
             equipmentItems.forEach((item) => {
-                const itemId = item && item.id;
+                const itemUid = item && item.uid;
                 const itemType = item && item.type;
-                if (!itemId || !isRelevantBonusItemType(itemType)) return;
+                if (!itemUid || !isRelevantBonusItemType(itemType)) return;
+
+                const bonuses = Array.isArray(item.bonuses) ? item.bonuses : [];
+                if (bonuses.length > 0) {
+                    bonusMap[itemUid] = bonuses;
+                }
 
                 const mods = Array.isArray(item.mods) ? item.mods : [];
-                const modEntries = mods.map((mod) => {
-                    if (typeof mod === "string") return mod;
-                    if (mod && typeof mod === "object") {
-                        const name = mod.name || mod.title;
-                        const rawValue = mod.value ?? mod.amount ?? mod.percent ?? mod.bonus ?? mod.percentage;
-                        if (!name) return "";
-                        if (rawValue === undefined || rawValue === null || rawValue === "") return name;
-                        const numericValue = Number(rawValue);
-                        if (Number.isFinite(numericValue) && !String(name).includes("%")) {
-                            return `${name} +${numericValue}%`;
-                        }
-                        return `${name} ${rawValue}`;
-                    }
-                    return "";
-                }).filter(Boolean);
-
-                if (modEntries.length > 0) {
-                    bonusMap[itemId] = modEntries;
+                if (mods.length > 0) {
+                    modsMap[itemUid] = mods;
                 }
             });
 
-            return bonusMap;
+            return { bonusMap, modsMap };
         } catch (error) {
             console.warn("Equipment bonus lookup failed:", error);
-            return {};
+            return { bonusMap: {}, modsMap: {} };
         }
     }
 
@@ -296,7 +448,7 @@
         tableBodyEl.innerHTML = "";
 
         if (!rows || rows.length === 0) {
-            tableBodyEl.innerHTML = `<tr><td colspan="6" style="padding: 20px; text-align: center; color: #555; font-size: 11px;">No local synced data.</td></tr>`;
+            tableBodyEl.innerHTML = `<tr><td colspan="7" style="padding: 20px; text-align: center; color: #555; font-size: 11px;">No local synced data.</td></tr>`;
             return;
         }
 
@@ -340,8 +492,9 @@
                 <td style="padding: 4px; color: #888; font-size: 10px; font-style: italic;">${group.items.length} item${group.items.length === 1 ? "" : "s"}</td>
                 <td style="padding: 4px; text-align: center; color: #ccc; font-size: 11px; font-weight: bold;">${group.quantity.toLocaleString()}</td>
                 <td style="padding: 4px; text-align: right; color: #85bb65; font-size: 11px; font-weight: bold;">${formatMoney(group.value)}</td>
-                <td style="padding: 4px; text-align: center; color: #9dd8ff; font-size: 10px;">${isLoanable ? (loanedCount > 0 ? `${loanedCount} 🔒` : "") : "—"}</td>
-                <td style="padding: 4px; text-align: center; color: #888; font-size: 10px;">${isLoanable ? (loanedCount > 0 ? "Locked" : "Open") : "—"}</td>
+                <td style="padding: 4px; text-align: center; color: #444; font-size: 10px;"></td>
+                <td style="padding: 4px; text-align: center; color: #444; font-size: 10px;"></td>
+                <td style="padding: 4px; text-align: center; color: #888; font-size: 10px;">${isLoanable ? (loanedCount > 0 ? String(loanedCount) : "—") : "—"}</td>
             `;
             catRow.addEventListener("click", () => {
                 if (state.expandedCategories.has(group.category)) {
@@ -361,15 +514,17 @@
                 itemRow.style.borderBottom = "1px solid #1a1a1a";
                 itemRow.style.backgroundColor = "#161616";
                 const loanedCell = isLoanable
-                    ? `<input type="checkbox" disabled ${item.factionOwned ? "checked" : ""} style="accent-color: #4CAF50; cursor: default;" />`
+                    ? `<span style="color: ${item.factionOwned ? "#e0a25e" : "#6fa356"}; font-size: 10px;">${item.factionOwned ? "Loaned" : "Owned"}</span>`
                     : `<span style="color: #444; font-size: 11px;">—</span>`;
                 const bonusText = item.bonusText || "";
+                const modsText = item.modsText || "";
                 itemRow.innerHTML = `
                     <td style="padding: 4px 4px 4px 22px; color: #666; font-size: 10px;">↳</td>
                     <td style="padding: 4px; color: #ddd; font-size: 11px; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(item.name)}</td>
                     <td style="padding: 4px; text-align: center; color: #999; font-size: 11px;">${item.quantity.toLocaleString()}</td>
                     <td style="padding: 4px; text-align: right; color: #6fa356; font-size: 11px;">${formatMoney(item.price)}</td>
                     <td style="padding: 4px; text-align: center; color: #9dd8ff; font-size: 10px;">${bonusText ? escapeHtml(bonusText) : "—"}</td>
+                    <td style="padding: 4px; text-align: center; color: #c9a0ff; font-size: 10px;">${modsText ? escapeHtml(modsText) : "—"}</td>
                     <td style="padding: 4px; text-align: center;">${loanedCell}</td>
                 `;
                 tableBodyEl.appendChild(itemRow);
@@ -395,7 +550,7 @@
 
         try {
             const priceMap = await fetchItemCatalog(apiKey, statusEl);
-            const itemBonusMap = await fetchEquipmentBonusMap(apiKey);
+            const { bonusMap: itemBonusMap, modsMap: itemModsMap } = await fetchEquipmentBonusMap(apiKey);
             await sleep(REQUEST_DELAY_MS);
 
             let totalValueOverall = 0;
@@ -416,10 +571,13 @@
                         const marketValue = parseInt(priceMap[item.id] || 0, 10);
                         const total = quantity * marketValue;
                         const factionOwned = !!item.faction_owned;
-                        const bonusText = normalizeBonusText(itemBonusMap[item.id]);
+                        const uid = item.uid;
+                        const equipped = !!item.equipped;
+                        const bonusText = equipped ? normalizeBonusText(itemBonusMap[uid]) : "";
+                        const modsText = equipped ? normalizeModsText(itemModsMap[uid]) : "";
                         totalCountOverall += quantity;
                         totalValueOverall += total;
-                        collectedRows.push({ category, name, quantity, price: marketValue, total, factionOwned, bonusText });
+                        collectedRows.push({ category, name, quantity, price: marketValue, total, factionOwned, uid, equipped, bonusText, modsText });
                     });
                 } catch (error) {
                     console.warn(`Inventory fetch failed for ${category}:`, error);
@@ -469,11 +627,13 @@
         setSectionStatus("overview", "Refreshing...");
         debugLog("Fetching overview data");
         try {
-            const [basicResponse, moneyResponse, networthResponse, barsResponse] = await Promise.all([
+            const [basicResponse, moneyResponse, networthResponse, barsResponse, cooldownsResponse, travelResponse] = await Promise.all([
                 fetchJson(withKey(`${BASE_URL}user/basic`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/money`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/networth`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}user/bars`, apiKey)).catch(() => null)
+                fetchJson(withKey(`${BASE_URL}user/bars`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}user/cooldowns`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}user/travel`, apiKey)).catch(() => null)
             ]);
 
             const profileResponse = await fetchJson(withKey(`${BASE_URL}user/profile`, apiKey)).catch(() => null);
@@ -487,8 +647,29 @@
                 bars: barsResponse?.energy !== undefined ? barsResponse : (barsResponse?.bars || barsResponse || {}),
                 profile: profileResponse?.profile || profileResponse || {},
                 faction: factionResponse?.faction || factionResponse || {},
-                company: companyResponse?.profile || companyResponse || {}
+                company: companyResponse?.profile || companyResponse || {},
+                cooldowns: cooldownsResponse?.cooldowns || cooldownsResponse || {},
+                travel: travelResponse?.travel || travelResponse || {}
             };
+
+            // user/bars embeds a live chain snapshot directly (bars.chain), so the
+            // Overview chain indicator no longer has to wait on the Faction tab
+            // having loaded first — use it as the primary source, falling back to
+            // the Faction tab's own cache (see renderOverviewPanel) if this is empty.
+            const embeddedChain = result.bars.chain || null;
+            if (embeddedChain) {
+                result.chain = {
+                    current: Number(embeddedChain.current || 0),
+                    max: Number(embeddedChain.max || 0),
+                    timeout: Number(embeddedChain.timeout || 0),
+                    cooldown: Number(embeddedChain.cooldown || 0),
+                    modifier: Number(embeddedChain.modifier || 0),
+                    start: Number(embeddedChain.start || 0),
+                    end: Number(embeddedChain.end || 0),
+                    fetchedAt: Date.now()
+                };
+            }
+
             setSectionStatus("overview", "Updated");
             markSectionRefreshed("overview");
             debugLog("Overview data refreshed", { keys: Object.keys(result) });
@@ -500,25 +681,76 @@
         }
     }
 
+    async function resolveEducationCourseName(apiKey, courseId) {
+        // torn/education/{id} may return either a single course object or (if the
+        // API ignores the path id) the full nested catalog — { education: [{ id, name,
+        // courses: [{ id, name, ... }] }] }. Handle both shapes defensively.
+        const response = await fetchJson(withKey(`${BASE_URL}torn/education/${courseId}`, apiKey)).catch(() => null);
+        if (!response) return "";
+        const education = response.education;
+
+        if (education && !Array.isArray(education) && education.name) {
+            return education.name;
+        }
+
+        const categories = Array.isArray(education) ? education : (Array.isArray(response) ? response : []);
+        for (const category of categories) {
+            const courses = Array.isArray(category.courses) ? category.courses : [];
+            const match = courses.find((course) => Number(course.id) === Number(courseId));
+            if (match) return match.name || "";
+        }
+
+        return "";
+    }
+
     async function fetchPersonalData(apiKey) {
         setSectionStatus("personal", "Refreshing...");
         debugLog("Fetching personal data");
         try {
-            const [profileResponse, skillsResponse, educationResponse, workstatsResponse, battlestatsResponse, perksResponse] = await Promise.all([
+            const [profileResponse, skillsResponse, educationResponse, workstatsResponse, battlestatsResponse, perksResponse, jobResponse, moneyResponse, jobpointsResponse] = await Promise.all([
                 fetchJson(withKey(`${BASE_URL}user/profile`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/skills`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/education`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/workstats`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/battlestats`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}user/perks`, apiKey)).catch(() => null)
+                fetchJson(withKey(`${BASE_URL}user/perks`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}user/job`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}user/money`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}user/jobpoints`, apiKey)).catch(() => null)
             ]);
+
+            const education = educationResponse?.education || educationResponse || {};
+            let currentCourseName = "";
+            if (education.current && education.current.id) {
+                currentCourseName = await resolveEducationCourseName(apiKey, education.current.id);
+            }
+
+            // Resolve job points for the CURRENT job only, from the separate
+            // user/jobpoints endpoint (user/job itself has no points field).
+            const job = jobResponse?.job || jobResponse || {};
+            const jobpoints = jobpointsResponse?.jobpoints || jobpointsResponse || {};
+            let currentJobPoints = null;
+            if (job.type === "company" && job.id) {
+                const companies = Array.isArray(jobpoints.companies) ? jobpoints.companies : [];
+                const match = companies.find((entry) => Number(entry.company?.id) === Number(job.id));
+                if (match) currentJobPoints = Number(match.points || 0);
+            } else if (job.type === "job" && job.name) {
+                const jobsMap = jobpoints.jobs || {};
+                const key = String(job.name).toLowerCase();
+                if (jobsMap[key] !== undefined) currentJobPoints = Number(jobsMap[key]);
+            }
+
             const result = {
                 profile: profileResponse?.profile || profileResponse || {},
                 skills: skillsResponse?.skills || skillsResponse || {},
-                education: educationResponse?.education || educationResponse || {},
+                education,
+                currentCourseName,
                 workstats: workstatsResponse?.workstats || workstatsResponse || {},
                 battlestats: battlestatsResponse?.battlestats || battlestatsResponse || {},
-                perks: perksResponse?.perks || perksResponse || {}
+                perks: perksResponse?.perks || perksResponse || {},
+                job,
+                money: moneyResponse?.money || moneyResponse || {},
+                currentJobPoints
             };
             setSectionStatus("personal", "Updated");
             markSectionRefreshed("personal");
@@ -535,19 +767,94 @@
         setSectionStatus("faction", "Refreshing...");
         debugLog("Fetching faction data");
         try {
-            const [userFactionResponse, factionBasicResponse, factionStatsResponse, factionMembersResponse, factionNewsResponse] = await Promise.all([
+            const [userFactionResponse, factionBasicResponse, factionStatsResponse, factionMembersResponse, factionNewsResponse, factionChainResponse, factionWarsResponse] = await Promise.all([
                 fetchJson(withKey(`${BASE_URL}user/faction`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}faction/basic`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}faction/stats`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}faction/members`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}faction/news`, apiKey)).catch(() => null)
+                fetchJson(withKey(`${BASE_URL}faction/news`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}faction/chain`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}faction/wars`, apiKey)).catch(() => null)
             ]);
+
+            const userFactionData = userFactionResponse?.faction || userFactionResponse || {};
+            const factionBasicData = factionBasicResponse?.basic || factionBasicResponse || {};
+            const ownFactionId = Number(factionBasicData.id || userFactionData.id || userFactionData.faction_id || 0);
+
+            const chainRaw = factionChainResponse?.chain || factionChainResponse || {};
+            const chain = {
+                current: Number(chainRaw.current || 0),
+                max: Number(chainRaw.max || 0),
+                timeout: Number(chainRaw.timeout || 0),
+                cooldown: Number(chainRaw.cooldown || 0),
+                modifier: Number(chainRaw.modifier || 0),
+                start: Number(chainRaw.start || 0),
+                end: Number(chainRaw.end || 0),
+                fetchedAt: Date.now()
+            };
+
+            const warsData = factionWarsResponse?.wars || factionWarsResponse || {};
+            const rankedWar = warsData.ranked || null;
+            const rankedFactions = Array.isArray(rankedWar?.factions) ? rankedWar.factions : [];
+            let war = null;
+            if (rankedFactions.length >= 2) {
+                const ownEntry = rankedFactions.find((entry) => Number(entry.id) === ownFactionId) || rankedFactions[0];
+                const oppEntry = rankedFactions.find((entry) => Number(entry.id) !== ownFactionId) || rankedFactions[1];
+                war = {
+                    warId: Number(rankedWar.war_id || 0),
+                    ownScore: Number(ownEntry.score || 0),
+                    oppScore: Number(oppEntry.score || 0),
+                    oppName: oppEntry.name || "Unknown",
+                    target: Number(rankedWar.target || 0),
+                    start: Number(rankedWar.start || 0),
+                    end: rankedWar.end ? Number(rankedWar.end) : 0
+                };
+            }
+
+            // Personal chain/war contribution has no direct API field — approximated
+            // client-side by pulling own attacks since the earlier of chain/war start
+            // and tallying hits + respect_gain within each window. See project notes.
+            const personalContribution = { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0 };
+            try {
+                const chainStart = chain.start;
+                const chainEnd = chain.end || Math.floor(Date.now() / 1000);
+                const warStart = war ? war.start : 0;
+                const candidateStarts = [chainStart, warStart].filter((value) => value > 0);
+                const earliestStart = candidateStarts.length ? Math.min(...candidateStarts) : 0;
+
+                if (earliestStart) {
+                    const attacksResponse = await fetchJson(withKey(`${BASE_URL}user/attacks`, apiKey, { from: earliestStart, sort: "ASC" })).catch(() => null);
+                    const attacks = Array.isArray(attacksResponse?.attacks) ? attacksResponse.attacks
+                        : (Array.isArray(attacksResponse) ? attacksResponse : []);
+
+                    attacks.forEach((atk) => {
+                        const started = Number(atk.started || atk.timestamp_started || 0);
+                        const respectGain = Number(atk.respect_gain || 0);
+
+                        if (atk.is_ranked_war && warStart && started >= warStart) {
+                            personalContribution.warHits += 1;
+                            personalContribution.warRespect += respectGain;
+                        }
+
+                        if (chainStart && started >= chainStart && started <= chainEnd) {
+                            personalContribution.chainHits += 1;
+                            personalContribution.chainRespect += respectGain;
+                        }
+                    });
+                }
+            } catch (contributionError) {
+                console.warn("Personal contribution calculation failed:", contributionError);
+            }
+
             const result = {
-                userFaction: userFactionResponse?.faction || userFactionResponse || {},
-                factionBasic: factionBasicResponse?.basic || factionBasicResponse || {},
+                userFaction: userFactionData,
+                factionBasic: factionBasicData,
                 factionStats: factionStatsResponse?.stats || factionStatsResponse || [],
                 factionMembers: factionMembersResponse?.members || factionMembersResponse || [],
-                factionNews: factionNewsResponse?.news || factionNewsResponse || []
+                factionNews: factionNewsResponse?.news || factionNewsResponse || [],
+                chain,
+                war,
+                personalContribution
             };
             setSectionStatus("faction", "Updated");
             markSectionRefreshed("faction");
@@ -624,6 +931,50 @@
         `;
     }
 
+    function renderCooldownsRow(cooldowns) {
+        const drug = Number(cooldowns.drug || 0);
+        const medical = Number(cooldowns.medical || 0);
+        const booster = Number(cooldowns.booster || 0);
+
+        if (!drug && !medical && !booster) {
+            return `<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; color: #888; font-size: 11px;">No active cooldowns.</div>`;
+        }
+
+        const cell = (label, seconds, color) => `
+            <div style="flex: 1; text-align: center;">
+                <div style="color: #888; font-size: 10px; margin-bottom: 2px;">${label}</div>
+                <div style="color: ${seconds > 0 ? color : "#555"}; font-size: 13px; font-weight: 700;">${seconds > 0 ? formatDuration(seconds) : "Ready"}</div>
+            </div>
+        `;
+
+        return `
+            <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; display: flex; gap: 6px;">
+                ${cell("Drug", drug, "#e0a25e")}
+                ${cell("Medical", medical, "#9dd8ff")}
+                ${cell("Booster", booster, "#c9a0ff")}
+            </div>
+        `;
+    }
+
+    function renderTravelCard(basic, travel) {
+        const status = basic.status || {};
+        const stateText = String(status.state || "").toLowerCase();
+        const isTraveling = stateText.includes("travel");
+        if (!isTraveling) return "";
+
+        const destination = travel.destination || status.description || "Unknown destination";
+        const method = travel.method || "";
+        const timeLeft = Number(travel.time_left || 0);
+
+        return `
+            <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">
+                <div style="color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 4px;">✈️ Traveling</div>
+                <div style="color: #9dd8ff; font-size: 13px; margin-bottom: 2px;">${escapeHtml(String(destination))}${method ? ` · ${escapeHtml(String(method))}` : ""}</div>
+                <div style="color: #888; font-size: 10px;">${timeLeft > 0 ? `Arriving in ${formatDuration(timeLeft)}` : "Arriving soon"}</div>
+            </div>
+        `;
+    }
+
     function renderOverviewPanel() {
         const overview = state.caches.overview || {};
         const basic = overview.basic || {};
@@ -634,6 +985,8 @@
         const bars = overview.bars || {};
         const faction = overview.faction || {};
         const company = overview.company || {};
+        const cooldowns = overview.cooldowns || {};
+        const travel = overview.travel || {};
 
         const playerName = basic.name || basic.player_name || "Unknown player";
         const level = basic.level || "-";
@@ -646,17 +999,26 @@
         const nerveCurrent = Number(bars.nerve?.current ?? bars.nerve ?? 0);
         const nerveMax = Number(bars.nerve?.maximum ?? bars.max_nerve ?? 0);
 
+        // Chain mini-indicator reuses the Faction tab's cached /faction/chain data —
+        // no duplicate fetch here. Shows "No data" until the Faction tab has loaded once.
+        const chain = (state.caches.faction || {}).chain || {};
+        const chainDisplay = chain.max ? `${formatInteger(chain.current)} / ${formatInteger(chain.max)}` : "No data";
+        const chainSubtext = chain.max ? `Breaks in ${formatDuration(chain.timeout)}` : "Visit Faction tab to load";
+
         const summaryCards = [
             buildStatCard("Player", playerName, `Level ${level}`),
             buildStatCard("Cash", formatMoney(cash), "Current money"),
             buildStatCard("Net Worth", formatMoney(net), "Estimated total"),
             buildStatCard("Faction", factionName, "Current faction"),
             buildStatCard("Company", companyName, "Current company"),
-            buildStatCard("Bars", `${energyCurrent}/${energyMax} energy`, `${nerveCurrent}/${nerveMax} nerve`)
+            buildStatCard("Bars", `${energyCurrent}/${energyMax} energy`, `${nerveCurrent}/${nerveMax} nerve`),
+            buildStatCard("Chain", chainDisplay, chainSubtext)
         ].join("");
 
         return `
             ${renderSectionMeta("overview", "Overview")}
+            ${renderTravelCard(basic, travel)}
+            ${renderCooldownsRow(cooldowns)}
             <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">
                 ${summaryCards}
             </div>
@@ -675,14 +1037,116 @@
         return Number(match && match.value !== undefined ? match.value : 0) || 0;
     }
 
+    function renderInfoBox(title, rows) {
+        if (!rows.length) {
+            return `<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; color: #888; font-size: 11px;">No ${escapeHtml(title.toLowerCase())} data.</div>`;
+        }
+        const rowsHtml = rows.map((row) => `
+            <div style="display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #222;">
+                <span style="color: #999; font-size: 11px;">${escapeHtml(row.label)}</span>
+                <span style="color: ${row.color || "#ddd"}; font-size: 11px; font-weight: 600;">${escapeHtml(String(row.value))}</span>
+            </div>
+        `).join("");
+        return `
+            <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">
+                <div style="color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 6px;">${escapeHtml(title)}</div>
+                ${rowsHtml}
+            </div>
+        `;
+    }
+
+    function normalizeSkillsList(skills) {
+        if (Array.isArray(skills)) return skills;
+        if (skills && typeof skills === "object") {
+            return Object.entries(skills).map(([slug, value]) => {
+                if (value && typeof value === "object") {
+                    return { slug, name: value.name || slug, level: value.level ?? value.value ?? 0 };
+                }
+                return { slug, name: slug, level: value };
+            });
+        }
+        return [];
+    }
+
+    function renderSkillsBox(skills) {
+        const list = normalizeSkillsList(skills);
+        if (!list.length) {
+            return `<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; color: #888; font-size: 11px;">No skills data.</div>`;
+        }
+        const rowsHtml = list.map((skill) => `
+            <div style="display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #222;">
+                <span style="color: #999; font-size: 11px; text-transform: capitalize;">${escapeHtml(String(skill.name || skill.slug || "Unknown").replace(/_/g, " "))}</span>
+                <span style="color: #9dd8ff; font-size: 11px; font-weight: 600;">${Number(skill.level || 0).toFixed(2)}</span>
+            </div>
+        `).join("");
+        return `
+            <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">
+                <div style="color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 6px;">Skills</div>
+                ${rowsHtml}
+            </div>
+        `;
+    }
+
+    function renderEducationLine(education, currentCourseName) {
+        const completedCount = Array.isArray(education.complete) ? education.complete.length : 0;
+        const current = education.current || null;
+        const inProgressText = current
+            ? `${currentCourseName ? escapeHtml(currentCourseName) : `Course #${current.id}`}${current.until ? ` (${formatDuration(Math.max(0, Number(current.until) - Math.floor(Date.now() / 1000)))} left)` : ""}`
+            : "None";
+        const total = completedCount + (current ? 1 : 0);
+        return `
+            <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; font-size: 11px; color: #ccc;">
+                <span style="color: #fff; font-weight: 700;">Education —</span> In Progress: ${inProgressText} · Completed: ${completedCount} · Total: ${total}
+            </div>
+        `;
+    }
+
+    const PERK_SOURCE_LABELS = {
+        faction: "Faction",
+        job: "Job",
+        property: "Property",
+        education: "Education",
+        enhancer: "Enhancer",
+        book: "Book",
+        stock: "Stock",
+        merit: "Merit"
+    };
+
+    function renderPerksBox(perks) {
+        const sections = Object.keys(PERK_SOURCE_LABELS)
+            .map((key) => ({ key, label: PERK_SOURCE_LABELS[key], items: Array.isArray(perks[key]) ? perks[key] : [] }))
+            .filter((section) => section.items.length > 0);
+
+        if (!sections.length) {
+            return `<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; color: #888; font-size: 11px;">No perks data.</div>`;
+        }
+
+        const sectionsHtml = sections.map((section) => `
+            <div style="margin-bottom: 8px;">
+                <div style="color: #9dd8ff; font-size: 11px; font-weight: 700; margin-bottom: 3px;">${escapeHtml(section.label)}</div>
+                ${section.items.map((text) => `<div style="color: #ccc; font-size: 10px; padding: 2px 0 2px 8px; border-left: 2px solid #333;">${escapeHtml(String(text))}</div>`).join("")}
+            </div>
+        `).join("");
+
+        return `
+            <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">
+                <div style="color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 6px;">Perks</div>
+                ${sectionsHtml}
+            </div>
+        `;
+    }
+
     function renderPersonalPanel() {
         const personal = state.caches.personal || {};
         const profile = personal.profile || {};
         const skills = personal.skills || {};
         const education = personal.education || {};
+        const currentCourseName = personal.currentCourseName || "";
         const workstats = personal.workstats || {};
         const battlestats = personal.battlestats || {};
         const perks = personal.perks || {};
+        const job = personal.job || {};
+        const money = personal.money || {};
 
         const battleTotal = Number(battlestats.total ?? 0);
         const battleStats = {
@@ -691,7 +1155,6 @@
             speed: Number(battlestats.speed?.value ?? battlestats.speed ?? 0),
             dexterity: Number(battlestats.dexterity?.value ?? battlestats.dexterity ?? 0)
         };
-        const educationTotal = (Array.isArray(education.complete) ? education.complete.length : 0) + (education.current ? 1 : 0);
         const workStats = {
             manualLabor: Number(workstats.manual_labor ?? 0),
             endurance: Number(workstats.endurance ?? 0),
@@ -699,26 +1162,106 @@
             total: Number(workstats.total ?? 0)
         };
 
-        const cards = [
-            buildStatCard("Player", profile.name || "Unknown", `Level ${profile.level || "-"}`),
-            buildStatCard("Strength", battleStats.strength, "Strength battle stat"),
-            buildStatCard("Speed", battleStats.speed, "Speed battle stat"),
-            buildStatCard("Defense", battleStats.defense, "Defense battle stat"),
-            buildStatCard("Dexterity", battleStats.dexterity, "Dexterity battle stat"),
-            buildStatCard("Total Battle Stats", battleTotal, "Overall battle stat total"),
-            buildStatCard("Skills", Object.keys(skills || {}).length || 0, "Tracked skill entries"),
-            buildStatCard("Education", educationTotal, "Completed + active educations"),
-            buildStatCard("Manual Labor", workStats.manualLabor, "Manual labor"),
-            buildStatCard("Endurance", workStats.endurance, "Endurance"),
-            buildStatCard("Intelligence", workStats.intelligence, "Intelligence"),
-            buildStatCard("Total Work Stats", workStats.total, "Overall work stats"),
-            buildStatCard("Perks", Object.keys(perks || {}).length || 0, "Perk entries")
+        const playerId = profile.player_id ?? profile.id ?? "-";
+        const jobName = job.name || "Unemployed";
+        const jobPosition = job.position || "";
+        const jobRating = job.type === "company" && job.rating !== undefined ? `${job.rating}★` : "";
+        const jobDays = job.days_in_company !== undefined ? `${formatInteger(job.days_in_company)}d` : "";
+        const jobPointsText = personal.currentJobPoints !== null && personal.currentJobPoints !== undefined ? `${formatInteger(personal.currentJobPoints)} pts` : "";
+        const jobSubtext = [jobPosition, jobRating, jobDays, jobPointsText].filter(Boolean).join(" · ") || "No job";
+        const wallet = Number(money.wallet ?? 0);
+        const cityBank = Number(money.city_bank?.amount ?? 0);
+        const vault = Number(money.vault ?? 0);
+        const points = Number(money.points ?? 0);
+
+        const topCards = [
+            buildStatCard("Player", profile.name || "Unknown", `Player ID ${playerId}`),
+            buildStatCard("Level", profile.level || "-", "Current level", "#7fe18d"),
+            buildStatCard("Job", jobName, jobSubtext)
         ].join("");
+
+        const wealthBox = renderInfoBox("Wealth", [
+            { label: "Wallet", value: formatMoney(wallet), color: "#7fe18d" },
+            { label: "City Bank", value: formatMoney(cityBank), color: "#7fe18d" },
+            { label: "Vault", value: formatMoney(vault), color: "#7fe18d" },
+            { label: "Points", value: formatInteger(points), color: "#9dd8ff" }
+        ]);
+
+        const battleBox = renderInfoBox("Battle Stats", [
+            { label: "Strength", value: formatInteger(battleStats.strength) },
+            { label: "Defense", value: formatInteger(battleStats.defense) },
+            { label: "Speed", value: formatInteger(battleStats.speed) },
+            { label: "Dexterity", value: formatInteger(battleStats.dexterity) },
+            { label: "Total", value: formatInteger(battleTotal), color: "#7fe18d" }
+        ]);
+
+        const workBox = renderInfoBox("Work Stats", [
+            { label: "Manual Labor", value: formatInteger(workStats.manualLabor) },
+            { label: "Endurance", value: formatInteger(workStats.endurance) },
+            { label: "Intelligence", value: formatInteger(workStats.intelligence) },
+            { label: "Total", value: formatInteger(workStats.total), color: "#7fe18d" }
+        ]);
 
         return `
             ${renderSectionMeta("personal", "Personal")}
-            <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">
-                ${cards}
+            <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px;">
+                ${topCards}
+            </div>
+            ${wealthBox}
+            ${battleBox}
+            ${workBox}
+            ${renderSkillsBox(skills)}
+            ${renderEducationLine(education, currentCourseName)}
+            ${renderPerksBox(perks)}
+        `;
+    }
+
+    function renderChainBar(chain) {
+        const current = Number(chain.current || 0);
+        const max = Number(chain.max || 0);
+        const pct = max > 0 ? Math.min(100, Math.round((current / max) * 100)) : 0;
+        const barColor = pct >= 90 ? "#e05959" : pct >= 60 ? "#e0a25e" : "#7fe18d";
+
+        if (!max && !current && !chain.timeout) {
+            return `<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; color: #888; font-size: 11px;">No active chain.</div>`;
+        }
+
+        return `
+            <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                    <span style="color: #fff; font-size: 12px; font-weight: 700;">Chain</span>
+                    <span style="color: #9dd8ff; font-size: 11px;">${formatInteger(current)} / ${formatInteger(max)} hits</span>
+                </div>
+                <div style="width: 100%; height: 10px; background: #222; border-radius: 5px; overflow: hidden; margin-bottom: 6px;">
+                    <div style="width: ${pct}%; height: 100%; background: ${barColor}; transition: width 0.3s;"></div>
+                </div>
+                <div style="display: flex; justify-content: space-between; color: #888; font-size: 10px;">
+                    <span>Breaks in <span id="faction-chain-countdown" style="color: #ccc; font-weight: 700;">${formatDuration(chain.timeout)}</span></span>
+                    <span>Cooldown: ${formatDuration(chain.cooldown)}</span>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderWarCard(war) {
+        if (!war) {
+            return `<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; color: #888; font-size: 11px;">No active ranked war.</div>`;
+        }
+
+        const scoreColor = war.ownScore >= war.oppScore ? "#7fe18d" : "#e05959";
+        const targetPct = war.target > 0 ? Math.min(100, Math.round((Math.max(war.ownScore, war.oppScore) / war.target) * 100)) : 0;
+        const targetBlock = war.target > 0 ? `
+                <div style="width: 100%; height: 8px; background: #222; border-radius: 4px; overflow: hidden; margin-bottom: 4px;">
+                    <div style="width: ${targetPct}%; height: 100%; background: ${scoreColor};"></div>
+                </div>
+                <div style="color: #888; font-size: 10px;">Target: ${formatInteger(war.target)}</div>
+        ` : "";
+
+        return `
+            <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">
+                <div style="color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 6px;">Ranked War vs ${escapeHtml(war.oppName)}</div>
+                <div style="color: ${scoreColor}; font-size: 18px; font-weight: 700; margin-bottom: 6px;">${formatInteger(war.ownScore)} - ${formatInteger(war.oppScore)}</div>
+                ${targetBlock}
             </div>
         `;
     }
@@ -742,10 +1285,25 @@
             buildStatCard("News", rawNews.length, "Recent news entries")
         ].join("");
 
+        const chain = faction.chain || {};
+        const war = faction.war || null;
+        const contribution = faction.personalContribution || { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0 };
+        const contributionCards = [
+            buildStatCard("Chain Hits", contribution.chainHits, "Your hits this chain (approx)", "#9dd8ff"),
+            buildStatCard("Chain Respect", contribution.chainRespect, "Respect earned this chain (approx)", "#7fe18d"),
+            buildStatCard("War Hits", contribution.warHits, "Your hits this war (approx)", "#9dd8ff"),
+            buildStatCard("War Respect", contribution.warRespect, "Respect earned this war (approx)", "#7fe18d")
+        ].join("");
+
         return `
             ${renderSectionMeta("faction", "Faction")}
             <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px;">
                 ${cards}
+            </div>
+            ${renderChainBar(chain)}
+            ${renderWarCard(war)}
+            <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">
+                ${contributionCards}
             </div>
         `;
     }
@@ -907,22 +1465,22 @@
         try {
             switch (sectionKey) {
                 case "overview":
-                    state.caches.overview = await fetchOverviewData(apiKey) || state.caches.overview;
+                    setSectionCache("overview", (await fetchOverviewData(apiKey)) || state.caches.overview);
                     break;
                 case "personal":
-                    state.caches.personal = await fetchPersonalData(apiKey) || state.caches.personal;
+                    setSectionCache("personal", (await fetchPersonalData(apiKey)) || state.caches.personal);
                     break;
                 case "faction":
-                    state.caches.faction = await fetchFactionData(apiKey) || state.caches.faction;
+                    setSectionCache("faction", (await fetchFactionData(apiKey)) || state.caches.faction);
                     break;
                 case "company":
-                    state.caches.company = await fetchCompanyData(apiKey) || state.caches.company;
+                    setSectionCache("company", (await fetchCompanyData(apiKey)) || state.caches.company);
                     break;
                 case "inventory":
-                    state.caches.inventory = await fetchInventoryData(apiKey, statusEl) || state.caches.inventory;
+                    setSectionCache("inventory", (await fetchInventoryData(apiKey, statusEl)) || state.caches.inventory);
                     break;
                 case "activity":
-                    state.caches.activity = await fetchActivityData(apiKey) || state.caches.activity;
+                    setSectionCache("activity", (await fetchActivityData(apiKey)) || state.caches.activity);
                     break;
                 default:
                     return false;
@@ -1012,11 +1570,12 @@
                                 <th data-sort-key="quantity" data-label="Qty" style="padding: 4px; text-align: center; cursor: pointer; user-select: none;">Qty</th>
                                 <th data-sort-key="value" data-label="Value" style="padding: 4px; text-align: right; cursor: pointer; user-select: none;">Value</th>
                                 <th style="padding: 4px; text-align: center;">Bonus/Perks</th>
+                                <th style="padding: 4px; text-align: center;">Mods</th>
                                 <th style="padding: 4px; text-align: center;">Loaned</th>
                             </tr>
                         </thead>
                         <tbody id="inventory-table-body" style="color: #ccc;">
-                            <tr><td colspan="6" style="padding: 20px; text-align: center; color: #555; font-size: 11px;">No local synced data.</td></tr>
+                            <tr><td colspan="7" style="padding: 20px; text-align: center; color: #555; font-size: 11px;">No local synced data.</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -1165,6 +1724,36 @@
         contentEl.innerHTML = innerHtml;
         bindInventoryTableControls();
         bindSettingsControls();
+
+        if (state.currentTab === "faction") {
+            startChainCountdownTimer();
+        } else {
+            stopChainCountdownTimer();
+        }
+    }
+
+    function stopChainCountdownTimer() {
+        if (state.chainCountdownTimer) {
+            clearInterval(state.chainCountdownTimer);
+            state.chainCountdownTimer = null;
+        }
+    }
+
+    function startChainCountdownTimer() {
+        stopChainCountdownTimer();
+        state.chainCountdownTimer = setInterval(() => {
+            const el = document.getElementById("faction-chain-countdown");
+            if (!el || state.currentTab !== "faction") {
+                stopChainCountdownTimer();
+                return;
+            }
+            const chain = (state.caches.faction || {}).chain || {};
+            if (!chain.fetchedAt || !Number.isFinite(chain.timeout)) return;
+            const elapsedSeconds = Math.floor((Date.now() - chain.fetchedAt) / 1000);
+            const remaining = Math.max(0, Number(chain.timeout) - elapsedSeconds);
+            el.textContent = formatDuration(remaining);
+            el.style.color = remaining <= 0 ? "#e05959" : "#ccc";
+        }, 1000);
     }
 
     function inventoryRowsExist() {
@@ -1192,18 +1781,18 @@
                 fetchActivityData(apiKey)
             ]);
 
-            state.caches.overview = overview || state.caches.overview;
-            state.caches.personal = personal || state.caches.personal;
-            state.caches.faction = faction || state.caches.faction;
-            state.caches.activity = activity || state.caches.activity;
+            setSectionCache("overview", overview || state.caches.overview);
+            setSectionCache("personal", personal || state.caches.personal);
+            setSectionCache("faction", faction || state.caches.faction);
+            setSectionCache("activity", activity || state.caches.activity);
 
             if (includeCompany) {
                 const company = await fetchCompanyData(apiKey);
-                state.caches.company = company || state.caches.company;
+                setSectionCache("company", company || state.caches.company);
             }
 
             const inventoryData = await fetchInventoryData(apiKey, status);
-            state.caches.inventory = inventoryData || state.caches.inventory;
+            setSectionCache("inventory", inventoryData || state.caches.inventory);
             state.lastRefreshBySection.all = Date.now();
             renderTabContent();
 
@@ -1262,7 +1851,7 @@
             tasks.push(
                 fetchCompanyData(apiKey)
                     .then((company) => {
-                        state.caches.company = company || state.caches.company;
+                        setSectionCache("company", company || state.caches.company);
                         renderTabContent();
                     })
                     .catch((error) => {
@@ -1275,7 +1864,7 @@
             tasks.push(
                 fetchActivityData(apiKey)
                     .then((activity) => {
-                        state.caches.activity = activity || state.caches.activity;
+                        setSectionCache("activity", activity || state.caches.activity);
                         renderTabContent();
                     })
                     .catch((error) => {
@@ -1417,24 +2006,36 @@
             });
         });
 
-        const storedInventory = getStoredInventory();
-        if (storedInventory && Array.isArray(storedInventory.rows) && storedInventory.rows.length > 0) {
-            state.caches.inventory = storedInventory;
-        }
-
         state.sectionStatus.settings = "Auto refresh: 5 min quick / 15 min full";
         renderTabContent();
 
-        if (getStoredKey()) {
-            void refreshAllSections({ includeCompany: true, silent: true });
+        if (state.apiKey) {
+            const hasAnyCache = Object.values(state.caches).some((cache) => cache !== null);
+            if (!hasAnyCache) {
+                // Fresh install / nothing restored from storage — do a full refresh.
+                void refreshAllSections({ includeCompany: true, silent: true });
+            } else {
+                // Returning session — restored data is already showing; only refresh
+                // whichever sections are actually stale per their own threshold.
+                const staleSections = Object.keys(APP_STORAGE.sections).filter((name) => isSectionStale(name));
+                debugLog("Startup staleness check", { staleSections });
+                staleSections.forEach((name) => {
+                    void refreshSectionByKey(name, null);
+                });
+            }
         }
 
         scheduleAutoRefresh();
     }
 
-    if (document.readyState === "complete" || document.readyState === "interactive") {
+    async function bootstrap() {
+        await loadPersistedState();
         initializeDOMDashboard();
+    }
+
+    if (document.readyState === "complete" || document.readyState === "interactive") {
+        void bootstrap();
     } else {
-        window.addEventListener("DOMContentLoaded", initializeDOMDashboard);
+        window.addEventListener("DOMContentLoaded", () => { void bootstrap(); });
     }
 })();

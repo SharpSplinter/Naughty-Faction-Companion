@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.12.0
+// @version      5.12.7
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -14,8 +14,6 @@
 // @match        https://torn.com/companies.php*
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://torn.com/page.php?sid=ItemMarket*
-// @match        https://www.torn.com/jobs.php*
-// @match        https://torn.com/jobs.php*
 // @source       https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.js
 // @updateURL    https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.js
 // @downloadURL  https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.js
@@ -56,6 +54,7 @@
         key: "TORN_V2_USER_KEY",
         position: "TORN_V2_WIDGET_POS",
         dashboard: "TORN_V2_DASHBOARD_STATE",
+        companyStockHistory: "TORN_V2_COMPANY_STOCK_HISTORY",
         migrated: "TORN_V2_GM_MIGRATED_V1",
         sections: {
             overview: "TORN_V2_CACHE_OVERVIEW",
@@ -90,6 +89,7 @@
         currentTab: "overview",
         settingsSubTab: "controls",
         isMinimized: false,
+        companyStockHistory: {},
         apiKey: "",
         widgetPosition: null,
         dashboard: null,
@@ -164,6 +164,8 @@
         if (remaining < 86400) return `expires in ${Math.floor(remaining / 3600)}h`;
         return `expires in ${Math.floor(remaining / 86400)}d`;
     };
+    const getUtcDateKey = (time = Date.now()) => new Date(time).toISOString().slice(0, 10);
+    const getCompanyStockDayKey = (time = Date.now()) => getUtcDateKey(time - ((18 * 60 + 8) * 60 * 1000));
     const debugLog = (...args) => {
         if (typeof console !== "undefined" && console.log) {
             console.log("[Torn Companion]", ...args);
@@ -221,6 +223,21 @@
         if (payload && typeof payload.isMinimized === "boolean") state.isMinimized = payload.isMinimized;
         void gmSetValue(APP_STORAGE.dashboard, getStoredDashboardState());
     };
+
+    function updateCompanyStockHistory(companyId, stock) {
+        if (!companyId || !Array.isArray(stock)) return {};
+        const today = getCompanyStockDayKey();
+        const counts = Object.fromEntries(stock.map((item) => [String(item.id), Number(item.in_stock ?? item.quantity ?? 0)]));
+        const previousEntry = state.companyStockHistory[String(companyId)] || {};
+        const entry = previousEntry.date === today
+            ? { ...previousEntry, counts }
+            : { date: today, counts, previous: previousEntry.date ? { date: previousEntry.date, counts: previousEntry.counts || {} } : null };
+        state.companyStockHistory[String(companyId)] = entry;
+        void gmSetValue(APP_STORAGE.companyStockHistory, state.companyStockHistory);
+        const yesterday = getCompanyStockDayKey(Date.now() - 24 * 60 * 60 * 1000);
+        if (entry.previous?.date !== yesterday) return {};
+        return Object.fromEntries(Object.entries(counts).map(([id, count]) => [id, count - Number(entry.previous.counts?.[id] || 0)]));
+    }
 
     // Generic per-section cache writer: updates the in-memory cache, stamps the
     // refresh time, and persists a {data, lastRefresh, status} bundle for that section.
@@ -294,6 +311,7 @@
 
         state.apiKey = (await gmGetValue(APP_STORAGE.key, "")) || "";
         state.widgetPosition = await gmGetValue(APP_STORAGE.position, null);
+        state.companyStockHistory = await gmGetValue(APP_STORAGE.companyStockHistory, {}) || {};
 
         const dashboardState = await gmGetValue(APP_STORAGE.dashboard, { currentTab: "overview" });
         state.currentTab = dashboardState.currentTab || "overview";
@@ -930,7 +948,9 @@
                 fetchJson(withKey(`${BASE_URL}faction/stats`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}faction/members`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}faction/news`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}faction/chain`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}faction/chain`, apiKey))
+                    .then((data) => ({ data, fetchedAt: Date.now() }))
+                    .catch(() => ({ data: null, fetchedAt: Date.now() })),
                 fetchJson(withKey(`${BASE_URL}faction/wars`, apiKey)).catch(() => null)
             ]);
 
@@ -938,7 +958,7 @@
             const factionBasicData = factionBasicResponse?.basic || factionBasicResponse || {};
             const ownFactionId = Number(factionBasicData.id || userFactionData.id || userFactionData.faction_id || 0);
 
-            const chainRaw = factionChainResponse?.chain || factionChainResponse || {};
+            const chainRaw = factionChainResponse?.data?.chain || factionChainResponse?.data || {};
             const chain = {
                 current: Number(chainRaw.current || 0),
                 max: Number(chainRaw.max || 0),
@@ -947,7 +967,7 @@
                 modifier: Number(chainRaw.modifier || 0),
                 start: Number(chainRaw.start || 0),
                 end: Number(chainRaw.end || 0),
-                fetchedAt: Date.now()
+                fetchedAt: factionChainResponse?.fetchedAt || Date.now()
             };
 
             const warsData = factionWarsResponse?.wars || factionWarsResponse || {};
@@ -957,10 +977,14 @@
             if (rankedFactions.length >= 2) {
                 const ownEntry = rankedFactions.find((entry) => Number(entry.id) === ownFactionId) || rankedFactions[0];
                 const oppEntry = rankedFactions.find((entry) => Number(entry.id) !== ownFactionId) || rankedFactions[1];
+                const opponentBasicResponse = await fetchJson(withKey(`${BASE_URL}faction/${oppEntry.id}/basic`, apiKey)).catch(() => null);
+                const opponentBasic = opponentBasicResponse?.basic || opponentBasicResponse || {};
                 war = {
                     warId: Number(rankedWar.war_id || 0),
                     ownScore: Number(ownEntry.score || 0),
                     oppScore: Number(oppEntry.score || 0),
+                    ownTag: factionBasicData.tag || ownEntry.name || "My Faction",
+                    oppTag: opponentBasic.tag || oppEntry.name || "Enemy Faction",
                     oppName: oppEntry.name || "Unknown",
                     target: Number(rankedWar.target || 0),
                     start: Number(rankedWar.start || 0),
@@ -1036,11 +1060,15 @@
                 fetchJson(withKey(`${BASE_URL}company/stock`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}company/applications`, apiKey)).catch(() => null)
             ]);
+            const companyProfile = companyProfileResponse?.profile || companyProfileResponse || {};
+            const companyStock = companyStockResponse ? (companyStockResponse?.stock || companyStockResponse || []) : [];
+            const stockChanges = companyStockResponse ? updateCompanyStockHistory(companyProfile.id, companyStock) : {};
             const result = {
-                companyProfile: companyProfileResponse?.profile || companyProfileResponse || {},
+                companyProfile,
                 companyEmployees: companyEmployeesResponse?.employees || companyEmployeesResponse || [],
                 companyNews: companyNewsResponse?.news || companyNewsResponse || [],
-                companyStock: companyStockResponse?.stock || companyStockResponse || [],
+                companyStock,
+                stockChanges,
                 companyApplications: companyApplicationsResponse ? (companyApplicationsResponse?.applications || companyApplicationsResponse || []) : null
             };
             setSectionStatus("company", "Updated");
@@ -1086,9 +1114,38 @@
         const displayValue = typeof value === "number" ? formatInteger(value) : String(value ?? "0");
         return `
             <div style="background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border: 1px solid #333; border-radius: 8px; padding: 10px; min-height: 90px; box-sizing: border-box;">
-                <div style="color: #aaa; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px;">${escapeHtml(title)}</div>
+                <div style="color: #d4d4d4; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px;">${escapeHtml(title)}</div>
                 <div style="color: ${color}; font-size: 22px; font-weight: 700; line-height: 1.1;">${escapeHtml(displayValue)}</div>
-                <div style="color: #8a8a8a; font-size: 10px; margin-top: 6px;">${escapeHtml(subtext)}</div>
+                <div style="color: #d0d0d0; font-size: 12px; font-weight: 600; line-height: 1.35; margin-top: 7px;">${escapeHtml(subtext)}</div>
+            </div>
+        `;
+    }
+
+    function renderBarsPanel(bars) {
+        const barDefinitions = [
+            { key: "energy", label: "Energy", color: "#7fe18d" },
+            { key: "nerve", label: "Nerve", color: "#c9a0ff" },
+            { key: "life", label: "Life", color: "#ff7b7b" }
+        ];
+        const rows = barDefinitions.map(({ key, label, color }) => {
+            const value = bars[key] || {};
+            const current = Number(value.current ?? value ?? 0);
+            const maximum = Number(value.maximum ?? value.max ?? 0);
+            const percent = maximum > 0 ? Math.min(100, Math.max(0, (current / maximum) * 100)) : 0;
+            return `
+                <div style="display: grid; grid-template-columns: 58px 1fr auto; align-items: center; gap: 8px;">
+                    <span style="color: #e0e0e0; font-size: 12px; font-weight: 700;">${label}</span>
+                    <div style="height: 12px; border-radius: 6px; overflow: hidden; background: #202020; border: 1px solid #3a3a3a;">
+                        <div style="width: ${percent}%; height: 100%; background: ${color}; transition: width 0.3s;"></div>
+                    </div>
+                    <span style="color: #fff; font-size: 12px; font-weight: 700; min-width: 68px; text-align: right;">${formatInteger(current)} / ${formatInteger(maximum)}</span>
+                </div>
+            `;
+        }).join("");
+        return `
+            <div style="border: 1px solid #3a3a3a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.85); margin-bottom: 10px; display: grid; gap: 8px;">
+                <div style="color: #fff; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;">Bars</div>
+                ${rows}
             </div>
         `;
     }
@@ -1156,10 +1213,6 @@
         const companyName = company.name || company.company_name || "No company";
         const cash = Number(money.wallet ?? money.cash ?? money.money ?? 0);
         const net = Number(networthValue || 0);
-        const energyCurrent = Number(bars.energy?.current ?? bars.energy ?? bars.current ?? 0);
-        const energyMax = Number(bars.energy?.maximum ?? bars.max_energy ?? bars.maximum ?? 0);
-        const nerveCurrent = Number(bars.nerve?.current ?? bars.nerve ?? 0);
-        const nerveMax = Number(bars.nerve?.maximum ?? bars.max_nerve ?? 0);
 
         // Chain mini-indicator: prefers the chain snapshot embedded in this tab's own
         // user/bars fetch (overview.chain), falling back to the Faction tab's cached
@@ -1174,14 +1227,14 @@
             buildStatCard("Net Worth", formatMoney(net), "Estimated total"),
             buildStatCard("Faction", factionName, "Current faction"),
             buildStatCard("Company", companyName, "Current company"),
-            buildStatCard("Bars", `${energyCurrent}/${energyMax} energy`, `${nerveCurrent}/${nerveMax} nerve`),
             buildStatCard("Chain", chainDisplay, chainSubtext)
         ].join("");
 
         return `
             ${renderSectionMeta("overview", "Overview")}
-            ${renderTravelCard(basic, travel)}
+            ${renderBarsPanel(bars)}
             ${renderCooldownsRow(cooldowns)}
+            ${renderTravelCard(basic, travel)}
             <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">
                 ${summaryCards}
             </div>
@@ -1206,8 +1259,8 @@
         }
         const rowsHtml = rows.map((row) => `
             <div style="display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #222;">
-                <span style="color: #999; font-size: 11px;">${escapeHtml(row.label)}</span>
-                <span style="color: ${row.color || "#ddd"}; font-size: 11px; font-weight: 600;">${escapeHtml(String(row.value))}</span>
+                <span style="color: #d0d0d0; font-size: 12px; font-weight: 600;">${escapeHtml(row.label)}</span>
+                <span style="color: ${row.color || "#fff"}; font-size: 12px; font-weight: 700;">${escapeHtml(String(row.value))}</span>
             </div>
         `).join("");
         return `
@@ -1238,8 +1291,8 @@
         }
         const rowsHtml = list.map((skill) => `
             <div style="display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #222;">
-                <span style="color: #999; font-size: 11px; text-transform: capitalize;">${escapeHtml(String(skill.name || skill.slug || "Unknown").replace(/_/g, " "))}</span>
-                <span style="color: #9dd8ff; font-size: 11px; font-weight: 600;">${Number(skill.level || 0).toFixed(2)}</span>
+                <span style="color: #d0d0d0; font-size: 12px; font-weight: 600; text-transform: capitalize;">${escapeHtml(String(skill.name || skill.slug || "Unknown").replace(/_/g, " "))}</span>
+                <span style="color: #9dd8ff; font-size: 12px; font-weight: 700;">${Number(skill.level || 0).toFixed(2)}</span>
             </div>
         `).join("");
         return `
@@ -1490,20 +1543,26 @@
             return `<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; color: #888; font-size: 11px;">No active ranked war.</div>`;
         }
 
-        const scoreColor = war.ownScore >= war.oppScore ? "#7fe18d" : "#e05959";
-        const targetPct = war.target > 0 ? Math.min(100, Math.round((Math.max(war.ownScore, war.oppScore) / war.target) * 100)) : 0;
-        const targetBlock = war.target > 0 ? `
-                <div style="width: 100%; height: 8px; background: #222; border-radius: 4px; overflow: hidden; margin-bottom: 4px;">
-                    <div style="width: ${targetPct}%; height: 100%; background: ${scoreColor};"></div>
-                </div>
-                <div style="color: #888; font-size: 10px;">Target: ${formatInteger(war.target)}</div>
-        ` : "";
+        const scoreLimit = Math.max(1, Number(war.target || 0), war.ownScore, war.oppScore);
+        const scoreDifference = war.ownScore - war.oppScore;
+        const markerPosition = Math.min(100, Math.max(0, 50 - ((scoreDifference / scoreLimit) * 50)));
+        const markerColor = "#4fb86a";
+        const targetText = war.target > 0 ? `First to ${formatInteger(war.target)}` : "Live score";
 
         return `
-            <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">
-                <div style="color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 6px;">Ranked War vs ${escapeHtml(war.oppName)}</div>
-                <div style="color: ${scoreColor}; font-size: 18px; font-weight: 700; margin-bottom: 6px;">${formatInteger(war.ownScore)} - ${formatInteger(war.oppScore)}</div>
-                ${targetBlock}
+            <div style="border: 1px solid #3a3a3a; border-radius: 8px; padding: 12px; background: rgba(20,20,20,0.82); margin-bottom: 10px; text-align: center;">
+                <div style="color: #fff; font-size: 14px; font-weight: 700; margin-bottom: 4px;">Ranked War</div>
+                <div style="color: #d8d8d8; font-size: 12px; font-weight: 700; margin-bottom: 5px;">${escapeHtml(war.ownTag)} <span style="color: #888; padding: 0 5px;">vs</span> ${escapeHtml(war.oppTag)}</div>
+                <div style="color: #fff; font-size: 22px; font-weight: 800; margin-bottom: 9px;">${formatInteger(war.ownScore)} - ${formatInteger(war.oppScore)}</div>
+                <div style="position: relative; width: 100%; height: 14px; border-radius: 7px; overflow: hidden; background: linear-gradient(90deg, rgba(79,184,106,0.14), #252525 50%, rgba(79,184,106,0.14)); border: 1px solid #454545;">
+                    <div style="position: absolute; left: calc(50% - 1px); top: 0; width: 2px; height: 100%; background: #fff; opacity: 0.65;"></div>
+                    <div style="position: absolute; left: calc(${markerPosition}% - 6px); top: 1px; width: 10px; height: 10px; border-radius: 50%; background: ${markerColor}; border: 1px solid #fff; box-shadow: 0 0 7px ${markerColor}; transition: left 0.3s, background 0.3s;"></div>
+                </div>
+                <div style="display: flex; justify-content: space-between; color: #cfcfcf; font-size: 11px; font-weight: 700; margin-top: 5px;">
+                    <span>${escapeHtml(war.ownTag)}: ${formatInteger(war.ownScore)}</span>
+                    <span>${escapeHtml(war.oppTag)}: ${formatInteger(war.oppScore)}</span>
+                </div>
+                <div style="color: #aaa; font-size: 11px; margin-top: 5px;">${targetText} · Center = tied</div>
             </div>
         `;
     }
@@ -1559,6 +1618,7 @@
             company.companyNews && Array.isArray(company.companyNews.news) ? company.companyNews.news : []
         );
         const stock = Array.isArray(company.companyStock) ? company.companyStock : [];
+        const stockChanges = company.stockChanges || {};
         const applications = Array.isArray(company.companyApplications) ? company.companyApplications : null;
         const companyEmployees = profile.employees || {};
 
@@ -1609,7 +1669,7 @@
             .slice(0, 5)
             .map((item) => ({
                 label: item.name || "Unknown item",
-                value: `${formatInteger(item.in_stock ?? item.quantity ?? 0)} in stock · ${formatMoney(Number(item.price || 0))}`
+                value: `${formatInteger(item.in_stock ?? item.quantity ?? 0)} in stock${stockChanges[String(item.id)] === undefined ? " · No yesterday baseline" : ` · ${Number(stockChanges[String(item.id)]) >= 0 ? "+" : ""}${formatInteger(stockChanges[String(item.id)])} vs yesterday`} · ${formatMoney(Number(item.price || 0))}`
             }));
 
         return `
@@ -2053,7 +2113,7 @@
 
     function startChainCountdownTimer() {
         stopChainCountdownTimer();
-        state.chainCountdownTimer = setInterval(() => {
+        const updateCountdown = () => {
             const el = document.getElementById("faction-chain-countdown");
             if (!el || state.currentTab !== "faction") {
                 stopChainCountdownTimer();
@@ -2065,7 +2125,9 @@
             const remaining = Math.max(0, Number(chain.timeout) - elapsedSeconds);
             el.textContent = formatDuration(remaining);
             el.style.color = remaining <= 0 ? "#e05959" : "#ccc";
-        }, 1000);
+        };
+        updateCountdown();
+        state.chainCountdownTimer = setInterval(updateCountdown, 250);
     }
 
     function inventoryRowsExist() {
@@ -2293,14 +2355,12 @@
         applyWidgetView();
 
         const savedPos = getStoredPosition();
-        if (savedPos && typeof savedPos.left === "number" && typeof savedPos.top === "number") {
-            const maxLeft = Math.max(0, window.innerWidth - dashboard.offsetWidth);
+        if (savedPos && typeof savedPos.top === "number") {
             const maxTop = Math.max(0, window.innerHeight - dashboard.offsetHeight);
-            const clampedLeft = Math.min(Math.max(savedPos.left, 0), maxLeft);
             const clampedTop = Math.min(Math.max(savedPos.top, 0), maxTop);
             dashboard.style.bottom = "auto";
-            dashboard.style.right = "auto";
-            dashboard.style.left = `${clampedLeft}px`;
+            dashboard.style.right = "20px";
+            dashboard.style.left = "auto";
             dashboard.style.top = `${clampedTop}px`;
         }
 
@@ -2314,29 +2374,32 @@
         const dragHandle = document.getElementById("widget-drag-handle");
         let isDragging = false;
         let didDrag = false;
-        let offsetX, offsetY;
+        let offsetY;
 
         dragHandle.addEventListener("mousedown", (e) => {
             if (e.target === toggleBtn) return;
             isDragging = true;
             didDrag = false;
-            offsetX = e.clientX - dashboard.getBoundingClientRect().left;
-            offsetY = e.clientY - dashboard.getBoundingClientRect().top;
+            const rect = dashboard.getBoundingClientRect();
+            offsetY = e.clientY - rect.top;
             dashboard.style.bottom = "auto";
-            dashboard.style.right = "auto";
+            dashboard.style.right = "20px";
+            dashboard.style.left = "auto";
+            dashboard.style.top = `${rect.top}px`;
         });
 
         document.addEventListener("mousemove", (e) => {
             if (!isDragging) return;
             didDrag = true;
-            dashboard.style.left = `${e.clientX - offsetX}px`;
-            dashboard.style.top = `${e.clientY - offsetY}px`;
+            const maxTop = Math.max(0, window.innerHeight - dashboard.offsetHeight);
+            const top = Math.min(Math.max(e.clientY - offsetY, 0), maxTop);
+            dashboard.style.top = `${top}px`;
         });
 
         document.addEventListener("mouseup", () => {
             if (isDragging) {
                 const rect = dashboard.getBoundingClientRect();
-                setStoredPosition({ left: rect.left, top: rect.top });
+                setStoredPosition({ top: rect.top });
             }
             isDragging = false;
         });

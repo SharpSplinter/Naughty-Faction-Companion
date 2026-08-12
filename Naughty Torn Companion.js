@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.14.15
+// @version      5.14.16
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -55,6 +55,7 @@
         position: "TORN_V2_WIDGET_POS",
         dashboard: "TORN_V2_DASHBOARD_STATE",
         companyStockHistory: "TORN_V2_COMPANY_STOCK_HISTORY",
+        networthTracking: "TORN_V2_NETWORTH_TRACKING",
         migrated: "TORN_V2_GM_MIGRATED_V1",
         sections: {
             overview: "TORN_V2_CACHE_OVERVIEW",
@@ -93,6 +94,7 @@
         theme: "dark",
         isMinimized: false,
         companyStockHistory: {},
+        networthTracking: { official: null, history: [] },
         apiKey: "",
         widgetPosition: null,
         dashboard: null,
@@ -131,6 +133,11 @@
 
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const formatMoney = (num) => num ? '$' + Number(num).toLocaleString() : '$0';
+    const formatSignedMoney = (num) => {
+        const value = Number(num || 0);
+        const sign = value > 0 ? "+" : value < 0 ? "−" : "";
+        return `${sign}$${Math.abs(value).toLocaleString()}`;
+    };
     const formatInteger = (num) => {
         const value = Number(num ?? 0);
         if (!Number.isFinite(value)) return "0";
@@ -249,6 +256,86 @@
         return Object.fromEntries(Object.entries(counts).map(([id, count]) => [id, count - Number(entry.previous.counts?.[id] || 0)]));
     }
 
+    function readOfficialTornNetworth() {
+        const root = document.querySelector('li[aria-label^="Networth:"]');
+        if (!root || root.closest("#torn-v2-inventory-wrapper")) return 0;
+        const source = root.getAttribute("aria-label") || root.textContent || "";
+        const match = source.match(/Networth:\s*\$?([\d,]+)/i);
+        return match ? Number(match[1].replace(/,/g, "")) : 0;
+    }
+
+    function createNetworthSnapshot(networth) {
+        const money = networth?.money || {};
+        const items = networth?.items || {};
+        const assets = networth?.assets || {};
+        const values = {
+            "Cash (Wallet and Vault)": Number(money.wallet || 0) + Number(money.vault || 0),
+            "Pending": Number(money.pending || 0),
+            "City Bank": Number(money.city_bank || 0),
+            "Cayman Bank": Number(money.cayman_bank || 0),
+            "Bookie": Number(money.bookie || 0),
+            "Piggy Bank": Number(money.piggy_bank || 0),
+            "Loans": Number(money.loans || 0),
+            "Unpaid Fees": Number(money.unpaid_fees || 0),
+            "Items": Number(items.inventory || 0),
+            "Display Case": Number(items.display_case || 0),
+            "Bazaar": Number(items.bazaar || 0),
+            "Trades": Number(items.trades || 0),
+            "Item Market": Number(items.item_market || 0),
+            "Auction House": Number(items.auction_house || 0),
+            "Enlisted Cars": Number(items.enlisted_cars || 0),
+            "Property": Number(assets.property || 0),
+            "Stock Market": Number(assets.stock_market || 0),
+            "Company": Number(assets.company || 0),
+            "Points": Number(networth?.points || 0)
+        };
+        return {
+            total: Number(networth?.total || 0),
+            timestamp: Number(networth?.timestamp || 0),
+            capturedAt: Math.floor(Date.now() / 1000),
+            values
+        };
+    }
+
+    function updateNetworthTracking(networth, dailyNetworth = 0) {
+        const live = createNetworthSnapshot(networth);
+        if (!live.total) return null;
+
+        const now = Math.floor(Date.now() / 1000);
+        const tracking = state.networthTracking && typeof state.networthTracking === "object"
+            ? state.networthTracking
+            : { official: null, history: [] };
+        const history = Array.isArray(tracking.history) ? tracking.history.slice(-575) : [];
+        const latest = history[history.length - 1];
+        const valuesChanged = !latest || JSON.stringify(latest.values || {}) !== JSON.stringify(live.values);
+        if (!latest || latest.total !== live.total || valuesChanged) history.push(live);
+
+        const officialTotal = Number(dailyNetworth || 0) || readOfficialTornNetworth();
+        let official = tracking.official || null;
+        if (officialTotal > 0) {
+            if (!official || Number(official.total) !== officialTotal) {
+                official = { total: officialTotal, observedAt: now, snapshot: null };
+            }
+            if (!official.snapshot) {
+                official.snapshot = [...history].reverse().find((snapshot) => Number(snapshot.total) === officialTotal) || null;
+            }
+        }
+
+        state.networthTracking = { official, history };
+        void gmSetValue(APP_STORAGE.networthTracking, state.networthTracking);
+
+        const baselineValues = official?.snapshot?.values || null;
+        const changes = baselineValues
+            ? Object.fromEntries(Object.entries(live.values).map(([label, value]) => [label, value - Number(baselineValues[label] || 0)]))
+            : null;
+        return {
+            live,
+            official,
+            totalChange: official ? live.total - Number(official.total || 0) : null,
+            changes
+        };
+    }
+
     // Generic per-section cache writer: updates the in-memory cache, stamps the
     // refresh time, and persists a {data, lastRefresh, status} bundle for that section.
     function setSectionCache(name, data) {
@@ -322,6 +409,7 @@
         state.apiKey = (await gmGetValue(APP_STORAGE.key, "")) || "";
         state.widgetPosition = await gmGetValue(APP_STORAGE.position, null);
         state.companyStockHistory = await gmGetValue(APP_STORAGE.companyStockHistory, {}) || {};
+        state.networthTracking = await gmGetValue(APP_STORAGE.networthTracking, { official: null, history: [] }) || { official: null, history: [] };
 
         const dashboardState = await gmGetValue(APP_STORAGE.dashboard, { currentTab: "overview" });
         state.currentTab = dashboardState.currentTab || "overview";
@@ -704,11 +792,14 @@
             const profileResponse = await fetchJson(withKey(`${BASE_URL}user/profile`, apiKey)).catch(() => null);
             const factionResponse = await fetchJson(withKey(`${BASE_URL}user/faction`, apiKey)).catch(() => null);
             const companyResponse = await fetchJson(withKey(`${BASE_URL}company/profile`, apiKey)).catch(() => null);
+            const money = moneyResponse?.money || moneyResponse || {};
+            const networth = networthResponse?.networth || networthResponse || {};
 
             const result = {
                 basic: basicResponse?.profile || basicResponse || {},
-                money: moneyResponse?.money || moneyResponse || {},
-                networth: networthResponse?.networth || networthResponse || 0,
+                money,
+                networth,
+                networthComparison: updateNetworthTracking(networth, money.daily_networth),
                 bars: barsResponse?.energy !== undefined ? barsResponse : (barsResponse?.bars || barsResponse || {}),
                 profile: profileResponse?.profile || profileResponse || {},
                 faction: factionResponse?.faction || factionResponse || {},
@@ -953,6 +1044,8 @@
             );
             const personalstats = Object.assign({}, ...personalstatResponses.map((response) => response?.personalstats || response || {}));
             const icons = iconsResponse?.icons || iconsResponse || [];
+            const money = moneyResponse?.money || moneyResponse || {};
+            const networth = networthResponse?.networth || networthResponse || {};
             const awardProgress = buildAwardProgress(
                 personalstats,
                 medalsCatalogResponse?.medals || medalsCatalogResponse,
@@ -970,8 +1063,9 @@
                 battlestats: battlestatsResponse?.battlestats || battlestatsResponse || {},
                 perks: perksResponse?.perks || perksResponse || {},
                 job,
-                money: moneyResponse?.money || moneyResponse || {},
-                networth: networthResponse?.networth || networthResponse || {},
+                money,
+                networth,
+                networthComparison: updateNetworthTracking(networth, money.daily_networth),
                 currentJobPoints,
                 medals,
                 honors,
@@ -1327,6 +1421,7 @@
         const cooldowns = overview.cooldowns || {};
         const travel = overview.travel || {};
         const icons = overview.icons || [];
+        const networthComparison = overview.networthComparison || null;
 
         const playerName = basic.name || basic.player_name || "Unknown player";
         const level = basic.level || "-";
@@ -1341,11 +1436,15 @@
         const chain = overview.chain || (state.caches.faction || {}).chain || {};
         const chainDisplay = chain.max ? `${formatInteger(chain.current)} / ${formatInteger(chain.max)}` : "No data";
         const chainSubtext = chain.max ? `Breaks in ${formatDuration(chain.timeout)}` : "Visit Faction tab to load";
+        const networthChange = networthComparison?.totalChange;
+        const networthSubtext = networthChange === null || networthChange === undefined
+            ? "Live total"
+            : `${formatSignedMoney(networthChange)} vs Torn daily`;
 
         const summaryCards = [
             buildStatCard("Player", playerName, `Level ${level}`),
             buildStatCard("Cash", formatMoney(cash), "Current money"),
-            buildStatCard("Net Worth", formatMoney(net), "Estimated total"),
+            buildStatCard("Total Net Worth", formatMoney(net), networthSubtext, networthChange < 0 ? "#e05959" : "#7fe18d"),
             buildStatCard("Faction", factionName, "Current faction"),
             buildStatCard("Company", companyName, "Current company"),
             buildStatCard("Chain", chainDisplay, chainSubtext)
@@ -1401,6 +1500,58 @@
             <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">
                 <div style="color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 6px;">${escapeHtml(title)}</div>
                 ${rowsHtml}
+            </div>
+        `;
+    }
+
+    function renderNetworthComparisonBox(comparison) {
+        if (!comparison?.live) {
+            return `<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; color: #888; font-size: 11px;">Refresh Personal data to load the live and Torn daily Net Worth values.</div>`;
+        }
+
+        const live = comparison.live;
+        const official = comparison.official;
+        const totalChange = comparison.totalChange;
+        const changeColor = totalChange > 0 ? "#7fe18d" : totalChange < 0 ? "#e05959" : "#d0d0d0";
+        const detailRows = comparison.changes
+            ? Object.entries(comparison.changes)
+                .filter(([, change]) => Number(change) !== 0)
+                .sort((a, b) => Math.abs(Number(b[1])) - Math.abs(Number(a[1])))
+                .map(([label, change]) => `
+                    <div style="display: grid; grid-template-columns: minmax(105px, 1.25fr) minmax(90px, 1fr) minmax(84px, 0.9fr); gap: 6px; padding: 4px 0; border-bottom: 1px solid #222; align-items: center;">
+                        <span style="color: #d0d0d0; font-size: 10px; font-weight: 600; overflow-wrap: anywhere;">${escapeHtml(label)}</span>
+                        <span style="color: #fff; font-size: 10px; font-weight: 700; text-align: right;">${formatMoney(live.values[label] || 0)}</span>
+                        <span style="color: ${Number(change) > 0 ? "#7fe18d" : "#e05959"}; font-size: 10px; font-weight: 800; text-align: right;">${formatSignedMoney(change)}</span>
+                    </div>
+                `).join("")
+            : "";
+
+        return `
+            <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">
+                <div style="color: #fff; font-size: 12px; font-weight: 800; margin-bottom: 8px;">Net Worth Comparison</div>
+                <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-bottom: 9px;">
+                    <div style="border: 1px solid #303030; border-radius: 6px; padding: 7px;">
+                        <div style="color: #aaa; font-size: 9px; font-weight: 700;">Torn Net Worth</div>
+                        <div style="color: #fff; font-size: 11px; font-weight: 800; margin-top: 3px; overflow-wrap: anywhere;">${official ? formatMoney(official.total) : "Not captured"}</div>
+                    </div>
+                    <div style="border: 1px solid #303030; border-radius: 6px; padding: 7px;">
+                        <div style="color: #aaa; font-size: 9px; font-weight: 700;">Live Net Worth</div>
+                        <div style="color: #9dd8ff; font-size: 11px; font-weight: 800; margin-top: 3px; overflow-wrap: anywhere;">${formatMoney(live.total)}</div>
+                    </div>
+                    <div style="border: 1px solid #303030; border-radius: 6px; padding: 7px;">
+                        <div style="color: #aaa; font-size: 9px; font-weight: 700;">Change</div>
+                        <div style="color: ${changeColor}; font-size: 11px; font-weight: 800; margin-top: 3px; overflow-wrap: anywhere;">${totalChange === null ? "—" : formatSignedMoney(totalChange)}</div>
+                    </div>
+                </div>
+                ${detailRows ? `
+                    <div style="display: grid; grid-template-columns: minmax(105px, 1.25fr) minmax(90px, 1fr) minmax(84px, 0.9fr); gap: 6px; padding-bottom: 4px; color: #888; font-size: 9px; font-weight: 800;">
+                        <span>Type</span><span style="text-align: right;">Live Value</span><span style="text-align: right;">Change</span>
+                    </div>
+                    ${detailRows}
+                ` : comparison.changes ? `<div style="color: #aaa; font-size: 10px; line-height: 1.4;">No category changes since Torn's last daily Net Worth calculation.</div>` : official ? `<div style="color: #aaa; font-size: 10px; line-height: 1.4;">Exact category changes will appear after NTC captures a live snapshot matching Torn's next official Net Worth recalculation.</div>` : ""}
+                <div style="color: #888; font-size: 9px; line-height: 1.4; margin-top: 8px;">
+                    Live data updated ${formatRelativeTime(live.timestamp || live.capturedAt)}${official ? ` · Torn baseline observed ${formatRelativeTime(official.observedAt)}` : " · Torn baseline not yet observed"}
+                </div>
             </div>
         `;
     }
@@ -1651,6 +1802,7 @@
         const job = personal.job || {};
         const money = personal.money || {};
         const networth = personal.networth || {};
+        const networthComparison = personal.networthComparison || null;
         const networthMoney = networth.money || {};
         const networthItems = networth.items || {};
         const networthAssets = networth.assets || {};
@@ -1691,8 +1843,8 @@
         ].join("");
 
         const wealthBox = `
-            ${renderInfoBox("Wealth Summary", [
-                { label: "Total Net Worth", value: formatMoney(networth.total ?? 0), color: "#7fe18d" },
+            ${renderNetworthComparisonBox(networthComparison)}
+            ${renderInfoBox("Points Summary", [
                 { label: "Points Held", value: formatInteger(points), color: "#9dd8ff" },
                 { label: "Points Value", value: formatMoney(networth.points ?? 0), color: "#9dd8ff" }
             ])}

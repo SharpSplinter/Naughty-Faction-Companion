@@ -6,7 +6,7 @@ The script uses Torn API v2 for account data and optionally integrates with [FFS
 
 ## Features
 
-- Persistent right-side dashboard that can be resized and dragged vertically.
+- Persistent dashboard that can be dragged freely and snaps to the nearest browser edge.
 - Compact `NTC` minimized mode.
 - Persistent window size, position, selected tabs, theme, and minimized state.
 - Light and dark modes.
@@ -44,7 +44,7 @@ Tampermonkey checks the script's `@updateURL` for later releases. You can also m
 
 ### Window controls
 
-- Drag the header vertically to reposition the dashboard. The window remains attached to the right side of the browser.
+- Drag the header anywhere in the browser. When released, the dashboard snaps to the nearest left, right, top, or bottom edge and remembers that edge and its along-edge position.
 - Resize the dashboard from its resize handle. Cards and tables adapt to the available width and height.
 - Select `_` to minimize the dashboard to the small `NTC` box; select that box to restore it.
 - Window state and the last selected tabs persist across supported Torn pages.
@@ -66,8 +66,8 @@ Effective battle stats are estimates derived from Torn's reported base stats and
 ### Faction
 
 - **General** displays faction, chain, ranked-war, contribution, news, and member information.
-- **FFScouter** displays the current enemy faction's projected battle stats and Fair Fight values alongside live Torn online, travel, hospital, and location status. Its persisted **Sort & View** controls can independently show or hide Okay, Hospitalized, Abroad/Traveling, Online, Idle, and Offline targets.
-- Select column headers to sort FFScouter targets within their permanent availability groups. Okay targets remain first, hospitalized targets remain second with the nearest release first, and traveling or abroad targets remain last. Drag the header grip to reorder columns and the header edge to resize them.
+- **FFScouter** displays the current enemy faction's projected battle stats and Fair Fight values alongside live Torn online, travel, hospital, and location status. Its persisted **Sort & View** controls can independently show or hide Okay, Hospitalized, Abroad/Traveling, Online, Idle, and Offline targets, plus optionally limit results to a minimum and/or maximum Fair Fight score. Leaving both Fair Fight fields empty disables that range filter.
+- Select column headers to sort FFScouter targets within their permanent availability groups. The selected sort column and direction persist. Okay targets remain first, hospitalized targets remain second with the nearest release first, and traveling or abroad targets remain last. Drag the header grip to reorder columns and the header edge to resize them.
 - Select a player name to open their profile or **Attack** to open Torn's attack page.
 
 ### Company

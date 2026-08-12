@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.21.0
+// @version      5.22.0
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -101,6 +101,7 @@
         sortState: { key: "value", direction: "desc" },
         warTargetSort: { key: "status", direction: "asc" },
         warTargetFilters: { ...WAR_TARGET_FILTER_DEFAULTS },
+        warTargetFFRange: { min: "", max: "" },
         warTargetColumnOrder: ["player", "online", "status", "stats", "ff", "attack"],
         warTargetColumnWidths: { player: 112, online: 64, status: 150, stats: 82, ff: 44, attack: 62 },
         warTargetColumnLayoutVersion: 2,
@@ -273,7 +274,9 @@
         warTargetColumnOrder: state.warTargetColumnOrder,
         warTargetColumnWidths: state.warTargetColumnWidths,
         warTargetColumnLayoutVersion: state.warTargetColumnLayoutVersion,
-        warTargetFilters: state.warTargetFilters
+        warTargetFilters: state.warTargetFilters,
+        warTargetFFRange: state.warTargetFFRange,
+        warTargetSort: state.warTargetSort
     });
     const setStoredDashboardState = (payload) => {
         if (payload && payload.currentTab) state.currentTab = payload.currentTab;
@@ -291,6 +294,19 @@
                 key,
                 typeof payload.warTargetFilters[key] === "boolean" ? payload.warTargetFilters[key] : true
             ]));
+        }
+        if (payload && payload.warTargetFFRange && typeof payload.warTargetFFRange === "object") {
+            state.warTargetFFRange = {
+                min: String(payload.warTargetFFRange.min ?? ""),
+                max: String(payload.warTargetFFRange.max ?? "")
+            };
+        }
+        if (payload && payload.warTargetSort && typeof payload.warTargetSort === "object") {
+            const allowedSortKeys = ["player", "online", "status", "stats", "ff", "attack"];
+            state.warTargetSort = {
+                key: allowedSortKeys.includes(payload.warTargetSort.key) ? payload.warTargetSort.key : "status",
+                direction: payload.warTargetSort.direction === "desc" ? "desc" : "asc"
+            };
         }
         void gmSetValue(APP_STORAGE.dashboard, getStoredDashboardState());
     };
@@ -494,6 +510,15 @@
             key,
             typeof dashboardState.warTargetFilters?.[key] === "boolean" ? dashboardState.warTargetFilters[key] : true
         ]));
+        state.warTargetFFRange = {
+            min: String(dashboardState.warTargetFFRange?.min ?? ""),
+            max: String(dashboardState.warTargetFFRange?.max ?? "")
+        };
+        const savedWarTargetSort = dashboardState.warTargetSort || {};
+        state.warTargetSort = {
+            key: warTargetColumns.includes(savedWarTargetSort.key) ? savedWarTargetSort.key : "status",
+            direction: savedWarTargetSort.direction === "desc" ? "desc" : "asc"
+        };
 
         const sectionNames = Object.keys(APP_STORAGE.sections);
         await Promise.all(sectionNames.map(async (name) => {
@@ -2502,9 +2527,19 @@
     }
 
     function filterWarTargets(targets) {
+        const minText = String(state.warTargetFFRange?.min ?? "").trim();
+        const maxText = String(state.warTargetFFRange?.max ?? "").trim();
+        const minFF = minText === "" ? null : Number(minText);
+        const maxFF = maxText === "" ? null : Number(maxText);
+        const hasMin = Number.isFinite(minFF);
+        const hasMax = Number.isFinite(maxFF);
         return targets.filter((target) => {
             const keys = getWarTargetFilterKeys(target);
-            return state.warTargetFilters[keys.status] !== false && state.warTargetFilters[keys.online] !== false;
+            if (state.warTargetFilters[keys.status] === false || state.warTargetFilters[keys.online] === false) return false;
+            if (!hasMin && !hasMax) return true;
+            const fairFight = Number(target?.fairFight);
+            if (!Number.isFinite(fairFight) || fairFight <= 0) return false;
+            return (!hasMin || fairFight >= minFF) && (!hasMax || fairFight <= maxFF);
         });
     }
 
@@ -2623,6 +2658,16 @@
                 ${group.options.map(([key, label]) => `<label class="ntc-war-target-filter-option" style="display:inline-flex;align-items:center;gap:4px;border:1px solid #3a424d;border-radius:999px;padding:3px 6px;background:rgba(255,255,255,.035);color:#d7dde5;font-size:9px;font-weight:700;cursor:pointer;white-space:nowrap;"><input data-war-target-filter="${key}" type="checkbox" ${state.warTargetFilters[key] !== false ? "checked" : ""} style="width:12px;height:12px;margin:0;accent-color:#5ba7f7;cursor:pointer;">${label}</label>`).join("")}
             </div>
         `).join("");
+        const ffRangeActive = String(state.warTargetFFRange.min).trim() !== "" || String(state.warTargetFFRange.max).trim() !== "";
+        const ffRangePanel = `
+            <div class="ntc-war-ff-range" style="display:flex;align-items:center;gap:5px;flex:1 1 205px;min-width:0;flex-wrap:wrap;">
+                <span class="ntc-war-filter-group-label" style="color:#929eac;font-size:9px;font-weight:850;text-transform:uppercase;letter-spacing:.45px;min-width:48px;">FF Range</span>
+                <input id="war-ff-min-input" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(state.warTargetFFRange.min)}" placeholder="Min" aria-label="Minimum Fair Fight score" style="width:58px;min-width:52px;background:#111820;border:1px solid #3a424d;border-radius:5px;color:#d7dde5;padding:4px 5px;font-size:9px;">
+                <span style="color:#697582;font-size:9px;">to</span>
+                <input id="war-ff-max-input" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(state.warTargetFFRange.max)}" placeholder="Max" aria-label="Maximum Fair Fight score" style="width:58px;min-width:52px;background:#111820;border:1px solid #3a424d;border-radius:5px;color:#d7dde5;padding:4px 5px;font-size:9px;">
+                <button id="clear-war-ff-range-btn" type="button" ${ffRangeActive ? "" : "disabled"} style="border:1px solid #3a424d;border-radius:5px;background:${ffRangeActive ? "#303944" : "#20262d"};color:${ffRangeActive ? "#d7dde5" : "#697582"};padding:4px 6px;font-size:9px;cursor:${ffRangeActive ? "pointer" : "default"};">${ffRangeActive ? "Clear" : "Off"}</button>
+            </div>
+        `;
         const rows = targets.map((target) => {
             const online = String(target.lastAction?.status || "Unknown");
             const onlineColor = online === "Online" ? "#7fe18d" : online === "Idle" ? "#e0a25e" : "#9aa4b2";
@@ -2656,6 +2701,7 @@
                     <div class="ntc-war-target-filter-panel" style="display:flex;align-items:center;gap:7px 12px;flex-wrap:wrap;border:1px solid #343d48;border-radius:7px;padding:6px 8px;background:rgba(11,15,20,.72);">
                         <div style="display:grid;gap:1px;flex:0 0 auto;"><span class="ntc-war-filter-heading" style="color:#fff;font-size:10px;font-weight:900;">Sort &amp; View</span><span style="color:#697582;font-size:8px;white-space:nowrap;">${escapeHtml(activeSort.label)} · ${sortDirection}</span></div>
                         ${filterPanel}
+                        ${ffRangePanel}
                     </div>
                     <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;">${buildStatCard("Online / Idle", onlineCount, "Live Torn status", "#7fe18d")}${buildStatCard("Healthy", okayCount, "Status: Okay", "#5ba7f7")}${buildStatCard("Estimates", `${estimatedCount} / ${targets.length}`, rateLimit, "#c9a0ff")}</div>
                     ${notices.map((notice) => `<div style="color:#e0a25e;font-size:10px;line-height:1.4;">⚠ ${escapeHtml(notice)}</div>`).join("")}
@@ -3506,6 +3552,30 @@
                 renderTabContent();
             };
         });
+        const minFFInput = document.getElementById("war-ff-min-input");
+        const maxFFInput = document.getElementById("war-ff-max-input");
+        const clearFFRangeButton = document.getElementById("clear-war-ff-range-btn");
+        const saveFFRange = () => {
+            const normalizeFFBound = (value) => {
+                const text = String(value || "").trim();
+                if (!text) return "";
+                const number = Number(text);
+                return Number.isFinite(number) ? String(Math.max(0, number)) : "";
+            };
+            let min = normalizeFFBound(minFFInput?.value);
+            let max = normalizeFFBound(maxFFInput?.value);
+            if (min !== "" && max !== "" && Number(min) > Number(max)) [min, max] = [max, min];
+            state.warTargetFFRange = { min, max };
+            setStoredDashboardState({ warTargetFFRange: state.warTargetFFRange });
+            renderTabContent();
+        };
+        if (minFFInput) minFFInput.onchange = saveFFRange;
+        if (maxFFInput) maxFFInput.onchange = saveFFRange;
+        if (clearFFRangeButton) clearFFRangeButton.onclick = () => {
+            state.warTargetFFRange = { min: "", max: "" };
+            setStoredDashboardState({ warTargetFFRange: state.warTargetFFRange });
+            renderTabContent();
+        };
         contentEl.querySelectorAll("[data-war-target-sort]").forEach((header) => {
             header.onclick = (event) => {
                 if (event.target.closest("[data-war-column-resize], [data-war-column-drag]")) return;
@@ -3519,6 +3589,7 @@
                         ? "asc"
                         : current.key === key ? (current.direction === "asc" ? "desc" : "asc") : defaultDirection
                 };
+                setStoredDashboardState({ warTargetSort: state.warTargetSort });
                 renderTabContent();
             };
         });
@@ -3969,16 +4040,66 @@
         storeCurrentWidgetSize(rect.width, rect.height, persist);
     }
 
-    function clampWidgetTop() {
+    function getWidgetEdge() {
+        const edge = getStoredPosition()?.edge;
+        return ["left", "right", "top", "bottom"].includes(edge) ? edge : "right";
+    }
+
+    function updateWidgetResizeHandle(edge = getWidgetEdge()) {
+        const handle = state.dashboard?.querySelector("#widget-resize-handle");
+        if (!handle) return;
+        const corner = edge === "right" ? "bottom-left" : edge === "bottom" ? "top-right" : "bottom-right";
+        handle.dataset.corner = corner;
+        handle.style.left = corner.endsWith("left") ? "0" : "auto";
+        handle.style.right = corner.endsWith("right") ? "0" : "auto";
+        handle.style.top = corner.startsWith("top") ? "0" : "auto";
+        handle.style.bottom = corner.startsWith("bottom") ? "0" : "auto";
+        handle.style.cursor = corner === "bottom-left" || corner === "top-right" ? "nesw-resize" : "nwse-resize";
+    }
+
+    function applyWidgetPosition(position = getStoredPosition()) {
         const dashboard = state.dashboard;
         if (!dashboard) return;
         const rect = dashboard.getBoundingClientRect();
+        const edge = ["left", "right", "top", "bottom"].includes(position?.edge) ? position.edge : "right";
+        const requestedX = Number(position?.x ?? rect.left);
+        const requestedY = Number(position?.y ?? position?.top ?? rect.top);
+        const maxLeft = Math.max(0, window.innerWidth - rect.width);
         const maxTop = Math.max(0, window.innerHeight - rect.height);
-        const top = Math.min(Math.max(rect.top, 0), maxTop);
-        dashboard.style.bottom = "auto";
-        dashboard.style.top = `${top}px`;
-        dashboard.style.right = "20px";
+        const left = Math.min(Math.max(requestedX, 0), maxLeft);
+        const top = Math.min(Math.max(requestedY, 0), maxTop);
         dashboard.style.left = "auto";
+        dashboard.style.right = "auto";
+        dashboard.style.top = "auto";
+        dashboard.style.bottom = "auto";
+        if (edge === "left") {
+            dashboard.style.left = "0";
+            dashboard.style.top = `${top}px`;
+        } else if (edge === "right") {
+            dashboard.style.right = "0";
+            dashboard.style.top = `${top}px`;
+        } else if (edge === "top") {
+            dashboard.style.top = "0";
+            dashboard.style.left = `${left}px`;
+        } else {
+            dashboard.style.bottom = "0";
+            dashboard.style.left = `${left}px`;
+        }
+        updateWidgetResizeHandle(edge);
+    }
+
+    function getNearestWidgetEdge(rect) {
+        const distances = {
+            left: Math.max(0, rect.left),
+            right: Math.max(0, window.innerWidth - rect.right),
+            top: Math.max(0, rect.top),
+            bottom: Math.max(0, window.innerHeight - rect.bottom)
+        };
+        return Object.entries(distances).sort((a, b) => a[1] - b[1])[0][0];
+    }
+
+    function clampWidgetTop() {
+        applyWidgetPosition();
     }
 
     function applyCurrentWidgetSize() {
@@ -3992,7 +4113,7 @@
         dashboard.style.maxHeight = `${limits.maxHeight}px`;
         dashboard.style.width = `${size.width}px`;
         dashboard.style.height = `${size.height}px`;
-        clampWidgetTop();
+        applyWidgetPosition();
     }
 
     function applyWidgetView() {
@@ -4023,6 +4144,7 @@
             title.style.letterSpacing = "0.06em";
             toggleBtn.style.display = "none";
             dashboard.title = "Naughty Torn Companion — click to restore";
+            applyWidgetPosition();
         } else {
             widgetBody.style.display = "flex";
             widgetBody.style.flexDirection = "column";
@@ -4148,6 +4270,11 @@
                     border-color: #cbd5e1 !important;
                     color: #334155 !important;
                 }
+                #torn-v2-inventory-wrapper[data-theme="light"] .ntc-war-ff-range button {
+                    background: #e2e8f0 !important;
+                    border-color: #94a3b8 !important;
+                    color: #334155 !important;
+                }
                 #torn-v2-inventory-wrapper[data-theme="light"] .ntc-war-filter-heading {
                     color: #172033 !important;
                 }
@@ -4234,12 +4361,26 @@
                 #widget-resize-handle::after {
                     content: "";
                     position: absolute;
-                    left: 4px;
-                    bottom: 4px;
                     width: 9px;
                     height: 9px;
+                }
+                #widget-resize-handle[data-corner="bottom-left"]::after {
+                    left: 4px;
+                    bottom: 4px;
                     border-left: 2px solid #777;
                     border-bottom: 2px solid #777;
+                }
+                #widget-resize-handle[data-corner="bottom-right"]::after {
+                    right: 4px;
+                    bottom: 4px;
+                    border-right: 2px solid #777;
+                    border-bottom: 2px solid #777;
+                }
+                #widget-resize-handle[data-corner="top-right"]::after {
+                    right: 4px;
+                    top: 4px;
+                    border-right: 2px solid #777;
+                    border-top: 2px solid #777;
                 }
             </style>
             <div id="widget-drag-handle" style="background-color: #2c2c2c; padding: 8px 10px; display: flex; justify-content: space-between; align-items: center; cursor: move; border-bottom: 1px solid #444; user-select: none;">
@@ -4251,7 +4392,7 @@
                 <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px;">${navHtml}</div>
                 <div id="torn-companion-content" style="display: grid; gap: 8px; color: #fff; font-size: 11px;"></div>
             </div>
-            <div id="widget-resize-handle" title="Resize this tab" style="position: absolute; left: 0; bottom: 0; width: 20px; height: 20px; cursor: nesw-resize; z-index: 4; touch-action: none;"></div>
+            <div id="widget-resize-handle" data-corner="bottom-left" title="Resize this tab" style="position:absolute;left:0;bottom:0;width:20px;height:20px;cursor:nesw-resize;z-index:4;touch-action:none;"></div>
         `;
 
         document.body.appendChild(dashboard);
@@ -4259,15 +4400,7 @@
         applyDashboardTheme();
         applyWidgetView();
 
-        const savedPos = getStoredPosition();
-        if (savedPos && typeof savedPos.top === "number") {
-            const maxTop = Math.max(0, window.innerHeight - dashboard.offsetHeight);
-            const clampedTop = Math.min(Math.max(savedPos.top, 0), maxTop);
-            dashboard.style.bottom = "auto";
-            dashboard.style.right = "20px";
-            dashboard.style.left = "auto";
-            dashboard.style.top = `${clampedTop}px`;
-        }
+        applyWidgetPosition();
 
         const toggleBtn = document.getElementById("widget-toggle-view-btn");
         toggleBtn.addEventListener("click", (e) => {
@@ -4281,6 +4414,7 @@
         const dragHandle = document.getElementById("widget-drag-handle");
         let isDragging = false;
         let didDrag = false;
+        let offsetX;
         let offsetY;
 
         dragHandle.addEventListener("mousedown", (e) => {
@@ -4288,25 +4422,32 @@
             isDragging = true;
             didDrag = false;
             const rect = dashboard.getBoundingClientRect();
+            offsetX = e.clientX - rect.left;
             offsetY = e.clientY - rect.top;
             dashboard.style.bottom = "auto";
-            dashboard.style.right = "20px";
-            dashboard.style.left = "auto";
+            dashboard.style.right = "auto";
+            dashboard.style.left = `${rect.left}px`;
             dashboard.style.top = `${rect.top}px`;
         });
 
         document.addEventListener("mousemove", (e) => {
             if (!isDragging) return;
             didDrag = true;
+            const maxLeft = Math.max(0, window.innerWidth - dashboard.offsetWidth);
             const maxTop = Math.max(0, window.innerHeight - dashboard.offsetHeight);
+            const left = Math.min(Math.max(e.clientX - offsetX, 0), maxLeft);
             const top = Math.min(Math.max(e.clientY - offsetY, 0), maxTop);
+            dashboard.style.left = `${left}px`;
             dashboard.style.top = `${top}px`;
         });
 
         document.addEventListener("mouseup", () => {
             if (isDragging) {
                 const rect = dashboard.getBoundingClientRect();
-                setStoredPosition({ top: rect.top });
+                const edge = getNearestWidgetEdge(rect);
+                const position = { edge, x: rect.left, y: rect.top };
+                setStoredPosition(position);
+                applyWidgetPosition(position);
             }
             isDragging = false;
         });
@@ -4324,6 +4465,7 @@
         let resizeStartY = 0;
         let resizeStartWidth = 0;
         let resizeStartHeight = 0;
+        let resizeEdge = "right";
 
         resizeHandle.addEventListener("mousedown", (e) => {
             if (state.isMinimized) return;
@@ -4335,18 +4477,20 @@
             resizeStartY = e.clientY;
             resizeStartWidth = rect.width;
             resizeStartHeight = rect.height;
+            resizeEdge = getWidgetEdge();
             document.body.style.userSelect = "none";
         });
 
         document.addEventListener("mousemove", (e) => {
             if (!isResizing) return;
             const limits = getWidgetSizeLimits();
-            const rect = dashboard.getBoundingClientRect();
-            const width = Math.min(limits.maxWidth, Math.max(limits.minWidth, resizeStartWidth + resizeStartX - e.clientX));
-            const availableHeight = Math.max(limits.minHeight, window.innerHeight - rect.top);
-            const height = Math.min(limits.maxHeight, availableHeight, Math.max(limits.minHeight, resizeStartHeight + e.clientY - resizeStartY));
+            const widthDelta = resizeEdge === "right" ? resizeStartX - e.clientX : e.clientX - resizeStartX;
+            const heightDelta = resizeEdge === "bottom" ? resizeStartY - e.clientY : e.clientY - resizeStartY;
+            const width = Math.min(limits.maxWidth, Math.max(limits.minWidth, resizeStartWidth + widthDelta));
+            const height = Math.min(limits.maxHeight, Math.max(limits.minHeight, resizeStartHeight + heightDelta));
             dashboard.style.width = `${width}px`;
             dashboard.style.height = `${height}px`;
+            applyWidgetPosition();
         });
 
         document.addEventListener("mouseup", () => {
@@ -4355,7 +4499,7 @@
             document.body.style.userSelect = "";
             const rect = dashboard.getBoundingClientRect();
             storeCurrentWidgetSize(rect.width, rect.height);
-            setStoredPosition({ top: rect.top });
+            setStoredPosition({ edge: resizeEdge, x: rect.left, y: rect.top });
         });
 
         let viewportResizeSaveTimer = null;
@@ -4369,7 +4513,8 @@
             viewportResizeSaveTimer = setTimeout(() => {
                 const rect = dashboard.getBoundingClientRect();
                 storeCurrentWidgetSize(rect.width, rect.height);
-                setStoredPosition({ top: rect.top });
+                const edge = getWidgetEdge();
+                setStoredPosition({ edge, x: rect.left, y: rect.top });
             }, 150);
         });
 

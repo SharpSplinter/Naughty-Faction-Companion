@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.19.1
+// @version      5.19.7
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -1542,21 +1542,35 @@
         setSectionStatus("activity", "Refreshing...");
         debugLog("Fetching activity data");
         try {
-            const [notificationsResponse, userLogResponse, eventsResponse, tradesResponse, racingCarsResponse, racingTracksResponse] = await Promise.all([
+            const [notificationsResponse, userLogResponse, eventsResponse, tradesResponse, racingCarsResponse, racingTracksResponse, propertiesResponse] = await Promise.all([
                 fetchJson(withKey(`${BASE_URL}user/notifications`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/log`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}user/events`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}user/events`, apiKey, { striptags: false })).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/trades`, apiKey, { cat: "ongoing" })).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}racing/cars`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}racing/tracks`, apiKey)).catch(() => null)
+                fetchJson(withKey(`${BASE_URL}racing/tracks`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}torn/properties`, apiKey)).catch(() => null)
             ]);
+            const userLog = userLogResponse?.log || userLogResponse || {};
+            const logEntries = Array.isArray(userLog) ? userLog : (Array.isArray(userLog.log) ? userLog.log : []);
+            const userIds = [...new Set(logEntries.slice(0, 4)
+                .flatMap((entry) => [entry?.data?.user, entry?.params?.user])
+                .map(Number)
+                .filter((id) => Number.isInteger(id) && id > 0))];
+            const userProfiles = await Promise.all(userIds.map(async (id) => {
+                const response = await fetchJson(withKey(`${BASE_URL}user/${id}/profile`, apiKey)).catch(() => null);
+                const profile = response?.profile || response;
+                return [String(id), profile?.name || ""];
+            }));
             const result = {
                 notifications: notificationsResponse?.notifications || notificationsResponse || {},
-                userLog: userLogResponse?.log || userLogResponse || {},
+                userLog,
                 events: eventsResponse?.events || eventsResponse || {},
                 trades: tradesResponse?.trades || tradesResponse || [],
                 carNames: buildRacingNameMap(racingCarsResponse, "cars", ["name", "title"]),
-                trackNames: buildRacingNameMap(racingTracksResponse, "tracks", ["title", "name"])
+                trackNames: buildRacingNameMap(racingTracksResponse, "tracks", ["title", "name"]),
+                propertyNames: buildRacingNameMap(propertiesResponse, "properties", ["name", "title"]),
+                userNames: Object.fromEntries(userProfiles.filter(([, name]) => name))
             };
             setSectionStatus("activity", "Updated");
             markSectionRefreshed("activity");
@@ -2556,7 +2570,7 @@
         }).join("");
 
         return `
-            <div style="display:grid;gap:9px;">
+            <div class="ntc-ffscouter-layout" style="display:flex;flex-direction:column;gap:9px;min-height:0;height:100%;">
                 <div style="border:1px solid #343a43;border-radius:8px;padding:10px;background:rgba(20,20,20,.72);display:grid;gap:8px;">
                     <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap;">
                         <div><div style="color:#fff;font-size:13px;font-weight:850;">${escapeHtml(war.oppTag)} War Targets</div><div style="color:#929eac;font-size:10px;margin-top:2px;">${targets.length} members · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div><div style="color:#697582;font-size:9px;margin-top:3px;">Drag ⠿ to reorder columns · drag a header's right edge to resize</div></div>
@@ -2565,7 +2579,7 @@
                     <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;">${buildStatCard("Online / Idle", onlineCount, "Live Torn status", "#7fe18d")}${buildStatCard("Healthy", okayCount, "Status: Okay", "#5ba7f7")}${buildStatCard("Estimates", `${estimatedCount} / ${targets.length}`, rateLimit, "#c9a0ff")}</div>
                     ${notices.map((notice) => `<div style="color:#e0a25e;font-size:10px;line-height:1.4;">⚠ ${escapeHtml(notice)}</div>`).join("")}
                 </div>
-                <div class="ntc-war-target-table-wrap" style="width:100%;min-width:0;border:1px solid #343a43;border-radius:8px;overflow:auto;max-height:430px;background:rgba(15,15,15,.78);">
+                <div class="ntc-war-target-table-wrap" style="width:100%;min-width:0;min-height:160px;flex:1 1 auto;border:1px solid #343a43;border-radius:8px;overflow:auto;background:rgba(15,15,15,.78);">
                     <table class="ntc-war-target-table" style="width:max-content;min-width:100%;max-width:none;border-collapse:collapse;font-size:10px;table-layout:fixed;">
                         <colgroup>${columnOrder.map((key) => `<col data-war-column="${key}" style="width:${Math.max(WAR_TARGET_COLUMNS[key].minWidth, Number(state.warTargetColumnWidths[key]) || WAR_TARGET_COLUMNS[key].minWidth)}px;">`).join("")}</colgroup>
                         <thead style="position:sticky;top:0;z-index:2;background:#252b33;color:#dce2e9;text-align:left;"><tr>${columnOrder.map(renderWarTargetSortHeader).join("")}</tr></thead>
@@ -2710,6 +2724,45 @@
             .replace(/\b\w/g, (letter) => letter.toUpperCase());
     }
 
+    function safeApiEntryUrl(value) {
+        if (!value) return "";
+        try {
+            const url = new URL(String(value), "https://www.torn.com/");
+            return ["http:", "https:"].includes(url.protocol) ? url.href : "";
+        } catch (_) {
+            return "";
+        }
+    }
+
+    function apiEntryPlainText(value) {
+        if (!value) return "";
+        const template = document.createElement("template");
+        template.innerHTML = String(value);
+        return template.content.textContent || "";
+    }
+
+    function renderApiEntryHtml(value) {
+        if (!value) return "";
+        const template = document.createElement("template");
+        template.innerHTML = String(value);
+        const renderNode = (node) => {
+            if (node.nodeType === 3) return escapeHtml(node.textContent || "");
+            if (node.nodeType !== 1) return "";
+            const content = [...node.childNodes].map(renderNode).join("");
+            const tag = node.tagName.toLowerCase();
+            if (tag === "a") {
+                const href = safeApiEntryUrl(node.getAttribute("href"));
+                return href
+                    ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" style="color:#70b7ff;text-decoration:underline;font-weight:700;">${content}</a>`
+                    : content;
+            }
+            if (["b", "strong"].includes(tag)) return `<strong>${content}</strong>`;
+            if (tag === "br") return "<br>";
+            return content;
+        };
+        return [...template.content.childNodes].map(renderNode).join("");
+    }
+
     function isCurrencyLogField(key, context = {}) {
         const normalizedKey = String(key || "").toLowerCase().replace(/[^a-z]/g, "");
         const contextText = [
@@ -2721,14 +2774,15 @@
         const directCurrencyFields = new Set([
             "amount", "balance", "deposited", "withdrawn", "deposit", "withdrawal",
             "money", "cash", "wallet", "vault", "bank", "price", "profit", "fee",
-            "payment", "refund", "winnings", "salary", "income", "interest"
+            "payment", "refund", "winnings", "salary", "income", "interest",
+            "upkeeppaid", "upkeepdue", "outcome"
         ]);
         return directCurrencyFields.has(normalizedKey)
             || /(vault|bank|money|cash|casino|lottery|bazaar|market|stock|property)/.test(contextText)
                 && /(amount|balance|cost|price|value|profit|fee|payment|reward|income|wage|salary)/.test(normalizedKey);
     }
 
-    function summarizeLogPayload(payload, context, carNames = {}, trackNames = {}) {
+    function summarizeLogPayload(payload, context, carNames = {}, trackNames = {}, propertyNames = {}, userNames = {}) {
         if (!payload || typeof payload !== "object") return "";
         const values = Object.entries(payload)
             .filter(([, value]) => value !== null && value !== undefined && value !== "" && typeof value !== "object")
@@ -2737,12 +2791,18 @@
                 const number = Number(value);
                 const isRacing = /racing/.test(`${context?.details?.category || ""} ${context?.details?.title || ""}`.toLowerCase());
                 const normalizedKey = String(key).toLowerCase();
+                const propertyName = normalizedKey === "property" ? propertyNames[String(value)] : "";
+                const userName = normalizedKey === "user" ? userNames[String(value)] : "";
                 const racingName = isRacing && normalizedKey === "car"
                     ? carNames[String(value)]
                     : isRacing && normalizedKey === "track"
                         ? trackNames[String(value)]
                         : "";
-                const formattedValue = racingName
+                const formattedValue = propertyName
+                    ? propertyName
+                    : userName
+                    ? userName
+                    : racingName
                     ? racingName
                     : Number.isFinite(number)
                     ? (isCurrencyLogField(key, context) ? formatMoney(number) : formatInteger(number))
@@ -2760,12 +2820,13 @@
         const trades = Array.isArray(activity.trades) ? activity.trades : [];
         const carNames = activity.carNames || {};
         const trackNames = activity.trackNames || {};
+        const propertyNames = activity.propertyNames || {};
+        const userNames = activity.userNames || {};
 
         const notificationLabels = {
             messages: { icon: "✉", label: "Messages", detail: "Unread messages waiting for you" },
             events: { icon: "⚡", label: "Events", detail: "New events in your activity feed" },
-            awards: { icon: "★", label: "Awards", detail: "New medals or honors earned" },
-            competition: { icon: "🏁", label: "Competition", detail: "Competition updates need your attention" }
+            awards: { icon: "★", label: "Awards", detail: "New medals or honors earned" }
         };
         const notificationList = Object.entries(notificationLabels)
             .map(([key, config]) => {
@@ -2779,23 +2840,30 @@
 
         const logList = Array.isArray(log) ? log.slice(0, 4).map((item) => ({
             text: `${humanizeActivityKey(item?.details?.category || "Activity")} · ${item?.details?.title || item?.data?.text || item?.event || "Log update"}`,
+            url: item?.url || item?.link || item?.href || "",
             timestamp: item?.timestamp,
-            detail: summarizeLogPayload(item?.data, item, carNames, trackNames) || summarizeLogPayload(item?.params, item, carNames, trackNames) || "Recorded in your personal activity log"
+            detail: summarizeLogPayload(item?.data, item, carNames, trackNames, propertyNames, userNames) || summarizeLogPayload(item?.params, item, carNames, trackNames, propertyNames, userNames) || "Recorded in your personal activity log"
         })) : (Array.isArray(log.log) ? log.log.slice(0, 4).map((item) => ({
             text: `${humanizeActivityKey(item?.details?.category || "Activity")} · ${item?.details?.title || item?.data?.text || item?.event || "Log update"}`,
+            url: item?.url || item?.link || item?.href || "",
             timestamp: item?.timestamp,
-            detail: summarizeLogPayload(item?.data, item, carNames, trackNames) || summarizeLogPayload(item?.params, item, carNames, trackNames) || "Recorded in your personal activity log"
+            detail: summarizeLogPayload(item?.data, item, carNames, trackNames, propertyNames, userNames) || summarizeLogPayload(item?.params, item, carNames, trackNames, propertyNames, userNames) || "Recorded in your personal activity log"
         })) : []);
 
         const eventList = Array.isArray(events) ? events.slice(0, 4).map((item) => ({
-            text: item?.event || item?.text || item?.title || "Event update",
+            text: apiEntryPlainText(item?.event || item?.text || item?.title) || "Event update",
+            html: item?.event || item?.text || "",
+            url: item?.url || item?.link || item?.href || "",
             timestamp: item?.timestamp
         })) : (Array.isArray(events.events) ? events.events.slice(0, 4).map((item) => ({
-            text: item?.event || item?.text || item?.title || "Event update",
+            text: apiEntryPlainText(item?.event || item?.text || item?.title) || "Event update",
+            html: item?.event || item?.text || "",
+            url: item?.url || item?.link || item?.href || "",
             timestamp: item?.timestamp
         })) : []);
         const tradeList = trades.slice(0, 4).map((trade) => ({
             text: `Trade #${trade.id || "—"} with ${trade.trader?.name || trade.user?.name || "Unknown player"}`,
+            url: trade?.url || trade?.link || trade?.href || "",
             timestamp: trade.modified_at || trade.expires_at,
             detail: trade.expires_at ? "" : "Ongoing",
             expiresAt: Number(trade.expires_at || 0)
@@ -2820,7 +2888,13 @@
             const detail = expiresAt
                 ? `<div style="color: #888; font-size: 10px; margin-top: 3px;"><span data-countdown-type="trade" data-until-ms="${expiresAt * 1000}">${escapeHtml(formatTimeUntil(expiresAt))}</span></div>`
                 : (item?.detail ? `<div style="color: #888; font-size: 10px; margin-top: 3px;">${escapeHtml(item.detail)}</div>` : "");
-            return `<div style="padding: 8px 10px; border: 1px solid #2d2d2d; border-radius: 6px; background: rgba(255,255,255,0.02); color: #ddd; font-size: 11px;"><div style="display: flex; justify-content: space-between; gap: 8px;"><span>${escapeHtml(text)}</span>${timestamp ? `<span style="color: #888; font-size: 10px; white-space: nowrap;">${timestamp}</span>` : ""}</div>${detail}</div>`;
+            const explicitUrl = safeApiEntryUrl(item?.url || item?.link || item?.href);
+            const renderedText = item?.html
+                ? renderApiEntryHtml(item.html)
+                : explicitUrl
+                    ? `<a href="${escapeHtml(explicitUrl)}" target="_blank" rel="noopener noreferrer" style="color:#70b7ff;text-decoration:underline;font-weight:700;">${escapeHtml(text)}</a>`
+                    : escapeHtml(text);
+            return `<div style="padding: 8px 10px; border: 1px solid #2d2d2d; border-radius: 6px; background: rgba(255,255,255,0.02); color: #ddd; font-size: 11px;"><div style="display: flex; justify-content: space-between; gap: 8px;"><span>${renderedText}</span>${timestamp ? `<span style="color: #888; font-size: 10px; white-space: nowrap;">${timestamp}</span>` : ""}</div>${detail}</div>`;
         }).join("") : `<div style="padding: 8px 10px; border: 1px solid #2d2d2d; border-radius: 6px; background: rgba(255,255,255,0.02); color: #888; font-size: 11px;">No ${title.toLowerCase()} available.</div>`;
 
         return `
@@ -3038,12 +3112,12 @@
 
         return `
             ${renderSectionMeta("inventory", "Inventory")}
-            <div style="display: grid; gap: 8px;">
+            <div class="ntc-inventory-layout" style="display:grid;grid-template-rows:auto minmax(0,1fr);gap:8px;min-height:0;height:100%;">
                 <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">
                     ${buildStatCard("Inventory Items", inventory.totalCount || 0, "Tracked item count", "#7fe18d")}
                     ${buildStatCard("Inventory Value", formatMoney(inventory.totalValue || 0), "Estimated market value", "#85bb65")}
                 </div>
-                <div style="max-height: 260px; overflow-y: auto; border: 1px solid #222; background-color: #151515; border-radius: 3px;">
+                <div class="ntc-inventory-table-wrap" style="min-height:160px;overflow:auto;border:1px solid #222;background-color:#151515;border-radius:3px;">
                     <table style="width: 100%; border-collapse: collapse; text-align: left;">
                         <thead style="position: sticky; top: 0; background-color: #252525; z-index: 10; border-bottom: 1px solid #333;">
                             <tr style="color: #fff; font-size: 11px; font-weight: bold;">
@@ -3514,6 +3588,8 @@
         }
 
         debugLog("Tab render", { previousTab, activeTab: state.currentTab, sectionStatus: state.sectionStatus });
+        contentEl.classList.toggle("ntc-ffscouter-active", state.currentTab === "faction" && state.factionSubTab === "ffscouter");
+        contentEl.classList.toggle("ntc-inventory-active", state.currentTab === "inventory");
         contentEl.innerHTML = innerHtml;
         bindInventoryTableControls();
         bindSettingsControls();
@@ -3978,6 +4054,28 @@
                     container-type: inline-size;
                     min-width: 0;
                     font-size: clamp(10px, 2.4cqi, 12px) !important;
+                }
+                #torn-v2-inventory-wrapper #torn-companion-content.ntc-ffscouter-active {
+                    flex: 1 1 auto;
+                    min-height: 0;
+                    grid-template-rows: auto auto minmax(0, 1fr);
+                }
+                #torn-v2-inventory-wrapper #torn-companion-content.ntc-ffscouter-active .ntc-ffscouter-layout {
+                    min-height: 0;
+                    height: 100%;
+                }
+                #torn-v2-inventory-wrapper #torn-companion-content.ntc-inventory-active {
+                    flex: 1 1 auto;
+                    min-height: 0;
+                    grid-template-rows: auto minmax(0, 1fr);
+                }
+                #torn-v2-inventory-wrapper #torn-companion-content.ntc-inventory-active .ntc-inventory-layout {
+                    min-height: 0;
+                    height: 100%;
+                }
+                #torn-v2-inventory-wrapper #torn-companion-content.ntc-inventory-active .ntc-inventory-table-wrap {
+                    min-height: 160px;
+                    height: 100%;
                 }
                 #torn-v2-inventory-wrapper #torn-companion-content *,
                 #torn-v2-inventory-wrapper #widget-main-body > * {

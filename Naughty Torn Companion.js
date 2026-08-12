@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.16.1
+// @version      5.17.0
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -99,6 +99,7 @@
         personalSubTab: "info",
         theme: "dark",
         isMinimized: false,
+        windowSizes: {},
         companyStockHistory: {},
         networthTracking: { official: null, history: [] },
         apiKey: "",
@@ -247,7 +248,8 @@
         settingsSubTab: state.settingsSubTab,
         personalSubTab: state.personalSubTab,
         theme: state.theme,
-        isMinimized: state.isMinimized
+        isMinimized: state.isMinimized,
+        windowSizes: state.windowSizes
     });
     const setStoredDashboardState = (payload) => {
         if (payload && payload.currentTab) state.currentTab = payload.currentTab;
@@ -257,6 +259,7 @@
         if (payload && payload.personalSubTab) state.personalSubTab = payload.personalSubTab;
         if (payload && ["light", "dark"].includes(payload.theme)) state.theme = payload.theme;
         if (payload && typeof payload.isMinimized === "boolean") state.isMinimized = payload.isMinimized;
+        if (payload && payload.windowSizes && typeof payload.windowSizes === "object") state.windowSizes = payload.windowSizes;
         void gmSetValue(APP_STORAGE.dashboard, getStoredDashboardState());
     };
 
@@ -440,6 +443,9 @@
         state.personalSubTab = dashboardState.personalSubTab || state.personalSubTab;
         state.theme = ["light", "dark"].includes(dashboardState.theme) ? dashboardState.theme : state.theme;
         state.isMinimized = dashboardState.isMinimized === true;
+        state.windowSizes = dashboardState.windowSizes && typeof dashboardState.windowSizes === "object"
+            ? dashboardState.windowSizes
+            : {};
 
         const sectionNames = Object.keys(APP_STORAGE.sections);
         await Promise.all(sectionNames.map(async (name) => {
@@ -3175,8 +3181,10 @@
             button.onclick = () => {
                 const tabKey = button.getAttribute("data-settings-subtab");
                 if (tabKey) {
+                    captureCurrentWidgetSize(false);
                     state.settingsSubTab = tabKey;
-                    setStoredDashboardState({ settingsSubTab: tabKey });
+                    setStoredDashboardState({ settingsSubTab: tabKey, windowSizes: state.windowSizes });
+                    applyCurrentWidgetSize();
                     debugLog("Settings subtab changed", { tabKey });
                     renderTabContent();
                 }
@@ -3213,8 +3221,10 @@
             button.onclick = () => {
                 const subTab = button.getAttribute("data-personal-subtab");
                 if (!subTab || subTab === state.personalSubTab) return;
+                captureCurrentWidgetSize(false);
                 state.personalSubTab = subTab;
-                setStoredDashboardState({ personalSubTab: subTab });
+                setStoredDashboardState({ personalSubTab: subTab, windowSizes: state.windowSizes });
+                applyCurrentWidgetSize();
                 renderTabContent();
             };
         });
@@ -3271,8 +3281,10 @@
             button.onclick = () => {
                 const subTab = button.getAttribute("data-faction-subtab");
                 if (!subTab || subTab === state.factionSubTab) return;
+                captureCurrentWidgetSize(false);
                 state.factionSubTab = subTab;
-                setStoredDashboardState({ factionSubTab: subTab });
+                setStoredDashboardState({ factionSubTab: subTab, windowSizes: state.windowSizes });
+                applyCurrentWidgetSize();
                 renderTabContent();
                 if (subTab === "ffscouter") void refreshWarTargets(false);
             };
@@ -3317,8 +3329,10 @@
             button.onclick = () => {
                 const subTab = button.getAttribute("data-overview-subtab");
                 if (!subTab || subTab === state.overviewSubTab) return;
+                captureCurrentWidgetSize(false);
                 state.overviewSubTab = subTab;
-                setStoredDashboardState({ overviewSubTab: subTab });
+                setStoredDashboardState({ overviewSubTab: subTab, windowSizes: state.windowSizes });
+                applyCurrentWidgetSize();
                 renderTabContent();
             };
         });
@@ -3591,6 +3605,79 @@
         dashboard.style.boxShadow = isLight ? "0 6px 22px rgba(15,23,42,0.18)" : "0 6px 22px rgba(0,0,0,0.6)";
     }
 
+    const getWidgetSizeLimits = () => {
+        const maxWidth = Math.max(120, window.innerWidth - 40);
+        const maxHeight = Math.max(120, window.innerHeight - 20);
+        return {
+            minWidth: Math.min(340, maxWidth),
+            minHeight: Math.min(280, maxHeight),
+            maxWidth,
+            maxHeight
+        };
+    };
+
+    function normalizeWidgetSize(size = {}) {
+        const limits = getWidgetSizeLimits();
+        const defaultHeight = Math.min(720, Math.round(window.innerHeight * 0.8));
+        const width = Number(size.width);
+        const height = Number(size.height);
+        return {
+            width: Math.min(limits.maxWidth, Math.max(limits.minWidth, Number.isFinite(width) ? width : 480)),
+            height: Math.min(limits.maxHeight, Math.max(limits.minHeight, Number.isFinite(height) ? height : defaultHeight))
+        };
+    }
+
+    function getWidgetLayoutKey() {
+        if (state.currentTab === "overview") return `overview:${state.overviewSubTab}`;
+        if (state.currentTab === "personal") return `personal:${state.personalSubTab}`;
+        if (state.currentTab === "faction") return `faction:${state.factionSubTab}`;
+        if (state.currentTab === "settings") return `settings:${state.settingsSubTab}`;
+        return state.currentTab;
+    }
+
+    function getCurrentWidgetSize() {
+        return normalizeWidgetSize(state.windowSizes[getWidgetLayoutKey()]);
+    }
+
+    function storeCurrentWidgetSize(width, height, persist = true) {
+        if (state.isMinimized) return;
+        const size = normalizeWidgetSize({ width, height });
+        state.windowSizes = { ...state.windowSizes, [getWidgetLayoutKey()]: size };
+        if (persist) setStoredDashboardState({ windowSizes: state.windowSizes });
+    }
+
+    function captureCurrentWidgetSize(persist = true) {
+        if (!state.dashboard || state.isMinimized) return;
+        const rect = state.dashboard.getBoundingClientRect();
+        storeCurrentWidgetSize(rect.width, rect.height, persist);
+    }
+
+    function clampWidgetTop() {
+        const dashboard = state.dashboard;
+        if (!dashboard) return;
+        const rect = dashboard.getBoundingClientRect();
+        const maxTop = Math.max(0, window.innerHeight - rect.height);
+        const top = Math.min(Math.max(rect.top, 0), maxTop);
+        dashboard.style.bottom = "auto";
+        dashboard.style.top = `${top}px`;
+        dashboard.style.right = "20px";
+        dashboard.style.left = "auto";
+    }
+
+    function applyCurrentWidgetSize() {
+        const dashboard = state.dashboard;
+        if (!dashboard || state.isMinimized) return;
+        const limits = getWidgetSizeLimits();
+        const size = getCurrentWidgetSize();
+        dashboard.style.minWidth = `${limits.minWidth}px`;
+        dashboard.style.minHeight = `${limits.minHeight}px`;
+        dashboard.style.maxWidth = `${limits.maxWidth}px`;
+        dashboard.style.maxHeight = `${limits.maxHeight}px`;
+        dashboard.style.width = `${size.width}px`;
+        dashboard.style.height = `${size.height}px`;
+        clampWidgetTop();
+    }
+
     function applyWidgetView() {
         const dashboard = state.dashboard;
         if (!dashboard) return;
@@ -3598,12 +3685,18 @@
         const dragHandle = dashboard.querySelector("#widget-drag-handle");
         const title = dashboard.querySelector("#widget-title");
         const toggleBtn = dashboard.querySelector("#widget-toggle-view-btn");
-        if (!widgetBody || !dragHandle || !title || !toggleBtn) return;
+        const resizeHandle = dashboard.querySelector("#widget-resize-handle");
+        if (!widgetBody || !dragHandle || !title || !toggleBtn || !resizeHandle) return;
 
         if (state.isMinimized) {
             widgetBody.style.display = "none";
             dashboard.style.width = "48px";
+            dashboard.style.height = "36px";
+            dashboard.style.minWidth = "48px";
+            dashboard.style.minHeight = "36px";
+            dashboard.style.maxWidth = "48px";
             dashboard.style.maxHeight = "36px";
+            resizeHandle.style.display = "none";
             dragHandle.style.padding = "0";
             dragHandle.style.height = "36px";
             dragHandle.style.justifyContent = "center";
@@ -3614,11 +3707,13 @@
             toggleBtn.style.display = "none";
             dashboard.title = "Naughty Torn Companion — click to restore";
         } else {
-            widgetBody.style.display = "block";
-            widgetBody.style.maxHeight = "calc(80vh - 37px)";
+            widgetBody.style.display = "flex";
+            widgetBody.style.flexDirection = "column";
+            widgetBody.style.flex = "1 1 auto";
+            widgetBody.style.minHeight = "0";
+            widgetBody.style.maxHeight = "none";
             widgetBody.style.overflowY = "auto";
-            dashboard.style.width = "480px";
-            dashboard.style.maxHeight = "80vh";
+            resizeHandle.style.display = "block";
             dragHandle.style.padding = "8px 10px";
             dragHandle.style.height = "auto";
             dragHandle.style.justifyContent = "space-between";
@@ -3628,6 +3723,7 @@
             toggleBtn.style.display = "block";
             toggleBtn.innerText = "_";
             dashboard.title = "";
+            applyCurrentWidgetSize();
         }
     }
 
@@ -3644,7 +3740,7 @@
         dashboard.style.bottom = "20px";
         dashboard.style.right = "20px";
         dashboard.style.width = "480px";
-        dashboard.style.maxHeight = "80vh";
+        dashboard.style.height = `${Math.min(720, Math.round(window.innerHeight * 0.8))}px`;
         dashboard.style.backgroundColor = "rgba(24, 24, 24, 0.97)";
         dashboard.style.border = "1px solid #3b3b3b";
         dashboard.style.borderRadius = "8px";
@@ -3721,16 +3817,50 @@
                     border-color: #94a3b8 !important;
                     color: #172033 !important;
                 }
+                #torn-v2-inventory-wrapper #torn-companion-content {
+                    container-type: inline-size;
+                    min-width: 0;
+                    font-size: clamp(10px, 2.4cqi, 12px) !important;
+                }
+                #torn-v2-inventory-wrapper #torn-companion-content *,
+                #torn-v2-inventory-wrapper #widget-main-body > * {
+                    box-sizing: border-box;
+                    min-width: 0;
+                    max-width: 100%;
+                    overflow-wrap: anywhere;
+                }
+                #torn-v2-inventory-wrapper #torn-companion-content [style*="grid-template-columns: repeat("] {
+                    grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr)) !important;
+                }
+                #torn-v2-inventory-wrapper #torn-companion-content table {
+                    max-width: 100%;
+                }
+                @container (max-width: 430px) {
+                    #torn-v2-inventory-wrapper #torn-companion-content [style*="grid-template-columns"] {
+                        grid-template-columns: minmax(0, 1fr) !important;
+                    }
+                }
+                #widget-resize-handle::after {
+                    content: "";
+                    position: absolute;
+                    left: 4px;
+                    bottom: 4px;
+                    width: 9px;
+                    height: 9px;
+                    border-left: 2px solid #777;
+                    border-bottom: 2px solid #777;
+                }
             </style>
             <div id="widget-drag-handle" style="background-color: #2c2c2c; padding: 8px 10px; display: flex; justify-content: space-between; align-items: center; cursor: move; border-bottom: 1px solid #444; user-select: none;">
                 <span id="widget-title" style="color: #fff; font-size: 12px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">🧭 Naughty Torn Companion</span>
                 <button id="widget-toggle-view-btn" style="background-color: #444; color: #fff; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 11px;">_</button>
             </div>
 
-            <div id="widget-main-body" style="padding: 10px; box-sizing: border-box; max-height: calc(80vh - 37px); overflow-y: auto; overflow-x: hidden;">
+            <div id="widget-main-body" style="padding: 10px; box-sizing: border-box; flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;">
                 <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px;">${navHtml}</div>
                 <div id="torn-companion-content" style="display: grid; gap: 8px; color: #fff; font-size: 11px;"></div>
             </div>
+            <div id="widget-resize-handle" title="Resize this tab" style="position: absolute; left: 0; bottom: 0; width: 20px; height: 20px; cursor: nesw-resize; z-index: 4; touch-action: none;"></div>
         `;
 
         document.body.appendChild(dashboard);
@@ -3750,8 +3880,9 @@
 
         const toggleBtn = document.getElementById("widget-toggle-view-btn");
         toggleBtn.addEventListener("click", () => {
+            if (!state.isMinimized) captureCurrentWidgetSize(false);
             state.isMinimized = !state.isMinimized;
-            setStoredDashboardState({ isMinimized: state.isMinimized });
+            setStoredDashboardState({ isMinimized: state.isMinimized, windowSizes: state.windowSizes });
             applyWidgetView();
         });
 
@@ -3795,10 +3926,67 @@
             applyWidgetView();
         });
 
+        const resizeHandle = document.getElementById("widget-resize-handle");
+        let isResizing = false;
+        let resizeStartX = 0;
+        let resizeStartY = 0;
+        let resizeStartWidth = 0;
+        let resizeStartHeight = 0;
+
+        resizeHandle.addEventListener("mousedown", (e) => {
+            if (state.isMinimized) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const rect = dashboard.getBoundingClientRect();
+            isResizing = true;
+            resizeStartX = e.clientX;
+            resizeStartY = e.clientY;
+            resizeStartWidth = rect.width;
+            resizeStartHeight = rect.height;
+            document.body.style.userSelect = "none";
+        });
+
+        document.addEventListener("mousemove", (e) => {
+            if (!isResizing) return;
+            const limits = getWidgetSizeLimits();
+            const rect = dashboard.getBoundingClientRect();
+            const width = Math.min(limits.maxWidth, Math.max(limits.minWidth, resizeStartWidth + resizeStartX - e.clientX));
+            const availableHeight = Math.max(limits.minHeight, window.innerHeight - rect.top);
+            const height = Math.min(limits.maxHeight, availableHeight, Math.max(limits.minHeight, resizeStartHeight + e.clientY - resizeStartY));
+            dashboard.style.width = `${width}px`;
+            dashboard.style.height = `${height}px`;
+        });
+
+        document.addEventListener("mouseup", () => {
+            if (!isResizing) return;
+            isResizing = false;
+            document.body.style.userSelect = "";
+            const rect = dashboard.getBoundingClientRect();
+            storeCurrentWidgetSize(rect.width, rect.height);
+            setStoredPosition({ top: rect.top });
+        });
+
+        let viewportResizeSaveTimer = null;
+        window.addEventListener("resize", () => {
+            if (state.isMinimized) {
+                clampWidgetTop();
+                return;
+            }
+            applyCurrentWidgetSize();
+            clearTimeout(viewportResizeSaveTimer);
+            viewportResizeSaveTimer = setTimeout(() => {
+                const rect = dashboard.getBoundingClientRect();
+                storeCurrentWidgetSize(rect.width, rect.height);
+                setStoredPosition({ top: rect.top });
+            }, 150);
+        });
+
         dashboard.querySelectorAll(".torn-companion-tab").forEach((button) => {
             button.addEventListener("click", () => {
+                captureCurrentWidgetSize(false);
                 state.currentTab = button.getAttribute("data-tab");
-                setStoredDashboardState({ currentTab: state.currentTab });
+                setStoredDashboardState({ currentTab: state.currentTab, windowSizes: state.windowSizes });
+                applyCurrentWidgetSize();
                 renderTabContent();
                 dashboard.querySelectorAll(".torn-companion-tab").forEach((tabButton) => {
                     const selected = tabButton.getAttribute("data-tab") === state.currentTab;

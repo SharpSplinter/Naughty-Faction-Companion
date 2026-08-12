@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.14.14
+// @version      5.14.15
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -1410,13 +1410,10 @@
             .flatMap((items) => Array.isArray(items) ? items : [])
             .map((item) => String(item || ""));
         const bonuses = { strength: 0, defense: 0, speed: 0, dexterity: 0 };
-        Object.keys(bonuses).forEach((stat) => {
-            texts.forEach((text) => {
-                const normalized = text.toLowerCase();
-                if (!normalized.includes(stat) || /(gain|training|train|gym|experience)/.test(normalized)) return;
-                const match = normalized.match(/([+-]?\d+(?:\.\d+)?)\s*%/);
-                if (match) bonuses[stat] += Number(match[1]) || 0;
-            });
+        texts.forEach((text) => {
+            const match = text.trim().toLowerCase().match(/^\+?\s*([+-]?\d+(?:\.\d+)?)\s*%\s+passive\s+(strength|defense|speed|dexterity)\s*$/);
+            if (!match) return;
+            bonuses[match[2]] += Number(match[1]) || 0;
         });
         return bonuses;
     }

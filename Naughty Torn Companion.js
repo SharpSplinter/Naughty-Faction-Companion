@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.22.1
+// @version      5.22.2
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -4073,18 +4073,6 @@
         return ["left", "right", "top", "bottom"].includes(edge) ? edge : "right";
     }
 
-    function updateWidgetResizeHandle(edge = getWidgetEdge()) {
-        const handle = state.dashboard?.querySelector("#widget-resize-handle");
-        if (!handle) return;
-        const corner = edge === "right" ? "bottom-left" : edge === "bottom" ? "top-right" : "bottom-right";
-        handle.dataset.corner = corner;
-        handle.style.left = corner.endsWith("left") ? "0" : "auto";
-        handle.style.right = corner.endsWith("right") ? "0" : "auto";
-        handle.style.top = corner.startsWith("top") ? "0" : "auto";
-        handle.style.bottom = corner.startsWith("bottom") ? "0" : "auto";
-        handle.style.cursor = corner === "bottom-left" || corner === "top-right" ? "nesw-resize" : "nwse-resize";
-    }
-
     function applyWidgetPosition(position = getStoredPosition()) {
         const dashboard = state.dashboard;
         if (!dashboard) return;
@@ -4113,7 +4101,6 @@
             dashboard.style.bottom = "0";
             dashboard.style.left = `${left}px`;
         }
-        updateWidgetResizeHandle(edge);
     }
 
     function getNearestWidgetEdge(rect) {
@@ -4151,8 +4138,8 @@
         const dragHandle = dashboard.querySelector("#widget-drag-handle");
         const title = dashboard.querySelector("#widget-title");
         const toggleBtn = dashboard.querySelector("#widget-toggle-view-btn");
-        const resizeHandle = dashboard.querySelector("#widget-resize-handle");
-        if (!widgetBody || !dragHandle || !title || !toggleBtn || !resizeHandle) return;
+        const resizeHandles = dashboard.querySelectorAll(".widget-resize-handle");
+        if (!widgetBody || !dragHandle || !title || !toggleBtn || !resizeHandles.length) return;
 
         if (state.isMinimized) {
             widgetBody.style.display = "none";
@@ -4162,7 +4149,7 @@
             dashboard.style.minHeight = "36px";
             dashboard.style.maxWidth = "48px";
             dashboard.style.maxHeight = "36px";
-            resizeHandle.style.display = "none";
+            resizeHandles.forEach((handle) => { handle.style.display = "none"; });
             dragHandle.style.padding = "0";
             dragHandle.style.height = "36px";
             dragHandle.style.justifyContent = "center";
@@ -4180,7 +4167,7 @@
             widgetBody.style.minHeight = "0";
             widgetBody.style.maxHeight = "none";
             widgetBody.style.overflowY = "auto";
-            resizeHandle.style.display = "block";
+            resizeHandles.forEach((handle) => { handle.style.display = "block"; });
             dragHandle.style.padding = "8px 10px";
             dragHandle.style.height = "auto";
             dragHandle.style.justifyContent = "space-between";
@@ -4386,28 +4373,28 @@
                         grid-template-columns: minmax(0, 1fr) !important;
                     }
                 }
-                #widget-resize-handle::after {
+                .widget-resize-handle::after {
                     content: "";
                     position: absolute;
                     width: 9px;
                     height: 9px;
                 }
-                #widget-resize-handle[data-corner="bottom-left"]::after {
+                .widget-resize-handle[data-corner="bottom-left"]::after {
                     left: 4px;
                     bottom: 4px;
                     border-left: 2px solid #777;
                     border-bottom: 2px solid #777;
                 }
-                #widget-resize-handle[data-corner="bottom-right"]::after {
+                .widget-resize-handle[data-corner="bottom-right"]::after {
                     right: 4px;
                     bottom: 4px;
                     border-right: 2px solid #777;
                     border-bottom: 2px solid #777;
                 }
-                #widget-resize-handle[data-corner="top-right"]::after {
-                    right: 4px;
+                .widget-resize-handle[data-corner="top-left"]::after {
+                    left: 4px;
                     top: 4px;
-                    border-right: 2px solid #777;
+                    border-left: 2px solid #777;
                     border-top: 2px solid #777;
                 }
             </style>
@@ -4420,7 +4407,9 @@
                 <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px;">${navHtml}</div>
                 <div id="torn-companion-content" style="display: grid; gap: 8px; color: #fff; font-size: 11px;"></div>
             </div>
-            <div id="widget-resize-handle" data-corner="bottom-left" title="Resize this tab" style="position:absolute;left:0;bottom:0;width:20px;height:20px;cursor:nesw-resize;z-index:4;touch-action:none;"></div>
+            <div class="widget-resize-handle" data-corner="top-left" title="Resize this tab" style="position:absolute;left:0;top:0;width:20px;height:20px;cursor:nwse-resize;z-index:4;touch-action:none;"></div>
+            <div class="widget-resize-handle" data-corner="bottom-left" title="Resize this tab" style="position:absolute;left:0;bottom:0;width:20px;height:20px;cursor:nesw-resize;z-index:4;touch-action:none;"></div>
+            <div class="widget-resize-handle" data-corner="bottom-right" title="Resize this tab" style="position:absolute;right:0;bottom:0;width:20px;height:20px;cursor:nwse-resize;z-index:4;touch-action:none;"></div>
         `;
 
         document.body.appendChild(dashboard);
@@ -4487,38 +4476,46 @@
             applyWidgetView();
         });
 
-        const resizeHandle = document.getElementById("widget-resize-handle");
+        const resizeHandles = dashboard.querySelectorAll(".widget-resize-handle");
         let isResizing = false;
         let resizeStartX = 0;
         let resizeStartY = 0;
         let resizeStartWidth = 0;
         let resizeStartHeight = 0;
-        let resizeEdge = "right";
+        let resizeCorner = "bottom-left";
+        let resizeStartRect = null;
 
-        resizeHandle.addEventListener("mousedown", (e) => {
+        resizeHandles.forEach((handle) => handle.addEventListener("mousedown", (e) => {
             if (state.isMinimized) return;
             e.preventDefault();
             e.stopPropagation();
-            const rect = dashboard.getBoundingClientRect();
+            resizeStartRect = dashboard.getBoundingClientRect();
             isResizing = true;
             resizeStartX = e.clientX;
             resizeStartY = e.clientY;
-            resizeStartWidth = rect.width;
-            resizeStartHeight = rect.height;
-            resizeEdge = getWidgetEdge();
+            resizeStartWidth = resizeStartRect.width;
+            resizeStartHeight = resizeStartRect.height;
+            resizeCorner = handle.dataset.corner || "bottom-left";
             document.body.style.userSelect = "none";
-        });
+        }));
 
         document.addEventListener("mousemove", (e) => {
             if (!isResizing) return;
             const limits = getWidgetSizeLimits();
-            const widthDelta = resizeEdge === "right" ? resizeStartX - e.clientX : e.clientX - resizeStartX;
-            const heightDelta = resizeEdge === "bottom" ? resizeStartY - e.clientY : e.clientY - resizeStartY;
-            const width = Math.min(limits.maxWidth, Math.max(limits.minWidth, resizeStartWidth + widthDelta));
-            const height = Math.min(limits.maxHeight, Math.max(limits.minHeight, resizeStartHeight + heightDelta));
+            const resizeFromLeft = resizeCorner.endsWith("left");
+            const resizeFromTop = resizeCorner.startsWith("top");
+            const widthDelta = resizeFromLeft ? resizeStartX - e.clientX : e.clientX - resizeStartX;
+            const heightDelta = resizeFromTop ? resizeStartY - e.clientY : e.clientY - resizeStartY;
+            const maxWidth = Math.min(limits.maxWidth, resizeFromLeft ? resizeStartRect.right : window.innerWidth - resizeStartRect.left);
+            const maxHeight = Math.min(limits.maxHeight, resizeFromTop ? resizeStartRect.bottom : window.innerHeight - resizeStartRect.top);
+            const width = Math.min(maxWidth, Math.max(limits.minWidth, resizeStartWidth + widthDelta));
+            const height = Math.min(maxHeight, Math.max(limits.minHeight, resizeStartHeight + heightDelta));
             dashboard.style.width = `${width}px`;
             dashboard.style.height = `${height}px`;
-            applyWidgetPosition();
+            dashboard.style.right = "auto";
+            dashboard.style.bottom = "auto";
+            dashboard.style.left = `${resizeFromLeft ? resizeStartRect.right - width : resizeStartRect.left}px`;
+            dashboard.style.top = `${resizeFromTop ? resizeStartRect.bottom - height : resizeStartRect.top}px`;
         });
 
         document.addEventListener("mouseup", () => {
@@ -4527,7 +4524,9 @@
             document.body.style.userSelect = "";
             const rect = dashboard.getBoundingClientRect();
             storeCurrentWidgetSize(rect.width, rect.height);
-            setStoredPosition({ edge: resizeEdge, x: rect.left, y: rect.top });
+            const position = { edge: getNearestWidgetEdge(rect), x: rect.left, y: rect.top };
+            setStoredPosition(position);
+            applyWidgetPosition(position);
         });
 
         let viewportResizeSaveTimer = null;

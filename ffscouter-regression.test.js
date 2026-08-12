@@ -24,6 +24,12 @@ assert.match(refresh, /warTargets: \{ \.\.\.refreshed, war: \{ \.\.\.war \} \}/,
 assert.doesNotMatch(renderer, /buildStatCard\("Estimates"/, "backend Estimates card must remain hidden");
 assert.match(controls, /input\.onwheel/, "FF range fields must support wheel stepping");
 assert.match(controls, /event\.preventDefault\(\)/, "FF wheel stepping must not scroll the page");
+assert.match(source, /data-corner="top-left"/, "top-left window resize grip must exist");
+assert.match(source, /data-corner="bottom-left"/, "bottom-left window resize grip must exist");
+assert.match(source, /data-corner="bottom-right"/, "bottom-right window resize grip must exist");
+assert.doesNotMatch(source, /data-corner="top-right"/, "top-right corner must remain reserved for Minimize");
+assert.match(source, /resizeCorner\.endsWith\("left"\)/, "corner resize must support both left-side grips");
+assert.match(source, /resizeCorner\.startsWith\("top"\)/, "corner resize must support top-left grip");
 
 const defaults = { okay: true, hospitalized: true, traveling: true, online: true, idle: true, offline: true };
 const targets = [

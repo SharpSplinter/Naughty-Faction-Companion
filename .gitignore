@@ -1,2 +1,5 @@
-### Ignore test files for Chrome console F12
+### Ignore test files
 chrome-consolef12-test.js*
+ffscouter-regression.test.js*
+.env*
+.env.example*

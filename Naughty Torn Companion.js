@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.14.6
+// @version      5.14.7
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -874,6 +874,7 @@
                 const current = getNestedNumber(personalstats, track.path);
                 return {
                     name: track.award.name,
+                    description: track.award.description || "",
                     type: track.type,
                     rarity: track.award.rarity || "Unknown",
                     current,
@@ -1345,31 +1346,46 @@
         return bonuses;
     }
 
-    function renderEffectiveBattleStatsBox(stats, bonuses, total) {
+    function isUnderXanaxInfluence(...sources) {
+        return sources.some((source) => [
+            source?.status?.description,
+            source?.status?.details,
+            source?.status?.reason,
+            source?.status_description,
+            source?.drug_reason,
+            source?.drug?.reason
+        ].some((value) => /under the influence of xanax/i.test(String(value || ""))));
+    }
+
+    function renderEffectiveBattleStatsBox(stats, bonuses, total, hasXanaxDebuff) {
         const labels = { strength: "Strength", defense: "Defense", speed: "Speed", dexterity: "Dexterity" };
         const entries = Object.keys(labels).map((key) => {
             const base = Number(stats[key] || 0);
             const bonus = Number(bonuses[key] || 0);
-            return { label: labels[key], base, bonus, effective: base * (1 + bonus / 100) };
+            const xanaxDebuff = hasXanaxDebuff ? -25 : 0;
+            return { label: labels[key], base, bonus, xanaxDebuff, effective: base * (1 + (bonus + xanaxDebuff) / 100) };
         });
         const rows = entries.map((entry) =>
-            '<div style="display: grid; grid-template-columns: minmax(78px, 1fr) minmax(100px, 1.2fr) minmax(62px, 0.7fr) minmax(100px, 1.2fr); gap: 6px; align-items: center; padding: 4px 0; border-bottom: 1px solid #222;">'
+            '<div style="display: grid; grid-template-columns: minmax(72px, 1fr) minmax(92px, 1.2fr) minmax(54px, 0.7fr) minmax(58px, 0.75fr) minmax(92px, 1.2fr); gap: 6px; align-items: center; padding: 4px 0; border-bottom: 1px solid #222;">'
             + '<span style="color: #d0d0d0; font-size: 12px; font-weight: 600;">' + entry.label + '</span>'
             + '<span style="color: #fff; font-size: 12px; font-weight: 700; text-align: right;">' + formatInteger(entry.base) + '</span>'
             + '<span style="color: #9dd8ff; font-size: 12px; font-weight: 700; text-align: center;">' + (entry.bonus ? '+' + entry.bonus + '%' : '—') + '</span>'
+            + '<span style="color: ' + (entry.xanaxDebuff ? '#e05959' : '#888') + '; font-size: 12px; font-weight: 700; text-align: center;">' + (entry.xanaxDebuff ? '−25%' : '—') + '</span>'
             + '<span style="color: #7fe18d; font-size: 12px; font-weight: 700; text-align: right;">' + formatInteger(entry.effective) + '</span>'
             + '</div>'
         ).join("");
         const effectiveTotal = entries.reduce((sum, entry) => sum + entry.effective, 0);
         return '<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">'
-            + '<div style="color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 6px;">Battle Stats</div>'
-            + '<div style="display: grid; grid-template-columns: minmax(78px, 1fr) minmax(100px, 1.2fr) minmax(62px, 0.7fr) minmax(100px, 1.2fr); gap: 6px; padding-bottom: 4px; color: #888; font-size: 10px; font-weight: 700;">'
-            + '<span>Stat</span><span style="text-align: right;">Battle Stat</span><span style="text-align: center;">Perk</span><span style="text-align: right;">Effective</span></div>'
+            + '<div style="color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 3px;">Battle Stats</div>'
+            + (hasXanaxDebuff ? '<div style="color: #e05959; font-size: 10px; font-weight: 700; margin-bottom: 6px;">Under the influence of Xanax · −25% to all stats</div>' : '')
+            + '<div style="display: grid; grid-template-columns: minmax(72px, 1fr) minmax(92px, 1.2fr) minmax(54px, 0.7fr) minmax(58px, 0.75fr) minmax(92px, 1.2fr); gap: 6px; padding-bottom: 4px; color: #888; font-size: 10px; font-weight: 700;">'
+            + '<span>Stat</span><span style="text-align: right;">Battle Stat</span><span style="text-align: center;">Perk</span><span style="text-align: center;">Xanax</span><span style="text-align: right;">Effective</span></div>'
             + rows
-            + '<div style="display: grid; grid-template-columns: minmax(78px, 1fr) minmax(100px, 1.2fr) minmax(62px, 0.7fr) minmax(100px, 1.2fr); gap: 6px; padding-top: 5px;">'
+            + '<div style="display: grid; grid-template-columns: minmax(72px, 1fr) minmax(92px, 1.2fr) minmax(54px, 0.7fr) minmax(58px, 0.75fr) minmax(92px, 1.2fr); gap: 6px; padding-top: 5px;">'
             + '<span style="color: #d0d0d0; font-size: 12px; font-weight: 700;">Total</span>'
             + '<span style="color: #fff; font-size: 12px; font-weight: 700; text-align: right;">' + formatInteger(total) + '</span>'
             + '<span style="color: #9dd8ff; font-size: 12px; font-weight: 700; text-align: center;">—</span>'
+            + '<span style="color: ' + (hasXanaxDebuff ? '#e05959' : '#888') + '; font-size: 12px; font-weight: 700; text-align: center;">' + (hasXanaxDebuff ? '−25%' : '—') + '</span>'
             + '<span style="color: #7fe18d; font-size: 12px; font-weight: 700; text-align: right;">' + formatInteger(effectiveTotal) + '</span>'
             + '</div></div>';
     }
@@ -1481,8 +1497,11 @@
         ` : "";
 
         const recentHtml = (summary.recent || []).map((item) => `
-            <div style="display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #222;">
-                <span style="color: ${MEDAL_RARITY_COLORS[item.rarity] || "#ccc"}; font-size: 11px;">${escapeHtml(item.name)}</span>
+            <div style="display: flex; justify-content: space-between; gap: 8px; padding: 5px 0; border-bottom: 1px solid #222;">
+                <div style="min-width: 0; flex: 1;">
+                    <div style="color: ${MEDAL_RARITY_COLORS[item.rarity] || "#ccc"}; font-size: 11px; font-weight: 700; overflow-wrap: anywhere;">${escapeHtml(item.name)}</div>
+                    ${item.description ? `<div style="color: #aaa; font-size: 10px; line-height: 1.35; margin-top: 2px; overflow-wrap: anywhere; white-space: normal;">${escapeHtml(item.description)}</div>` : ""}
+                </div>
                 <span style="color: #888; font-size: 10px;">${formatDate(item.timestamp)}</span>
             </div>
         `).join("");
@@ -1512,7 +1531,10 @@
         const rows = (Array.isArray(progress) ? progress : []).map((item) => `
             <div style="padding: 7px 0; border-bottom: 1px solid #222;">
                 <div style="display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px;">
-                    <span style="color: ${MEDAL_RARITY_COLORS[item.rarity] || "#ccc"}; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(item.name)}</span>
+                    <div style="min-width: 0; flex: 1;">
+                        <div style="color: ${MEDAL_RARITY_COLORS[item.rarity] || "#ccc"}; font-size: 11px; font-weight: 700; overflow-wrap: anywhere;">${escapeHtml(item.name)}</div>
+                        ${item.description ? `<div style="color: #aaa; font-size: 10px; line-height: 1.35; margin-top: 2px; overflow-wrap: anywhere; white-space: normal;">${escapeHtml(item.description)}</div>` : ""}
+                    </div>
                     <span style="color: #9dd8ff; font-size: 10px; white-space: nowrap;">${item.percent.toFixed(1)}%</span>
                 </div>
                 <div style="height: 6px; border-radius: 3px; overflow: hidden; background: #222;">
@@ -1560,6 +1582,7 @@
             total: Number(workstats.total ?? 0)
         };
         const battleBonuses = getBattleStatBonuses(perks);
+        const hasXanaxDebuff = isUnderXanaxInfluence(profile, state.caches.overview?.basic, state.caches.overview?.cooldowns);
 
         const playerId = profile.player_id ?? profile.id ?? "-";
         const jobName = job.name || "Unemployed";
@@ -1614,7 +1637,7 @@
             </div>
         `;
 
-        const battleBox = renderEffectiveBattleStatsBox(battleStats, battleBonuses, battleTotal);
+        const battleBox = renderEffectiveBattleStatsBox(battleStats, battleBonuses, battleTotal, hasXanaxDebuff);
 
         const workBox = renderInfoBox("Work Stats", [
             { label: "Manual Labor", value: formatInteger(workStats.manualLabor) },

@@ -66,7 +66,7 @@ Effective battle stats are estimates derived from Torn's reported base stats and
 ### Faction
 
 - **General** displays faction, chain, ranked-war, contribution, news, and member information.
-- **FFScouter** displays the current enemy faction's projected battle stats and Fair Fight values alongside live Torn online, travel, hospital, and location status.
+- **FFScouter** displays the current enemy faction's projected battle stats and Fair Fight values alongside live Torn online, travel, hospital, and location status. Its persisted **Sort & View** controls can independently show or hide Okay, Hospitalized, Abroad/Traveling, Online, Idle, and Offline targets.
 - Select column headers to sort FFScouter targets within their permanent availability groups. Okay targets remain first, hospitalized targets remain second with the nearest release first, and traveling or abroad targets remain last. Drag the header grip to reorder columns and the header edge to resize them.
 - Select a player name to open their profile or **Attack** to open Torn's attack page.
 

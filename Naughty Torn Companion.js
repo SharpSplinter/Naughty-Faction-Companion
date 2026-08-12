@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.20.0
+// @version      5.21.0
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -88,9 +88,19 @@
         activity: 30 * 1000           // 30 sec
     };
 
+    const WAR_TARGET_FILTER_DEFAULTS = {
+        okay: true,
+        hospitalized: true,
+        traveling: true,
+        online: true,
+        idle: true,
+        offline: true
+    };
+
     const state = {
         sortState: { key: "value", direction: "desc" },
         warTargetSort: { key: "status", direction: "asc" },
+        warTargetFilters: { ...WAR_TARGET_FILTER_DEFAULTS },
         warTargetColumnOrder: ["player", "online", "status", "stats", "ff", "attack"],
         warTargetColumnWidths: { player: 112, online: 64, status: 150, stats: 82, ff: 44, attack: 62 },
         warTargetColumnLayoutVersion: 2,
@@ -262,7 +272,8 @@
         windowSizes: state.windowSizes,
         warTargetColumnOrder: state.warTargetColumnOrder,
         warTargetColumnWidths: state.warTargetColumnWidths,
-        warTargetColumnLayoutVersion: state.warTargetColumnLayoutVersion
+        warTargetColumnLayoutVersion: state.warTargetColumnLayoutVersion,
+        warTargetFilters: state.warTargetFilters
     });
     const setStoredDashboardState = (payload) => {
         if (payload && payload.currentTab) state.currentTab = payload.currentTab;
@@ -275,6 +286,12 @@
         if (payload && payload.windowSizes && typeof payload.windowSizes === "object") state.windowSizes = payload.windowSizes;
         if (payload && Array.isArray(payload.warTargetColumnOrder)) state.warTargetColumnOrder = payload.warTargetColumnOrder;
         if (payload && payload.warTargetColumnWidths && typeof payload.warTargetColumnWidths === "object") state.warTargetColumnWidths = payload.warTargetColumnWidths;
+        if (payload && payload.warTargetFilters && typeof payload.warTargetFilters === "object") {
+            state.warTargetFilters = Object.fromEntries(Object.keys(WAR_TARGET_FILTER_DEFAULTS).map((key) => [
+                key,
+                typeof payload.warTargetFilters[key] === "boolean" ? payload.warTargetFilters[key] : true
+            ]));
+        }
         void gmSetValue(APP_STORAGE.dashboard, getStoredDashboardState());
     };
 
@@ -473,6 +490,10 @@
             && dashboardState.warTargetColumnWidths && typeof dashboardState.warTargetColumnWidths === "object"
             ? { ...state.warTargetColumnWidths, ...dashboardState.warTargetColumnWidths }
             : state.warTargetColumnWidths;
+        state.warTargetFilters = Object.fromEntries(Object.keys(WAR_TARGET_FILTER_DEFAULTS).map((key) => [
+            key,
+            typeof dashboardState.warTargetFilters?.[key] === "boolean" ? dashboardState.warTargetFilters[key] : true
+        ]));
 
         const sectionNames = Object.keys(APP_STORAGE.sections);
         await Promise.all(sectionNames.map(async (name) => {
@@ -2471,6 +2492,22 @@
         };
     }
 
+    function getWarTargetFilterKeys(target) {
+        const status = getWarTargetStatus(target);
+        const onlineState = String(target?.lastAction?.status || "").toLowerCase();
+        return {
+            status: status.kind === "hospital" ? "hospitalized" : status.kind === "travel" ? "traveling" : "okay",
+            online: onlineState === "online" ? "online" : onlineState === "idle" ? "idle" : "offline"
+        };
+    }
+
+    function filterWarTargets(targets) {
+        return targets.filter((target) => {
+            const keys = getWarTargetFilterKeys(target);
+            return state.warTargetFilters[keys.status] !== false && state.warTargetFilters[keys.online] !== false;
+        });
+    }
+
     function getWarTargetSortValue(target, key) {
         const online = String(target?.lastAction?.status || "unknown").toLowerCase();
         const health = String(target?.status?.state || "unknown").toLowerCase();
@@ -2565,7 +2602,8 @@
             return `<div style="border:1px solid #654d2d;border-radius:8px;padding:12px;color:#e0a25e;background:rgba(55,38,18,.55);font-size:11px;line-height:1.5;">Add and verify your separate FFScouter-linked Torn API key under <strong>Settings → Integrations</strong> to load projected stats and Fair Fight values.</div>`;
         }
 
-        const targets = sortWarTargets(Array.isArray(data?.targets) ? data.targets : []);
+        const allTargets = Array.isArray(data?.targets) ? data.targets : [];
+        const targets = sortWarTargets(filterWarTargets(allTargets));
         const onlineCount = targets.filter((target) => /^(online|idle)$/i.test(String(target.lastAction?.status || ""))).length;
         const okayCount = targets.filter((target) => getWarTargetStatus(target).kind === "okay").length;
         const estimatedCount = targets.filter((target) => !target.noEstimate && target.battleStats > 0).length;
@@ -2573,6 +2611,18 @@
         const rateLimit = data?.ffLimits ? `${data.ffLimits.remaining}/${data.ffLimits.limit} FFScouter requests remaining` : "FFScouter rate limit unavailable";
         const notices = [data?.error, data?.statsError ? `FFScouter: ${data.statsError}` : "", data?.liveError ? `Live profile batches unavailable; using faction roster status. ${data.liveError}` : ""].filter(Boolean);
         const columnOrder = state.warTargetColumnOrder.filter((key) => WAR_TARGET_COLUMNS[key]);
+        const activeSort = WAR_TARGET_COLUMNS[state.warTargetSort?.key] || WAR_TARGET_COLUMNS.status;
+        const sortDirection = state.warTargetSort?.direction === "desc" ? "Descending" : "Ascending";
+        const filterGroups = [
+            { label: "Status", options: [["okay", "Okay"], ["hospitalized", "Hospitalized"], ["traveling", "Abroad / Traveling"]] },
+            { label: "Activity", options: [["online", "Online"], ["idle", "Idle"], ["offline", "Offline"]] }
+        ];
+        const filterPanel = filterGroups.map((group) => `
+            <div style="display:flex;align-items:center;gap:5px;flex:1 1 230px;min-width:0;flex-wrap:wrap;">
+                <span class="ntc-war-filter-group-label" style="color:#929eac;font-size:9px;font-weight:850;text-transform:uppercase;letter-spacing:.45px;min-width:48px;">${group.label}</span>
+                ${group.options.map(([key, label]) => `<label class="ntc-war-target-filter-option" style="display:inline-flex;align-items:center;gap:4px;border:1px solid #3a424d;border-radius:999px;padding:3px 6px;background:rgba(255,255,255,.035);color:#d7dde5;font-size:9px;font-weight:700;cursor:pointer;white-space:nowrap;"><input data-war-target-filter="${key}" type="checkbox" ${state.warTargetFilters[key] !== false ? "checked" : ""} style="width:12px;height:12px;margin:0;accent-color:#5ba7f7;cursor:pointer;">${label}</label>`).join("")}
+            </div>
+        `).join("");
         const rows = targets.map((target) => {
             const online = String(target.lastAction?.status || "Unknown");
             const onlineColor = online === "Online" ? "#7fe18d" : online === "Idle" ? "#e0a25e" : "#9aa4b2";
@@ -2600,8 +2650,12 @@
             <div class="ntc-ffscouter-layout" style="display:flex;flex-direction:column;gap:9px;min-height:0;height:100%;">
                 <div style="border:1px solid #343a43;border-radius:8px;padding:10px;background:rgba(20,20,20,.72);display:grid;gap:8px;">
                     <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap;">
-                        <div><div style="color:#fff;font-size:13px;font-weight:850;">${escapeHtml(war.oppTag)} War Targets</div><div style="color:#929eac;font-size:10px;margin-top:2px;">${targets.length} members · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div><div style="color:#697582;font-size:9px;margin-top:3px;">Availability: Okay → Hospital (soonest first) → Traveling/Abroad · click headers to sort within groups</div><div style="color:#697582;font-size:9px;margin-top:2px;">Drag ⠿ to reorder columns · drag a header's right edge to resize</div></div>
+                        <div><div style="color:#fff;font-size:13px;font-weight:850;">${escapeHtml(war.oppTag)} War Targets</div><div style="color:#929eac;font-size:10px;margin-top:2px;">${targets.length} shown / ${allTargets.length} members · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div><div style="color:#697582;font-size:9px;margin-top:3px;">Availability: Okay → Hospital (soonest first) → Traveling/Abroad · click headers to sort within groups</div><div style="color:#697582;font-size:9px;margin-top:2px;">Drag ⠿ to reorder columns · drag a header's right edge to resize</div></div>
                         <div style="display:flex;gap:6px;flex-wrap:wrap;"><button id="refresh-war-live-btn" style="background:#3b5998;color:#fff;border:0;border-radius:5px;padding:6px 9px;font-size:10px;cursor:pointer;">Refresh Live Status</button><button id="refresh-war-all-btn" style="background:#2f6f50;color:#fff;border:0;border-radius:5px;padding:6px 9px;font-size:10px;cursor:pointer;">Refresh All Data</button></div>
+                    </div>
+                    <div class="ntc-war-target-filter-panel" style="display:flex;align-items:center;gap:7px 12px;flex-wrap:wrap;border:1px solid #343d48;border-radius:7px;padding:6px 8px;background:rgba(11,15,20,.72);">
+                        <div style="display:grid;gap:1px;flex:0 0 auto;"><span class="ntc-war-filter-heading" style="color:#fff;font-size:10px;font-weight:900;">Sort &amp; View</span><span style="color:#697582;font-size:8px;white-space:nowrap;">${escapeHtml(activeSort.label)} · ${sortDirection}</span></div>
+                        ${filterPanel}
                     </div>
                     <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;">${buildStatCard("Online / Idle", onlineCount, "Live Torn status", "#7fe18d")}${buildStatCard("Healthy", okayCount, "Status: Okay", "#5ba7f7")}${buildStatCard("Estimates", `${estimatedCount} / ${targets.length}`, rateLimit, "#c9a0ff")}</div>
                     ${notices.map((notice) => `<div style="color:#e0a25e;font-size:10px;line-height:1.4;">⚠ ${escapeHtml(notice)}</div>`).join("")}
@@ -2610,7 +2664,7 @@
                     <table class="ntc-war-target-table" style="width:max-content;min-width:100%;max-width:none;border-collapse:collapse;font-size:10px;table-layout:fixed;">
                         <colgroup>${columnOrder.map((key) => `<col data-war-column="${key}" style="width:${Math.max(WAR_TARGET_COLUMNS[key].minWidth, Number(state.warTargetColumnWidths[key]) || WAR_TARGET_COLUMNS[key].minWidth)}px;">`).join("")}</colgroup>
                         <thead style="position:sticky;top:0;z-index:2;background:#252b33;color:#dce2e9;text-align:left;"><tr>${columnOrder.map(renderWarTargetSortHeader).join("")}</tr></thead>
-                        <tbody>${rows || `<tr><td colspan="${columnOrder.length}" style="padding:18px;text-align:center;color:#8f99a5;">${escapeHtml(data?.error || "No targets loaded yet.")}</td></tr>`}</tbody>
+                        <tbody>${rows || `<tr><td colspan="${columnOrder.length}" style="padding:18px;text-align:center;color:#8f99a5;">${escapeHtml(data?.error || (allTargets.length ? "No targets match the current view filters." : "No targets loaded yet."))}</td></tr>`}</tbody>
                     </table>
                 </div>
             </div>
@@ -3443,6 +3497,15 @@
     function bindFactionControls() {
         const contentEl = document.getElementById("torn-companion-content");
         if (!contentEl || state.currentTab !== "faction") return;
+        contentEl.querySelectorAll("[data-war-target-filter]").forEach((input) => {
+            input.onchange = () => {
+                const key = input.getAttribute("data-war-target-filter");
+                if (!(key in WAR_TARGET_FILTER_DEFAULTS)) return;
+                state.warTargetFilters = { ...state.warTargetFilters, [key]: input.checked };
+                setStoredDashboardState({ warTargetFilters: state.warTargetFilters });
+                renderTabContent();
+            };
+        });
         contentEl.querySelectorAll("[data-war-target-sort]").forEach((header) => {
             header.onclick = (event) => {
                 if (event.target.closest("[data-war-column-resize], [data-war-column-drag]")) return;
@@ -4078,6 +4141,18 @@
                 }
                 #torn-v2-inventory-wrapper[data-theme="light"] .ntc-perk-item span:last-child {
                     color: #334155 !important;
+                }
+                #torn-v2-inventory-wrapper[data-theme="light"] .ntc-war-target-filter-panel,
+                #torn-v2-inventory-wrapper[data-theme="light"] .ntc-war-target-filter-option {
+                    background: #f8fafc !important;
+                    border-color: #cbd5e1 !important;
+                    color: #334155 !important;
+                }
+                #torn-v2-inventory-wrapper[data-theme="light"] .ntc-war-filter-heading {
+                    color: #172033 !important;
+                }
+                #torn-v2-inventory-wrapper[data-theme="light"] .ntc-war-filter-group-label {
+                    color: #475569 !important;
                 }
                 #torn-v2-inventory-wrapper #torn-companion-content {
                     container-type: inline-size;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.13.4
+// @version      5.13.7
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -89,6 +89,7 @@
         currentTab: "overview",
         settingsSubTab: "controls",
         personalSubTab: "info",
+        theme: "dark",
         isMinimized: false,
         companyStockHistory: {},
         apiKey: "",
@@ -218,12 +219,14 @@
         currentTab: state.currentTab,
         settingsSubTab: state.settingsSubTab,
         personalSubTab: state.personalSubTab,
+        theme: state.theme,
         isMinimized: state.isMinimized
     });
     const setStoredDashboardState = (payload) => {
         if (payload && payload.currentTab) state.currentTab = payload.currentTab;
         if (payload && payload.settingsSubTab) state.settingsSubTab = payload.settingsSubTab;
         if (payload && payload.personalSubTab) state.personalSubTab = payload.personalSubTab;
+        if (payload && ["light", "dark"].includes(payload.theme)) state.theme = payload.theme;
         if (payload && typeof payload.isMinimized === "boolean") state.isMinimized = payload.isMinimized;
         void gmSetValue(APP_STORAGE.dashboard, getStoredDashboardState());
     };
@@ -321,6 +324,7 @@
         state.currentTab = dashboardState.currentTab || "overview";
         state.settingsSubTab = dashboardState.settingsSubTab || state.settingsSubTab;
         state.personalSubTab = dashboardState.personalSubTab || state.personalSubTab;
+        state.theme = ["light", "dark"].includes(dashboardState.theme) ? dashboardState.theme : state.theme;
         state.isMinimized = dashboardState.isMinimized === true;
 
         const sectionNames = Object.keys(APP_STORAGE.sections);
@@ -757,9 +761,11 @@
     // rarity, as returned by torn/medals or torn/honors) to build a display-ready
     // summary: total earned/available, rarity breakdown, and most recently earned.
     function buildAwardSummary(catalogResponseRaw, earnedResponseRaw, itemLabel) {
-        const catalogRaw = catalogResponseRaw || [];
+        const catalogRaw = Array.isArray(catalogResponseRaw)
+            ? catalogResponseRaw
+            : Object.values(catalogResponseRaw || {});
         const catalog = {};
-        (Array.isArray(catalogRaw) ? catalogRaw : []).forEach((entry) => {
+        catalogRaw.forEach((entry) => {
             catalog[entry.id] = entry;
         });
 
@@ -784,7 +790,7 @@
 
         return {
             totalEarned: earned.length,
-            totalAvailable: Array.isArray(catalogRaw) ? catalogRaw.length : 0,
+            totalAvailable: catalogRaw.length,
             recent: earned.slice(0, 5),
             rarityBreakdown
         };
@@ -807,8 +813,10 @@
     }
 
     function buildAwardProgress(personalstats, medalsCatalogRaw, honorsCatalogRaw, userMedalsRaw, userHonorsRaw) {
-        const medalCatalog = new Map((Array.isArray(medalsCatalogRaw) ? medalsCatalogRaw : []).map((item) => [Number(item.id), item]));
-        const honorCatalog = new Map((Array.isArray(honorsCatalogRaw) ? honorsCatalogRaw : []).map((item) => [Number(item.id), item]));
+        const medalsCatalog = Array.isArray(medalsCatalogRaw) ? medalsCatalogRaw : Object.values(medalsCatalogRaw || {});
+        const honorsCatalog = Array.isArray(honorsCatalogRaw) ? honorsCatalogRaw : Object.values(honorsCatalogRaw || {});
+        const medalCatalog = new Map(medalsCatalog.map((item) => [Number(item.id), item]));
+        const honorCatalog = new Map(honorsCatalog.map((item) => [Number(item.id), item]));
         const earnedMedals = new Set((Array.isArray(userMedalsRaw) ? userMedalsRaw : []).map((item) => Number(item.id)));
         const earnedHonors = new Set((Array.isArray(userHonorsRaw) ? userHonorsRaw : []).map((item) => Number(item.id)));
 
@@ -1489,15 +1497,18 @@
 
         const subTabs = [
             { id: "info", label: "Info" },
-            { id: "skills-perks", label: "Skills/Perks" },
+            { id: "skills-education", label: "Skills/Education" },
+            { id: "perks", label: "Perks" },
             { id: "awards", label: "Awards" }
         ];
         const activeSubTab = subTabs.some((tab) => tab.id === state.personalSubTab) ? state.personalSubTab : "info";
         const subTabButtons = subTabs.map((tab) => `
             <button data-personal-subtab="${tab.id}" style="background: ${activeSubTab === tab.id ? "#3b5998" : "#2a2a2a"}; border: 1px solid #3d3d3d; color: #fff; border-radius: 4px; padding: 6px 8px; font-size: 11px; cursor: pointer; ${activeSubTab === tab.id ? "font-weight: 700;" : ""}">${tab.label}</button>
         `).join("");
-        const subTabContent = activeSubTab === "skills-perks" ? `
+        const subTabContent = activeSubTab === "skills-education" ? `
             ${renderSkillsBox(skills)}
+            ${renderEducationLine(education, currentCourseName)}
+        ` : activeSubTab === "perks" ? `
             ${renderPerksBox(perks)}
         ` : activeSubTab === "awards" ? `
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 8px; align-items: start;">
@@ -1511,7 +1522,6 @@
             ${wealthBox}
             ${battleBox}
             ${workBox}
-            ${renderEducationLine(education, currentCourseName)}
         `;
 
         return `
@@ -1929,6 +1939,11 @@
         const content = currentSubTab === "controls"
             ? `
                 <div style="display: grid; gap: 10px;">
+                    <div style="border: 1px solid #3d3d3d; border-radius: 6px; padding: 10px; display: grid; gap: 7px;">
+                        <div style="color: #fff; font-weight: 700; font-size: 12px;">Appearance</div>
+                        <div style="color: #aaa; font-size: 11px;">Current mode: ${state.theme === "light" ? "Light" : "Dark"}</div>
+                        <button id="theme-toggle-btn" style="background: #3b5998; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Switch to ${state.theme === "light" ? "Dark" : "Light"} Mode</button>
+                    </div>
                     <div style="color: #fff; font-weight: 700; font-size: 12px;">API Key</div>
                     <div style="display: flex; gap: 8px;">
                         <input type="password" id="torn-api-key-input" value="${escapeHtml(getStoredKey())}" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 1; font-size: 11px;" placeholder="Enter Torn API key" />
@@ -2031,6 +2046,7 @@
 
         const saveButton = document.getElementById("save-api-key-btn");
         const fullRefreshButton = document.getElementById("full-refresh-btn");
+        const themeToggleButton = document.getElementById("theme-toggle-btn");
         const apiKeyInput = document.getElementById("torn-api-key-input");
         const status = document.getElementById("fetch-status-bar");
         const exportButtons = contentEl.querySelectorAll("[data-export-section]");
@@ -2053,6 +2069,16 @@
                 debugLog("Full section refresh button clicked");
                 if (status) status.innerText = "Refreshing all sections...";
                 await refreshAllSections();
+            };
+        }
+
+        if (themeToggleButton && !themeToggleButton.dataset.bound) {
+            themeToggleButton.dataset.bound = "true";
+            themeToggleButton.onclick = () => {
+                const theme = state.theme === "dark" ? "light" : "dark";
+                setStoredDashboardState({ theme });
+                applyDashboardTheme();
+                renderTabContent();
             };
         }
 
@@ -2344,6 +2370,16 @@
         state.autoRefreshTimer = setTimeout(performAutoRefreshCycle, 60 * 1000);
     }
 
+    function applyDashboardTheme() {
+        const dashboard = state.dashboard;
+        if (!dashboard) return;
+        const isLight = state.theme === "light";
+        dashboard.dataset.theme = isLight ? "light" : "dark";
+        dashboard.style.backgroundColor = isLight ? "#f8fafc" : "rgba(24, 24, 24, 0.97)";
+        dashboard.style.borderColor = isLight ? "#cbd5e1" : "#3b3b3b";
+        dashboard.style.boxShadow = isLight ? "0 6px 22px rgba(15,23,42,0.18)" : "0 6px 22px rgba(0,0,0,0.6)";
+    }
+
     function applyWidgetView() {
         const dashboard = state.dashboard;
         if (!dashboard) return;
@@ -2423,6 +2459,58 @@
         `).join("");
 
         dashboard.innerHTML = `
+            <style>
+                #torn-v2-inventory-wrapper[data-theme="light"] #widget-drag-handle {
+                    background-color: #e2e8f0 !important;
+                    border-bottom-color: #cbd5e1 !important;
+                }
+                #torn-v2-inventory-wrapper[data-theme="light"] #widget-main-body,
+                #torn-v2-inventory-wrapper[data-theme="light"] #torn-companion-content {
+                    color: #172033 !important;
+                }
+                #torn-v2-inventory-wrapper[data-theme="light"] [style*="rgba(20,20,20"],
+                #torn-v2-inventory-wrapper[data-theme="light"] [style*="rgba(255,255,255,0.02)"],
+                #torn-v2-inventory-wrapper[data-theme="light"] [style*="linear-gradient(180deg"] {
+                    background: #ffffff !important;
+                    border-color: #cbd5e1 !important;
+                }
+                #torn-v2-inventory-wrapper[data-theme="light"] [style*="background-color: #151515"],
+                #torn-v2-inventory-wrapper[data-theme="light"] [style*="background: #111"] {
+                    background-color: #ffffff !important;
+                    border-color: #cbd5e1 !important;
+                }
+                #torn-v2-inventory-wrapper[data-theme="light"] [style*="background-color: #252525"],
+                #torn-v2-inventory-wrapper[data-theme="light"] [style*="background-color: #2c2c2c"],
+                #torn-v2-inventory-wrapper[data-theme="light"] [style*="background: #2a2a2a"] {
+                    background-color: #e2e8f0 !important;
+                    border-color: #cbd5e1 !important;
+                }
+                #torn-v2-inventory-wrapper[data-theme="light"] .torn-companion-tab {
+                    background: #e2e8f0 !important;
+                    border-color: #cbd5e1 !important;
+                    color: #172033 !important;
+                }
+                #torn-v2-inventory-wrapper[data-theme="light"] .torn-companion-tab[style*="#3b5998"] {
+                    background: #3b5998 !important;
+                    color: #ffffff !important;
+                }
+                #torn-v2-inventory-wrapper[data-theme="light"] :not(button)[style*="color: #fff"],
+                #torn-v2-inventory-wrapper[data-theme="light"] :not(button)[style*="color:#fff"] {
+                    color: #172033 !important;
+                }
+                #torn-v2-inventory-wrapper[data-theme="light"] [style*="color: #aaa"],
+                #torn-v2-inventory-wrapper[data-theme="light"] [style*="color: #999"],
+                #torn-v2-inventory-wrapper[data-theme="light"] [style*="color: #888"],
+                #torn-v2-inventory-wrapper[data-theme="light"] [style*="color: #ccc"],
+                #torn-v2-inventory-wrapper[data-theme="light"] [style*="color: #ddd"] {
+                    color: #475569 !important;
+                }
+                #torn-v2-inventory-wrapper[data-theme="light"] input {
+                    background: #ffffff !important;
+                    border-color: #94a3b8 !important;
+                    color: #172033 !important;
+                }
+            </style>
             <div id="widget-drag-handle" style="background-color: #2c2c2c; padding: 8px 10px; display: flex; justify-content: space-between; align-items: center; cursor: move; border-bottom: 1px solid #444; user-select: none;">
                 <span id="widget-title" style="color: #fff; font-size: 12px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">🧭 Naughty Torn Companion</span>
                 <button id="widget-toggle-view-btn" style="background-color: #444; color: #fff; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 11px;">_</button>
@@ -2436,6 +2524,7 @@
 
         document.body.appendChild(dashboard);
         state.dashboard = dashboard;
+        applyDashboardTheme();
         applyWidgetView();
 
         const savedPos = getStoredPosition();

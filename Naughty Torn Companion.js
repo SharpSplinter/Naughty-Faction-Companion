@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.14.11
+// @version      5.14.14
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -87,6 +87,7 @@
         sortState: { key: "value", direction: "desc" },
         expandedCategories: new Set(),
         currentTab: "overview",
+        overviewSubTab: "general",
         settingsSubTab: "controls",
         personalSubTab: "info",
         theme: "dark",
@@ -217,6 +218,7 @@
 
     const getStoredDashboardState = () => ({
         currentTab: state.currentTab,
+        overviewSubTab: state.overviewSubTab,
         settingsSubTab: state.settingsSubTab,
         personalSubTab: state.personalSubTab,
         theme: state.theme,
@@ -224,6 +226,7 @@
     });
     const setStoredDashboardState = (payload) => {
         if (payload && payload.currentTab) state.currentTab = payload.currentTab;
+        if (payload && payload.overviewSubTab) state.overviewSubTab = payload.overviewSubTab;
         if (payload && payload.settingsSubTab) state.settingsSubTab = payload.settingsSubTab;
         if (payload && payload.personalSubTab) state.personalSubTab = payload.personalSubTab;
         if (payload && ["light", "dark"].includes(payload.theme)) state.theme = payload.theme;
@@ -322,6 +325,7 @@
 
         const dashboardState = await gmGetValue(APP_STORAGE.dashboard, { currentTab: "overview" });
         state.currentTab = dashboardState.currentTab || "overview";
+        state.overviewSubTab = dashboardState.overviewSubTab || state.overviewSubTab;
         state.settingsSubTab = dashboardState.settingsSubTab || state.settingsSubTab;
         state.personalSubTab = dashboardState.personalSubTab || state.personalSubTab;
         state.theme = ["light", "dark"].includes(dashboardState.theme) ? dashboardState.theme : state.theme;
@@ -685,7 +689,7 @@
         setSectionStatus("overview", "Refreshing...");
         debugLog("Fetching overview data");
         try {
-            const [basicResponse, moneyResponse, networthResponse, barsResponse, cooldownsResponse, travelResponse] = await Promise.all([
+            const [basicResponse, moneyResponse, networthResponse, barsResponse, cooldownsResponse, travelResponse, iconsResponse] = await Promise.all([
                 fetchJson(withKey(`${BASE_URL}user/basic`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/money`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/networth`, apiKey)).catch(() => null),
@@ -693,7 +697,8 @@
                 fetchJson(withKey(`${BASE_URL}user/cooldowns`, apiKey))
                     .then((data) => ({ data, fetchedAt: Date.now() }))
                     .catch(() => ({ data: null, fetchedAt: Date.now() })),
-                fetchJson(withKey(`${BASE_URL}user/travel`, apiKey)).catch(() => null)
+                fetchJson(withKey(`${BASE_URL}user/travel`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}user/icons`, apiKey)).catch(() => null)
             ]);
 
             const profileResponse = await fetchJson(withKey(`${BASE_URL}user/profile`, apiKey)).catch(() => null);
@@ -710,7 +715,8 @@
                 company: companyResponse?.profile || companyResponse || {},
                 cooldowns: cooldownsResponse?.data?.cooldowns || cooldownsResponse?.data || {},
                 cooldownsFetchedAt: cooldownsResponse?.fetchedAt || Date.now(),
-                travel: travelResponse?.travel || travelResponse || {}
+                travel: travelResponse?.travel || travelResponse || {},
+                icons: iconsResponse?.icons || iconsResponse || []
             };
 
             // user/bars embeds a live chain snapshot directly (bars.chain), so the
@@ -891,7 +897,7 @@
         setSectionStatus("personal", "Refreshing...");
         debugLog("Fetching personal data");
         try {
-            const [profileResponse, skillsResponse, educationResponse, workstatsResponse, battlestatsResponse, perksResponse, jobResponse, moneyResponse, networthResponse, jobpointsResponse, medalsCatalogResponse, userMedalsResponse, honorsCatalogResponse, userHonorsResponse, drugLogResponse, cooldownsResponse] = await Promise.all([
+            const [profileResponse, skillsResponse, educationResponse, workstatsResponse, battlestatsResponse, perksResponse, jobResponse, moneyResponse, networthResponse, jobpointsResponse, medalsCatalogResponse, userMedalsResponse, honorsCatalogResponse, userHonorsResponse, iconsResponse] = await Promise.all([
                 fetchJson(withKey(`${BASE_URL}user/profile`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/skills`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/education`, apiKey)).catch(() => null),
@@ -906,8 +912,7 @@
                 fetchJson(withKey(`${BASE_URL}user/medals`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}torn/honors`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/honors`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}user/log`, apiKey, { cat: 62 })).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}user/cooldowns`, apiKey)).catch(() => null)
+                fetchJson(withKey(`${BASE_URL}user/icons`, apiKey)).catch(() => null)
             ]);
             const personalstatResponses = await Promise.all(
                 ["attacking", "crimes", "drugs", "jail", "hospital"].map((cat) =>
@@ -947,8 +952,7 @@
                 "Honor"
             );
             const personalstats = Object.assign({}, ...personalstatResponses.map((response) => response?.personalstats || response || {}));
-            const drugLogs = drugLogResponse?.log || drugLogResponse || [];
-            const cooldowns = cooldownsResponse?.cooldowns || cooldownsResponse || {};
+            const icons = iconsResponse?.icons || iconsResponse || [];
             const awardProgress = buildAwardProgress(
                 personalstats,
                 medalsCatalogResponse?.medals || medalsCatalogResponse,
@@ -972,7 +976,8 @@
                 medals,
                 honors,
                 awardProgress,
-                xanaxDebuffActive: isActiveXanaxCooldown(drugLogs, cooldowns)
+                xanaxDebuffActive: isActiveXanaxIcon(icons),
+                drugAddictionDebuffPercent: getDrugAddictionDebuffPercent(icons)
             };
             setSectionStatus("personal", "Updated");
             markSectionRefreshed("personal");
@@ -1258,6 +1263,57 @@
         `;
     }
 
+    function formatStatusIconDescription(description) {
+        if (description === null || description === undefined || description === "") return "No description provided.";
+        return escapeHtml(String(description))
+            .replace(/&lt;br\s*\/?&gt;/gi, "<br>")
+            .replace(/&lt;b&gt;/gi, "<strong>")
+            .replace(/&lt;\/b&gt;/gi, "</strong>");
+    }
+
+    function renderStatusIcons(icons) {
+        const entries = normalizeIcons(icons);
+        if (!entries.length) {
+            return `<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 12px; background: rgba(20,20,20,0.7); color: #888; font-size: 11px;">No status icons are currently active.</div>`;
+        }
+
+        const now = Math.floor(Date.now() / 1000);
+        const rows = entries.map((icon) => {
+            const until = icon?.until;
+            const timestamp = Number(until || 0);
+            let expiry = "Until: null · No expiry";
+            let expiryColor = "#9aa4b2";
+            if (until !== null && until !== undefined && until !== "") {
+                const date = Number.isFinite(timestamp) && timestamp > 0 ? new Date(timestamp * 1000).toLocaleString() : "Invalid timestamp";
+                if (timestamp > now) {
+                    expiry = `Until: ${timestamp} · ${date} · ${formatDuration(timestamp - now)} remaining`;
+                    expiryColor = "#7fe18d";
+                } else {
+                    expiry = `Until: ${timestamp} · ${date} · Expired`;
+                    expiryColor = "#e05959";
+                }
+            }
+            return `
+                <div style="border: 1px solid #2f3540; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7);">
+                    <div style="display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; margin-bottom: 5px;">
+                        <div style="color: #fff; font-size: 12px; line-height: 1.3; font-weight: 800; overflow-wrap: anywhere;">${escapeHtml(String(icon?.title || "Untitled Status"))}</div>
+                        <div style="color: #9dd8ff; border: 1px solid #35445a; border-radius: 999px; padding: 2px 6px; font-size: 9px; font-weight: 800; white-space: nowrap;">ID ${escapeHtml(String(icon?.id ?? "—"))}</div>
+                    </div>
+                    <div style="color: #d0d0d0; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; white-space: normal;">${formatStatusIconDescription(icon?.description)}</div>
+                    <div style="color: ${expiryColor}; font-size: 9px; line-height: 1.35; margin-top: 7px; overflow-wrap: anywhere;">${escapeHtml(expiry)}</div>
+                </div>
+            `;
+        }).join("");
+
+        return `
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px;">
+                <div style="color: #fff; font-size: 12px; font-weight: 800;">Active Statuses</div>
+                <div style="color: #9dd8ff; font-size: 10px; font-weight: 700;">${entries.length} total</div>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px;">${rows}</div>
+        `;
+    }
+
     function renderOverviewPanel() {
         const overview = state.caches.overview || {};
         const basic = overview.basic || {};
@@ -1270,6 +1326,7 @@
         const company = overview.company || {};
         const cooldowns = overview.cooldowns || {};
         const travel = overview.travel || {};
+        const icons = overview.icons || [];
 
         const playerName = basic.name || basic.player_name || "Unknown player";
         const level = basic.level || "-";
@@ -1294,14 +1351,27 @@
             buildStatCard("Chain", chainDisplay, chainSubtext)
         ].join("");
 
-        return `
-            ${renderSectionMeta("overview", "Overview")}
+        const subTabs = [
+            { id: "general", label: "General" },
+            { id: "status", label: "Status" }
+        ];
+        const activeSubTab = subTabs.some((tab) => tab.id === state.overviewSubTab) ? state.overviewSubTab : "general";
+        const subTabButtons = subTabs.map((tab) => `
+            <button data-overview-subtab="${tab.id}" style="background: ${activeSubTab === tab.id ? "#3b5998" : "#2a2a2a"}; border: 1px solid #3d3d3d; color: #fff; border-radius: 4px; padding: 6px 8px; font-size: 11px; cursor: pointer; ${activeSubTab === tab.id ? "font-weight: 700;" : ""}">${tab.label}</button>
+        `).join("");
+        const generalContent = `
             ${renderBarsPanel(bars)}
             ${renderCooldownsRow(cooldowns, overview.cooldownsFetchedAt)}
             ${renderTravelCard(basic, travel)}
             <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">
                 ${summaryCards}
             </div>
+        `;
+
+        return `
+            ${renderSectionMeta("overview", "Overview")}
+            <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px;">${subTabButtons}</div>
+            ${activeSubTab === "status" ? renderStatusIcons(icons) : generalContent}
         `;
     }
 
@@ -1351,32 +1421,41 @@
         return bonuses;
     }
 
-    const XANAX_COOLDOWN_MIN_SECONDS = 360 * 60;
-    const XANAX_COOLDOWN_MAX_SECONDS = 480 * 60;
-
-    function isActiveXanaxCooldown(drugLogs, cooldowns, now = Math.floor(Date.now() / 1000)) {
-        const entries = Array.isArray(drugLogs) ? drugLogs : (Array.isArray(drugLogs?.log) ? drugLogs.log : []);
-        const latestXanax = entries
-            .filter((entry) => /\bxanax\b/i.test(JSON.stringify(entry)))
-            .map((entry) => Number(entry.timestamp || 0))
-            .sort((a, b) => b - a)[0] || 0;
-        const remaining = Number(cooldowns?.drug || 0);
-        const elapsed = now - latestXanax;
-        const originalCooldown = elapsed + remaining;
-        return latestXanax > 0
-            && elapsed >= 0
-            && remaining > 0
-            && originalCooldown >= XANAX_COOLDOWN_MIN_SECONDS
-            && originalCooldown <= XANAX_COOLDOWN_MAX_SECONDS;
+    function normalizeIcons(icons) {
+        if (Array.isArray(icons)) return icons;
+        if (!icons || typeof icons !== "object") return [];
+        return Object.entries(icons).map(([id, icon]) => ({
+            ...(icon || {}),
+            id: icon?.id ?? Number(id)
+        }));
     }
 
-    function renderEffectiveBattleStatsBox(stats, bonuses, total, hasXanaxDebuff) {
+    function isActiveXanaxIcon(icons, now = Math.floor(Date.now() / 1000)) {
+        return normalizeIcons(icons).some((icon) => {
+            const isDrugCooldown = Number(icon?.id) === 52 || /drug cooldown/i.test(String(icon?.title || ""));
+            const isXanax = /under the influence of xanax/i.test(String(icon?.description || ""));
+            return isDrugCooldown && isXanax && Number(icon?.until || 0) > now;
+        });
+    }
+
+    function getDrugAddictionDebuffPercent(icons, now = Math.floor(Date.now() / 1000)) {
+        return normalizeIcons(icons).reduce((largest, icon) => {
+            const isDrugAddiction = Number(icon?.id) === 57 || /drug addiction/i.test(String(icon?.title || ""));
+            const until = icon?.until;
+            const isActive = until === null || until === undefined || until === "" || Number(until) > now;
+            if (!isDrugAddiction || !isActive) return largest;
+            const match = String(icon?.description || "").match(/(-?\d+(?:\.\d+)?)%/);
+            const percent = match ? Math.abs(Number(match[1])) : 0;
+            return Math.max(largest, percent);
+        }, 0);
+    }
+
+    function renderEffectiveBattleStatsBox(stats, bonuses, total, debuffPercent = 0) {
         const labels = { strength: "Strength", defense: "Defense", speed: "Speed", dexterity: "Dexterity" };
         const entries = Object.keys(labels).map((key) => {
             const base = Number(stats[key] || 0);
             const bonus = Number(bonuses[key] || 0);
-            const xanaxDebuff = hasXanaxDebuff ? -25 : 0;
-            const modifier = bonus + xanaxDebuff;
+            const modifier = bonus - Number(debuffPercent || 0);
             return { label: labels[key], base, modifier, effective: base * (1 + modifier / 100) };
         });
         const rows = entries.map((entry) =>
@@ -1593,7 +1672,8 @@
             total: Number(workstats.total ?? 0)
         };
         const battleBonuses = getBattleStatBonuses(perks);
-        const hasXanaxDebuff = personal.xanaxDebuffActive === true;
+        const battleStatDebuffPercent = (personal.xanaxDebuffActive === true ? 25 : 0)
+            + Number(personal.drugAddictionDebuffPercent || 0);
 
         const playerId = profile.player_id ?? profile.id ?? "-";
         const jobName = job.name || "Unemployed";
@@ -1648,7 +1728,7 @@
             </div>
         `;
 
-        const battleBox = renderEffectiveBattleStatsBox(battleStats, battleBonuses, battleTotal, hasXanaxDebuff);
+        const battleBox = renderEffectiveBattleStatsBox(battleStats, battleBonuses, battleTotal, battleStatDebuffPercent);
 
         const workBox = renderInfoBox("Work Stats", [
             { label: "Manual Labor", value: formatInteger(workStats.manualLabor) },
@@ -2330,6 +2410,20 @@
         });
     }
 
+    function bindOverviewControls() {
+        const contentEl = document.getElementById("torn-companion-content");
+        if (!contentEl || state.currentTab !== "overview") return;
+        contentEl.querySelectorAll("[data-overview-subtab]").forEach((button) => {
+            button.onclick = () => {
+                const subTab = button.getAttribute("data-overview-subtab");
+                if (!subTab || subTab === state.overviewSubTab) return;
+                state.overviewSubTab = subTab;
+                setStoredDashboardState({ overviewSubTab: subTab });
+                renderTabContent();
+            };
+        });
+    }
+
     function renderTabContent() {
         const contentEl = document.getElementById("torn-companion-content");
         if (!contentEl) return;
@@ -2366,13 +2460,14 @@
         bindInventoryTableControls();
         bindSettingsControls();
         bindPersonalControls();
+        bindOverviewControls();
 
         if (state.currentTab === "faction") {
             startChainCountdownTimer();
         } else {
             stopChainCountdownTimer();
         }
-        if (state.currentTab === "overview") {
+        if (state.currentTab === "overview" && state.overviewSubTab === "general") {
             startCooldownCountdownTimer();
         } else {
             stopCooldownCountdownTimer();

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.18.1
+// @version      5.18.2
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -2263,10 +2263,6 @@
 
         const wealthBox = `
             ${renderNetworthComparisonBox(networthComparison)}
-            ${renderInfoBox("Points Summary", [
-                { label: "Points Held", value: formatInteger(points), color: "#9dd8ff" },
-                { label: "Points Value", value: formatMoney(networth.points ?? 0), color: "#9dd8ff" }
-            ])}
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); gap: 8px;">
                 ${renderInfoBox("Money", [
                     { label: "Pending", value: formatMoney(networthMoney.pending ?? 0) },
@@ -2292,6 +2288,10 @@
                     { label: "Property", value: formatMoney(networthAssets.property ?? 0) },
                     { label: "Stock Market", value: formatMoney(networthAssets.stock_market ?? 0) },
                     { label: "Company", value: formatMoney(networthAssets.company ?? 0) }
+                ])}
+                ${renderInfoBox("Points Summary", [
+                    { label: "Points Held", value: formatInteger(points), color: "#9dd8ff" },
+                    { label: "Points Value", value: formatMoney(networth.points ?? 0), color: "#9dd8ff" }
                 ])}
             </div>
         `;
@@ -2330,8 +2330,10 @@
                 ${topCards}
             </div>
             ${wealthBox}
-            ${battleBox}
-            ${workBox}
+            <div class="ntc-personal-stats-pair" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(520px, 100%), 1fr)); gap: 8px; align-items: stretch;">
+                ${battleBox}
+                ${workBox}
+            </div>
         `;
 
         return `
@@ -3966,6 +3968,9 @@
                 }
                 #torn-v2-inventory-wrapper #torn-companion-content [style*="grid-template-columns: repeat("] {
                     grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr)) !important;
+                }
+                #torn-v2-inventory-wrapper #torn-companion-content .ntc-personal-stats-pair {
+                    grid-template-columns: repeat(auto-fit, minmax(min(520px, 100%), 1fr)) !important;
                 }
                 #torn-v2-inventory-wrapper #torn-companion-content table {
                     max-width: 100%;

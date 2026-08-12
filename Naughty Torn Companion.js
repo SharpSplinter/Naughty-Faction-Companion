@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.18.2
+// @version      5.19.0
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -92,7 +92,8 @@
         sortState: { key: "value", direction: "desc" },
         warTargetSort: { key: "status", direction: "asc" },
         warTargetColumnOrder: ["player", "online", "status", "stats", "ff", "attack"],
-        warTargetColumnWidths: { player: 150, online: 84, status: 280, stats: 112, ff: 58, attack: 76 },
+        warTargetColumnWidths: { player: 112, online: 64, status: 150, stats: 82, ff: 44, attack: 62 },
+        warTargetColumnLayoutVersion: 2,
         expandedCategories: new Set(),
         currentTab: "overview",
         overviewSubTab: "general",
@@ -253,7 +254,8 @@
         isMinimized: state.isMinimized,
         windowSizes: state.windowSizes,
         warTargetColumnOrder: state.warTargetColumnOrder,
-        warTargetColumnWidths: state.warTargetColumnWidths
+        warTargetColumnWidths: state.warTargetColumnWidths,
+        warTargetColumnLayoutVersion: state.warTargetColumnLayoutVersion
     });
     const setStoredDashboardState = (payload) => {
         if (payload && payload.currentTab) state.currentTab = payload.currentTab;
@@ -460,13 +462,10 @@
             && warTargetColumns.every((key) => savedWarTargetOrder.includes(key))
             ? savedWarTargetOrder
             : warTargetColumns;
-        state.warTargetColumnWidths = dashboardState.warTargetColumnWidths && typeof dashboardState.warTargetColumnWidths === "object"
+        state.warTargetColumnWidths = dashboardState.warTargetColumnLayoutVersion === state.warTargetColumnLayoutVersion
+            && dashboardState.warTargetColumnWidths && typeof dashboardState.warTargetColumnWidths === "object"
             ? { ...state.warTargetColumnWidths, ...dashboardState.warTargetColumnWidths }
             : state.warTargetColumnWidths;
-        if (!Number(dashboardState.warTargetColumnWidths?.status)) {
-            const combinedStatusWidth = Number(dashboardState.warTargetColumnWidths?.health || 0) + Number(dashboardState.warTargetColumnWidths?.location || 0);
-            if (combinedStatusWidth) state.warTargetColumnWidths.status = Math.min(600, Math.max(150, combinedStatusWidth));
-        }
 
         const sectionNames = Object.keys(APP_STORAGE.sections);
         await Promise.all(sectionNames.map(async (name) => {
@@ -2023,7 +2022,7 @@
             return { label: labels[key], base, modifier, effective: base * (1 + modifier / 100) };
         });
         const rows = entries.map((entry) =>
-            '<div style="display: grid; grid-template-columns: minmax(78px, 1fr) minmax(100px, 1.2fr) minmax(62px, 0.7fr) minmax(100px, 1.2fr); gap: 6px; align-items: center; padding: 4px 0; border-bottom: 1px solid #222;">'
+            '<div class="ntc-battle-stats-grid" style="display: grid; grid-template-columns: minmax(78px, 1fr) minmax(100px, 1.2fr) minmax(62px, 0.7fr) minmax(100px, 1.2fr); gap: 6px; align-items: center; padding: 4px 0; border-bottom: 1px solid #222;">'
             + '<span style="color: #d0d0d0; font-size: 12px; font-weight: 600;">' + entry.label + '</span>'
             + '<span style="color: #fff; font-size: 12px; font-weight: 700; text-align: right;">' + formatInteger(entry.base) + '</span>'
             + '<span style="color: ' + (entry.modifier < 0 ? '#e05959' : '#9dd8ff') + '; font-size: 12px; font-weight: 700; text-align: center;">' + (entry.modifier ? (entry.modifier > 0 ? '+' : '') + entry.modifier + '%' : '—') + '</span>'
@@ -2031,12 +2030,12 @@
             + '</div>'
         ).join("");
         const effectiveTotal = entries.reduce((sum, entry) => sum + entry.effective, 0);
-        return '<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">'
+        return '<div class="ntc-battle-stats-card" style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">'
             + '<div style="color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 6px;">Battle Stats</div>'
-            + '<div style="display: grid; grid-template-columns: minmax(78px, 1fr) minmax(100px, 1.2fr) minmax(62px, 0.7fr) minmax(100px, 1.2fr); gap: 6px; padding-bottom: 4px; color: #888; font-size: 10px; font-weight: 700;">'
+            + '<div class="ntc-battle-stats-grid" style="display: grid; grid-template-columns: minmax(78px, 1fr) minmax(100px, 1.2fr) minmax(62px, 0.7fr) minmax(100px, 1.2fr); gap: 6px; padding-bottom: 4px; color: #888; font-size: 10px; font-weight: 700;">'
             + '<span>Stat</span><span style="text-align: right;">Battle Stat</span><span style="text-align: center;">Perk</span><span style="text-align: right;">Effective</span></div>'
             + rows
-            + '<div style="display: grid; grid-template-columns: minmax(78px, 1fr) minmax(100px, 1.2fr) minmax(62px, 0.7fr) minmax(100px, 1.2fr); gap: 6px; padding-top: 5px;">'
+            + '<div class="ntc-battle-stats-grid" style="display: grid; grid-template-columns: minmax(78px, 1fr) minmax(100px, 1.2fr) minmax(62px, 0.7fr) minmax(100px, 1.2fr); gap: 6px; padding-top: 5px;">'
             + '<span style="color: #d0d0d0; font-size: 12px; font-weight: 700;">Total</span>'
             + '<span style="color: #fff; font-size: 12px; font-weight: 700; text-align: right;">' + formatInteger(total) + '</span>'
             + '<span style="color: #9dd8ff; font-size: 12px; font-weight: 700; text-align: center;">—</span>'
@@ -2093,20 +2092,20 @@
         `;
     }
 
-    const PERK_SOURCE_LABELS = {
-        faction: "Faction",
-        job: "Job",
-        property: "Property",
-        education: "Education",
-        enhancer: "Enhancer",
-        book: "Book",
-        stock: "Stock",
-        merit: "Merit"
+    const PERK_SOURCE_META = {
+        faction: { label: "Faction", icon: "⚔", color: "#9dd8ff" },
+        job: { label: "Job", icon: "▣", color: "#7fe18d" },
+        property: { label: "Property", icon: "⌂", color: "#e0a25e" },
+        education: { label: "Education", icon: "◆", color: "#c9a0ff" },
+        enhancer: { label: "Enhancer", icon: "✦", color: "#f28b82" },
+        book: { label: "Book", icon: "▤", color: "#f7c873" },
+        stock: { label: "Stock", icon: "↗", color: "#72d4b4" },
+        merit: { label: "Merit", icon: "★", color: "#85b7ff" }
     };
 
     function renderPerksBox(perks) {
-        const sections = Object.keys(PERK_SOURCE_LABELS)
-            .map((key) => ({ key, label: PERK_SOURCE_LABELS[key], items: Array.isArray(perks[key]) ? perks[key] : [] }))
+        const sections = Object.entries(PERK_SOURCE_META)
+            .map(([key, meta]) => ({ key, ...meta, items: Array.isArray(perks[key]) ? perks[key] : [] }))
             .filter((section) => section.items.length > 0);
 
         if (!sections.length) {
@@ -2114,16 +2113,27 @@
         }
 
         const sectionsHtml = sections.map((section) => `
-            <div style="margin-bottom: 8px;">
-                <div style="color: #9dd8ff; font-size: 11px; font-weight: 700; margin-bottom: 3px;">${escapeHtml(section.label)}</div>
-                ${section.items.map((text) => `<div style="color: #ccc; font-size: 10px; padding: 2px 0 2px 8px; border-left: 2px solid #333;">${escapeHtml(String(text))}</div>`).join("")}
+            <div class="ntc-perk-section" style="border:1px solid #303640;border-left:3px solid ${section.color};border-radius:7px;padding:9px;background:linear-gradient(135deg,${section.color}12,rgba(20,20,20,.72));">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:7px;">
+                    <div style="display:flex;align-items:center;gap:6px;color:${section.color};font-size:12px;font-weight:800;"><span style="font-size:14px;">${section.icon}</span>${escapeHtml(section.label)}</div>
+                    <span style="border:1px solid ${section.color}55;border-radius:10px;padding:1px 6px;color:${section.color};font-size:9px;font-weight:800;white-space:nowrap;">${formatInteger(section.items.length)} perks</span>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(205px,100%),1fr));gap:5px;">
+                    ${section.items.map((text) => {
+                        const value = String(text || "").trim();
+                        const match = value.match(/^([+−-]\s*\d+(?:\.\d+)?%?)\s+(.+)$/);
+                        const badge = match ? match[1].replace(/\s+/g, "") : "✓";
+                        const label = match ? match[2] : value;
+                        return `<div class="ntc-perk-item" style="display:flex;align-items:flex-start;gap:6px;min-height:30px;padding:6px 7px;border:1px solid #2b3139;border-radius:5px;background:rgba(255,255,255,.025);"><span style="flex:0 0 auto;min-width:26px;color:${section.color};font-size:10px;font-weight:900;white-space:nowrap;">${escapeHtml(badge)}</span><span style="color:#d4dae2;font-size:10px;font-weight:600;line-height:1.35;">${escapeHtml(label)}</span></div>`;
+                    }).join("")}
+                </div>
             </div>
         `).join("");
 
         return `
             <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">
-                <div style="color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 6px;">Perks</div>
-                ${sectionsHtml}
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:9px;"><div style="color:#fff;font-size:13px;font-weight:800;">Active Perks</div><div style="color:#8d98a6;font-size:10px;">${formatInteger(sections.reduce((sum, section) => sum + section.items.length, 0))} total</div></div>
+                <div style="display:grid;gap:8px;">${sectionsHtml}</div>
             </div>
         `;
     }
@@ -2330,7 +2340,7 @@
                 ${topCards}
             </div>
             ${wealthBox}
-            <div class="ntc-personal-stats-pair" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(520px, 100%), 1fr)); gap: 8px; align-items: stretch;">
+            <div class="ntc-personal-stats-pair" style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; align-items: stretch;">
                 ${battleBox}
                 ${workBox}
             </div>
@@ -2465,12 +2475,12 @@
     }
 
     const WAR_TARGET_COLUMNS = {
-        player: { label: "Player", align: "left", minWidth: 110 },
-        online: { label: "Online", align: "left", minWidth: 70 },
-        status: { label: "Status", align: "left", minWidth: 150 },
-        stats: { label: "Est. Stats", align: "right", minWidth: 90 },
-        ff: { label: "FF", align: "center", minWidth: 48 },
-        attack: { label: "Attack", align: "center", minWidth: 68 }
+        player: { label: "Player", align: "left", minWidth: 88 },
+        online: { label: "Online", align: "left", minWidth: 54 },
+        status: { label: "Status", align: "left", minWidth: 96 },
+        stats: { label: "Est. Stats", align: "right", minWidth: 68 },
+        ff: { label: "FF", align: "center", minWidth: 38 },
+        attack: { label: "Attack", align: "center", minWidth: 58 }
     };
 
     function renderWarTargetSortHeader(key) {
@@ -2665,7 +2675,7 @@
             .slice(0, 5)
             .map((employee) => ({
                 label: employee.name || "Unknown employee",
-                value: `${employee.position?.name || employee.position || "Unknown role"}${employee.effectiveness?.total !== undefined ? ` · ${formatInteger(employee.effectiveness.total)}% effectiveness` : ""}`
+                value: `${employee.position?.name || employee.position || "Unknown role"}${employee.effectiveness?.total !== undefined ? ` · ${formatInteger(employee.effectiveness.total)} effectiveness` : ""}`
             }));
         const topStock = [...stock]
             .sort((a, b) => Number(b?.in_stock ?? b?.quantity ?? 0) - Number(a?.in_stock ?? a?.quantity ?? 0))
@@ -3954,6 +3964,14 @@
                     border-color: #94a3b8 !important;
                     color: #172033 !important;
                 }
+                #torn-v2-inventory-wrapper[data-theme="light"] .ntc-perk-section,
+                #torn-v2-inventory-wrapper[data-theme="light"] .ntc-perk-item {
+                    background: #ffffff !important;
+                    border-color: #cbd5e1 !important;
+                }
+                #torn-v2-inventory-wrapper[data-theme="light"] .ntc-perk-item span:last-child {
+                    color: #334155 !important;
+                }
                 #torn-v2-inventory-wrapper #torn-companion-content {
                     container-type: inline-size;
                     min-width: 0;
@@ -3970,7 +3988,14 @@
                     grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr)) !important;
                 }
                 #torn-v2-inventory-wrapper #torn-companion-content .ntc-personal-stats-pair {
-                    grid-template-columns: repeat(auto-fit, minmax(min(520px, 100%), 1fr)) !important;
+                    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+                }
+                #torn-v2-inventory-wrapper #torn-companion-content .ntc-battle-stats-grid {
+                    grid-template-columns: minmax(48px, .75fr) minmax(64px, 1fr) minmax(38px, .55fr) minmax(64px, 1fr) !important;
+                    gap: 4px !important;
+                }
+                #torn-v2-inventory-wrapper #torn-companion-content .ntc-battle-stats-card span {
+                    font-size: clamp(9px, 1.7cqi, 12px) !important;
                 }
                 #torn-v2-inventory-wrapper #torn-companion-content table {
                     max-width: 100%;
@@ -3991,6 +4016,11 @@
                     white-space: nowrap !important;
                     overflow-wrap: normal !important;
                     word-break: keep-all !important;
+                }
+                @container (max-width: 520px) {
+                    #torn-v2-inventory-wrapper #torn-companion-content .ntc-personal-stats-pair {
+                        grid-template-columns: minmax(0, 1fr) !important;
+                    }
                 }
                 @container (max-width: 430px) {
                     #torn-v2-inventory-wrapper #torn-companion-content [style*="grid-template-columns"] {

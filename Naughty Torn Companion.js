@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.14.3
+// @version      5.14.5
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -776,17 +776,19 @@
         }));
     }
 
+    function getAwardCatalogById(catalogResponseRaw) {
+        return new Map(normalizeAwardCatalog(catalogResponseRaw)
+            .map((entry) => [Number(entry.id), entry]));
+    }
+
     function buildAwardSummary(catalogResponseRaw, earnedResponseRaw, itemLabel) {
         const catalogRaw = normalizeAwardCatalog(catalogResponseRaw);
-        const catalog = {};
-        catalogRaw.forEach((entry) => {
-            catalog[entry.id] = entry;
-        });
+        const catalog = getAwardCatalogById(catalogRaw);
 
         const earnedRaw = earnedResponseRaw || [];
         const earned = (Array.isArray(earnedRaw) ? earnedRaw : [])
             .map((entry) => {
-                const info = catalog[entry.id] || {};
+                const info = catalog.get(Number(entry.id)) || {};
                 return {
                     id: entry.id,
                     timestamp: Number(entry.timestamp || 0),
@@ -827,10 +829,8 @@
     }
 
     function buildAwardProgress(personalstats, medalsCatalogRaw, honorsCatalogRaw, userMedalsRaw, userHonorsRaw) {
-        const medalsCatalog = normalizeAwardCatalog(medalsCatalogRaw);
-        const honorsCatalog = normalizeAwardCatalog(honorsCatalogRaw);
-        const medalCatalog = new Map(medalsCatalog.map((item) => [Number(item.id), item]));
-        const honorCatalog = new Map(honorsCatalog.map((item) => [Number(item.id), item]));
+        const medalCatalog = getAwardCatalogById(medalsCatalogRaw);
+        const honorCatalog = getAwardCatalogById(honorsCatalogRaw);
         const earnedMedals = new Set((Array.isArray(userMedalsRaw) ? userMedalsRaw : []).map((item) => Number(item.id)));
         const earnedHonors = new Set((Array.isArray(userHonorsRaw) ? userHonorsRaw : []).map((item) => Number(item.id)));
 

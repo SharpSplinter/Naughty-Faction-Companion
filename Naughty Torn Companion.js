@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.19.9
+// @version      5.20.0
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -4169,7 +4169,7 @@
             </style>
             <div id="widget-drag-handle" style="background-color: #2c2c2c; padding: 8px 10px; display: flex; justify-content: space-between; align-items: center; cursor: move; border-bottom: 1px solid #444; user-select: none;">
                 <span id="widget-title" style="color: #fff; font-size: 12px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">🧭 Naughty Torn Companion</span>
-                <button id="widget-toggle-view-btn" style="background-color: #444; color: #fff; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 11px;">_</button>
+                <button id="widget-toggle-view-btn" type="button" title="Minimize Naughty Torn Companion" aria-label="Minimize Naughty Torn Companion" style="width: 32px; height: 28px; flex: 0 0 32px; display: grid; place-items: center; background-color: #444; color: #fff; border: 1px solid #666; padding: 0; border-radius: 5px; cursor: pointer; font-size: 18px; font-weight: 700; line-height: 1;">−</button>
             </div>
 
             <div id="widget-main-body" style="padding: 10px; box-sizing: border-box; flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;">
@@ -4195,7 +4195,8 @@
         }
 
         const toggleBtn = document.getElementById("widget-toggle-view-btn");
-        toggleBtn.addEventListener("click", () => {
+        toggleBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
             if (!state.isMinimized) captureCurrentWidgetSize(false);
             state.isMinimized = !state.isMinimized;
             setStoredDashboardState({ isMinimized: state.isMinimized, windowSizes: state.windowSizes });
@@ -4208,7 +4209,7 @@
         let offsetY;
 
         dragHandle.addEventListener("mousedown", (e) => {
-            if (e.target === toggleBtn) return;
+            if (e.target.closest("#widget-toggle-view-btn")) return;
             isDragging = true;
             didDrag = false;
             const rect = dashboard.getBoundingClientRect();
@@ -4235,8 +4236,8 @@
             isDragging = false;
         });
 
-        dragHandle.addEventListener("click", () => {
-            if (!state.isMinimized || didDrag) return;
+        dragHandle.addEventListener("click", (e) => {
+            if (e.target.closest("#widget-toggle-view-btn") || !state.isMinimized || didDrag) return;
             state.isMinimized = false;
             setStoredDashboardState({ isMinimized: false });
             applyWidgetView();

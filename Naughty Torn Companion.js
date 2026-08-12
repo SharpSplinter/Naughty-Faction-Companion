@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.14.16
+// @version      5.16.1
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -21,12 +21,15 @@
 // @grant        GM.getValue
 // @grant        GM.setValue
 // @connect      api.torn.com
+// @connect      ffscouter.com
 // ==/UserScript==
 
 (function() {
     'use strict';
 
     const BASE_URL = "https://api.torn.com/v2/";
+    const TORN_V1_BASE_URL = "https://api.torn.com/";
+    const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
     const INVENTORY_CATEGORIES = [
         "medical", "drug", "booster", "alcohol",
         "candy", "enhancer", "jewelry", "plushie",
@@ -52,6 +55,7 @@
     // domains/pages, unlike localStorage which is scoped per-origin).
     const APP_STORAGE = {
         key: "TORN_V2_USER_KEY",
+        ffscouterKey: "TORN_V2_FFSCOUTER_KEY",
         position: "TORN_V2_WIDGET_POS",
         dashboard: "TORN_V2_DASHBOARD_STATE",
         companyStockHistory: "TORN_V2_COMPANY_STOCK_HISTORY",
@@ -86,9 +90,11 @@
 
     const state = {
         sortState: { key: "value", direction: "desc" },
+        warTargetSort: { key: "health", direction: "asc" },
         expandedCategories: new Set(),
         currentTab: "overview",
         overviewSubTab: "general",
+        factionSubTab: "general",
         settingsSubTab: "controls",
         personalSubTab: "info",
         theme: "dark",
@@ -96,12 +102,16 @@
         companyStockHistory: {},
         networthTracking: { official: null, history: [] },
         apiKey: "",
+        ffscouterKey: "",
+        ffscouterStatus: "Not configured",
         widgetPosition: null,
         dashboard: null,
         lastRefresh: null,
         autoRefreshTimer: null,
         chainCountdownTimer: null,
         cooldownCountdownTimer: null,
+        warTargetsRefreshTimer: null,
+        warTargetsRefreshInFlight: false,
         lastRefreshBySection: {
             overview: 0,
             personal: 0,
@@ -217,6 +227,13 @@
         void gmSetValue(APP_STORAGE.key, state.apiKey);
     };
 
+    const getStoredFFScouterKey = () => state.ffscouterKey || "";
+    const setStoredFFScouterKey = (key) => {
+        state.ffscouterKey = String(key || "").trim();
+        state.ffscouterStatus = state.ffscouterKey ? "Saved · Not verified" : "Not configured";
+        void gmSetValue(APP_STORAGE.ffscouterKey, state.ffscouterKey);
+    };
+
     const getStoredPosition = () => state.widgetPosition || null;
     const setStoredPosition = (pos) => {
         state.widgetPosition = pos;
@@ -226,6 +243,7 @@
     const getStoredDashboardState = () => ({
         currentTab: state.currentTab,
         overviewSubTab: state.overviewSubTab,
+        factionSubTab: state.factionSubTab,
         settingsSubTab: state.settingsSubTab,
         personalSubTab: state.personalSubTab,
         theme: state.theme,
@@ -234,6 +252,7 @@
     const setStoredDashboardState = (payload) => {
         if (payload && payload.currentTab) state.currentTab = payload.currentTab;
         if (payload && payload.overviewSubTab) state.overviewSubTab = payload.overviewSubTab;
+        if (payload && payload.factionSubTab) state.factionSubTab = payload.factionSubTab;
         if (payload && payload.settingsSubTab) state.settingsSubTab = payload.settingsSubTab;
         if (payload && payload.personalSubTab) state.personalSubTab = payload.personalSubTab;
         if (payload && ["light", "dark"].includes(payload.theme)) state.theme = payload.theme;
@@ -407,6 +426,8 @@
         }
 
         state.apiKey = (await gmGetValue(APP_STORAGE.key, "")) || "";
+        state.ffscouterKey = (await gmGetValue(APP_STORAGE.ffscouterKey, "")) || "";
+        state.ffscouterStatus = state.ffscouterKey ? "Saved · Not verified" : "Not configured";
         state.widgetPosition = await gmGetValue(APP_STORAGE.position, null);
         state.companyStockHistory = await gmGetValue(APP_STORAGE.companyStockHistory, {}) || {};
         state.networthTracking = await gmGetValue(APP_STORAGE.networthTracking, { official: null, history: [] }) || { official: null, history: [] };
@@ -414,6 +435,7 @@
         const dashboardState = await gmGetValue(APP_STORAGE.dashboard, { currentTab: "overview" });
         state.currentTab = dashboardState.currentTab || "overview";
         state.overviewSubTab = dashboardState.overviewSubTab || state.overviewSubTab;
+        state.factionSubTab = dashboardState.factionSubTab || state.factionSubTab;
         state.settingsSubTab = dashboardState.settingsSubTab || state.settingsSubTab;
         state.personalSubTab = dashboardState.personalSubTab || state.personalSubTab;
         state.theme = ["light", "dark"].includes(dashboardState.theme) ? dashboardState.theme : state.theme;
@@ -431,6 +453,7 @@
 
         debugLog("Persisted state restored", {
             hasKey: !!state.apiKey,
+            hasFFScouterKey: !!state.ffscouterKey,
             restoredSections: sectionNames.filter((n) => !!state.caches[n])
         });
     }
@@ -486,6 +509,236 @@
             throw new Error(data.error.error || `API error ${data.error.code || "unknown"}`);
         }
         return data;
+    }
+
+    function parseFFScouterRateLimits(rawHeaders) {
+        const headers = new Map();
+        String(rawHeaders || "").split(/\r?\n/).forEach((line) => {
+            const separator = line.indexOf(":");
+            if (separator > 0) headers.set(line.slice(0, separator).trim().toLowerCase(), line.slice(separator + 1).trim());
+        });
+        const limit = Number(headers.get("x-ratelimit-limit"));
+        const remaining = Number(headers.get("x-ratelimit-remaining"));
+        const resetAt = Number(headers.get("x-ratelimit-reset-timestamp"));
+        return Number.isFinite(limit) && Number.isFinite(remaining) && Number.isFinite(resetAt)
+            ? { limit, remaining, resetAt }
+            : null;
+    }
+
+    function requestFFScouter(endpoint, params = {}) {
+        const url = new URL(`${FFSCOUTER_BASE_URL}/${endpoint}`);
+        Object.entries(params).forEach(([name, value]) => {
+            if (value !== undefined && value !== null && value !== "") url.searchParams.set(name, String(value));
+        });
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: "GET",
+                url: url.toString(),
+                headers: { Accept: "application/json" },
+                timeout: 30000,
+                onload: (response) => {
+                    let data;
+                    try {
+                        data = JSON.parse(response.responseText);
+                    } catch (error) {
+                        reject(new Error(`FFScouter returned invalid JSON (HTTP ${response.status}).`));
+                        return;
+                    }
+                    if (response.status < 200 || response.status >= 300 || data?.code !== undefined) {
+                        reject(new Error(data?.error || `FFScouter request failed (HTTP ${response.status}).`));
+                        return;
+                    }
+                    resolve({ data, limits: parseFFScouterRateLimits(response.responseHeaders) });
+                },
+                onerror: () => reject(new Error("Unable to connect to FFScouter.")),
+                ontimeout: () => reject(new Error("FFScouter request timed out."))
+            });
+        });
+    }
+
+    function validateFFScouterKey(key) {
+        const value = String(key || "").trim();
+        if (!/^[A-Za-z0-9]{16}$/.test(value)) throw new Error("FFScouter requires a 16-character alphanumeric registered Torn API key.");
+        return value;
+    }
+
+    async function verifyFFScouterKey(key) {
+        const value = validateFFScouterKey(key);
+        const response = await requestFFScouter("check-key", { key: value });
+        return { ...response, key: value };
+    }
+
+    function formatFFScouterTimestamp(timestamp, emptyText) {
+        const value = Number(timestamp || 0);
+        return value > 0 ? new Date(value * 1000).toLocaleString() : emptyText;
+    }
+
+    function getFFScouterVerificationDetails(data) {
+        const now = Math.floor(Date.now() / 1000);
+        if (!data?.is_registered) {
+            return {
+                title: "FFScouter Key Unregistered",
+                summary: "The key format is valid, but FFScouter does not have this key registered.",
+                color: "#e0a25e",
+                rows: [
+                    ["Registration", "Unregistered"],
+                    ["Premium", "Inactive"],
+                    ["Last successful use", "Never used"]
+                ]
+            };
+        }
+
+        const personalExpiry = Number(data.premium_expires_at || 0);
+        const factionExpiry = Number(data.faction_premium_expires_at || 0);
+        const latestPremiumExpiry = Math.max(personalExpiry, factionExpiry);
+        const source = String(data.premium_entitlement_source || "none").replaceAll("_", " ");
+        const premiumState = data.is_premium
+            ? `Active · ${source}`
+            : (latestPremiumExpiry > 0 && latestPremiumExpiry <= now ? "Expired" : "Inactive");
+        const policyState = data.policy_update_required
+            ? `Update required · Current policy v${data.policy_version ?? "—"}`
+            : `Accepted · Policy v${data.policy_version ?? "—"}`;
+        return {
+            title: data.policy_update_required ? "FFScouter Key Verified · Action Required" : "FFScouter Key Verified",
+            summary: data.policy_update_required
+                ? "The key is registered, but FFScouter requires the current data policy to be accepted."
+                : "The key is registered and active for FFScouter API requests.",
+            color: data.policy_update_required ? "#e0a25e" : "#7fe18d",
+            rows: [
+                ["Registration", "Verified · Registered"],
+                ["Registered", formatFFScouterTimestamp(data.registered_at, "Unknown")],
+                ["Last successful use", formatFFScouterTimestamp(data.last_used, "Never used")],
+                ["Data policy", policyState],
+                ["Premium", premiumState],
+                ["Personal premium expiry", formatFFScouterTimestamp(data.premium_expires_at, "None")],
+                ["Faction ID", data.faction_id ?? "None"],
+                ["Faction premium expiry", formatFFScouterTimestamp(data.faction_premium_expires_at, "None")]
+            ]
+        };
+    }
+
+    async function queryFFScouterStats(playerIds, key = getStoredFFScouterKey()) {
+        const value = validateFFScouterKey(key);
+        const targets = [...new Set((Array.isArray(playerIds) ? playerIds : [playerIds])
+            .map((id) => Number(id))
+            .filter((id) => Number.isInteger(id) && id > 0))];
+        if (!targets.length) throw new Error("At least one valid Torn player ID is required.");
+        const response = await requestFFScouter("get-stats", { key: value, targets: targets.join(",") });
+        return { results: Array.isArray(response.data) ? response.data : [], limits: response.limits };
+    }
+
+    function chunkArray(values, size) {
+        const chunks = [];
+        for (let index = 0; index < values.length; index += size) chunks.push(values.slice(index, index + size));
+        return chunks;
+    }
+
+    function normalizeTornBatchProfiles(payload, requestedIds) {
+        const requested = new Set(requestedIds.map(Number));
+        const profiles = new Map();
+        const add = (candidate, fallbackId) => {
+            const profile = candidate?.profile || candidate;
+            const id = Number(profile?.id || profile?.player_id || fallbackId || 0);
+            if (id > 0 && requested.has(id) && profile && typeof profile === "object") profiles.set(id, profile);
+        };
+        if (Array.isArray(payload)) payload.forEach((entry) => add(entry));
+        const collection = payload?.profiles || payload?.users || payload?.players;
+        if (Array.isArray(collection)) collection.forEach((entry) => add(entry));
+        else if (collection && typeof collection === "object") Object.entries(collection).forEach(([id, entry]) => add(entry, id));
+        if (payload && typeof payload === "object") {
+            Object.entries(payload).forEach(([id, entry]) => {
+                if (/^\d+$/.test(id)) add(entry, id);
+            });
+            add(payload);
+        }
+        return profiles;
+    }
+
+    async function fetchTornWarProfiles(playerIds, apiKey) {
+        const ids = [...new Set(playerIds.map(Number).filter((id) => Number.isInteger(id) && id > 0))];
+        const profiles = new Map();
+        for (const batch of chunkArray(ids, 10)) {
+            const url = new URL(`${TORN_V1_BASE_URL}user/${batch.join(",")}`);
+            url.searchParams.set("selections", "profile");
+            url.searchParams.set("key", apiKey);
+            url.searchParams.set("comment", "NaughtyTornCompanion-WarTargets");
+            const response = await secureCustomFetch(url.toString());
+            const parsed = normalizeTornBatchProfiles(response, batch);
+            parsed.forEach((profile, id) => profiles.set(id, profile));
+            if (parsed.size === 0) throw new Error("Torn batch profile response did not contain player profiles.");
+            if (ids.length > 10) await sleep(150);
+        }
+        return profiles;
+    }
+
+    function buildWarTargets(roster, ffResults, liveProfiles, liveSource = "Torn profile batches") {
+        const ffById = new Map((Array.isArray(ffResults) ? ffResults : []).map((entry) => [Number(entry?.player_id || 0), entry]));
+        return roster.map((member) => {
+            const id = Number(member?.id || member?.player_id || 0);
+            const ff = ffById.get(id) || {};
+            const profile = liveProfiles.get(id) || member;
+            return {
+                id,
+                name: profile?.name || member?.name || `Player ${id}`,
+                level: Number(profile?.level || member?.level || 0),
+                fairFight: Number(ff?.fair_fight || 0),
+                battleStats: Number(ff?.bs_estimate || 0),
+                battleStatsHuman: ff?.bs_estimate_human || "",
+                estimateSource: ff?.source || "",
+                estimateUpdatedAt: Number(ff?.last_updated || 0),
+                noEstimate: ff?.no_data === true || !ff?.player_id,
+                lastAction: profile?.last_action || member?.last_action || {},
+                status: profile?.status || member?.status || {},
+                life: profile?.life || null,
+                liveSource
+            };
+        });
+    }
+
+    async function fetchWarTargetData(apiKey, war, fallbackRoster = [], options = {}) {
+        const { includeStats = true, existingStats = [] } = options;
+        if (!war?.oppId) throw new Error("No active enemy faction was found.");
+        const rosterResponse = await fetchJson(withKey(`${BASE_URL}faction/${war.oppId}/members`, apiKey));
+        const roster = Array.isArray(rosterResponse?.members) ? rosterResponse.members : (Array.isArray(rosterResponse) ? rosterResponse : fallbackRoster);
+        const playerIds = roster.map((member) => Number(member?.id || 0)).filter(Boolean);
+        if (!playerIds.length) throw new Error("Enemy faction roster is empty.");
+
+        let ffResults = existingStats;
+        let ffLimits = null;
+        let statsError = "";
+        if (includeStats) {
+            try {
+                const ffResponse = await queryFFScouterStats(playerIds);
+                ffResults = ffResponse.results;
+                ffLimits = ffResponse.limits;
+            } catch (error) {
+                statsError = error.message;
+            }
+        }
+
+        let liveProfiles;
+        let liveSource = "Torn profile batches";
+        let liveError = "";
+        try {
+            liveProfiles = await fetchTornWarProfiles(playerIds, apiKey);
+        } catch (error) {
+            liveProfiles = new Map(roster.map((member) => [Number(member.id), member]));
+            liveSource = "Torn faction members fallback";
+            liveError = error.message;
+        }
+
+        return {
+            enemyFactionId: war.oppId,
+            enemyFactionName: war.oppName,
+            targets: buildWarTargets(roster, ffResults, liveProfiles, liveSource),
+            ffResults,
+            ffLimits,
+            statsError,
+            liveError,
+            liveSource,
+            statsFetchedAt: includeStats ? Date.now() : Number(options.statsFetchedAt || 0),
+            liveFetchedAt: Date.now()
+        };
     }
 
     async function fetchItemCatalog(apiKey, statusEl) {
@@ -777,14 +1030,15 @@
         setSectionStatus("overview", "Refreshing...");
         debugLog("Fetching overview data");
         try {
+            const overviewRequestedAt = Date.now();
             const [basicResponse, moneyResponse, networthResponse, barsResponse, cooldownsResponse, travelResponse, iconsResponse] = await Promise.all([
                 fetchJson(withKey(`${BASE_URL}user/basic`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/money`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/networth`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/bars`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/cooldowns`, apiKey))
-                    .then((data) => ({ data, fetchedAt: Date.now() }))
-                    .catch(() => ({ data: null, fetchedAt: Date.now() })),
+                    .then((data) => ({ data, fetchedAt: overviewRequestedAt }))
+                    .catch(() => ({ data: null, fetchedAt: overviewRequestedAt })),
                 fetchJson(withKey(`${BASE_URL}user/travel`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/icons`, apiKey)).catch(() => null)
             ]);
@@ -794,6 +1048,7 @@
             const companyResponse = await fetchJson(withKey(`${BASE_URL}company/profile`, apiKey)).catch(() => null);
             const money = moneyResponse?.money || moneyResponse || {};
             const networth = networthResponse?.networth || networthResponse || {};
+            const icons = iconsResponse?.icons || iconsResponse || [];
 
             const result = {
                 basic: basicResponse?.profile || basicResponse || {},
@@ -801,13 +1056,16 @@
                 networth,
                 networthComparison: updateNetworthTracking(networth, money.daily_networth),
                 bars: barsResponse?.energy !== undefined ? barsResponse : (barsResponse?.bars || barsResponse || {}),
+                barsFetchedAt: overviewRequestedAt,
                 profile: profileResponse?.profile || profileResponse || {},
                 faction: factionResponse?.faction || factionResponse || {},
                 company: companyResponse?.profile || companyResponse || {},
                 cooldowns: cooldownsResponse?.data?.cooldowns || cooldownsResponse?.data || {},
-                cooldownsFetchedAt: cooldownsResponse?.fetchedAt || Date.now(),
+                cooldownsFetchedAt: cooldownsResponse?.fetchedAt || overviewRequestedAt,
+                cooldownDeadlines: getCooldownDeadlines(icons),
                 travel: travelResponse?.travel || travelResponse || {},
-                icons: iconsResponse?.icons || iconsResponse || []
+                travelFetchedAt: overviewRequestedAt,
+                icons
             };
 
             // user/bars embeds a live chain snapshot directly (bars.chain), so the
@@ -824,7 +1082,7 @@
                     modifier: Number(embeddedChain.modifier || 0),
                     start: Number(embeddedChain.start || 0),
                     end: Number(embeddedChain.end || 0),
-                    fetchedAt: Date.now()
+                    fetchedAt: overviewRequestedAt
                 };
             }
 
@@ -1100,6 +1358,7 @@
         setSectionStatus("faction", "Refreshing...");
         debugLog("Fetching faction data");
         try {
+            const factionRequestedAt = Date.now();
             const [userFactionResponse, factionBasicResponse, factionStatsResponse, factionMembersResponse, factionNewsResponse, factionChainResponse, factionWarsResponse] = await Promise.all([
                 fetchJson(withKey(`${BASE_URL}user/faction`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}faction/basic`, apiKey)).catch(() => null),
@@ -1107,8 +1366,8 @@
                 fetchJson(withKey(`${BASE_URL}faction/members`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}faction/news`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}faction/chain`, apiKey))
-                    .then((data) => ({ data, fetchedAt: Date.now() }))
-                    .catch(() => ({ data: null, fetchedAt: Date.now() })),
+                    .then((data) => ({ data, fetchedAt: factionRequestedAt }))
+                    .catch(() => ({ data: null, fetchedAt: factionRequestedAt })),
                 fetchJson(withKey(`${BASE_URL}faction/wars`, apiKey)).catch(() => null)
             ]);
 
@@ -1125,7 +1384,7 @@
                 modifier: Number(chainRaw.modifier || 0),
                 start: Number(chainRaw.start || 0),
                 end: Number(chainRaw.end || 0),
-                fetchedAt: factionChainResponse?.fetchedAt || Date.now()
+                fetchedAt: factionChainResponse?.fetchedAt || factionRequestedAt
             };
 
             const warsData = factionWarsResponse?.wars || factionWarsResponse || {};
@@ -1139,6 +1398,7 @@
                 const opponentBasic = opponentBasicResponse?.basic || opponentBasicResponse || {};
                 war = {
                     warId: Number(rankedWar.war_id || 0),
+                    oppId: Number(oppEntry.id || 0),
                     ownScore: Number(ownEntry.score || 0),
                     oppScore: Number(oppEntry.score || 0),
                     ownTag: factionBasicData.tag || ownEntry.name || "My Faction",
@@ -1186,6 +1446,15 @@
                 console.warn("Personal contribution calculation failed:", contributionError);
             }
 
+            let warTargets = null;
+            if (war && getStoredFFScouterKey()) {
+                try {
+                    warTargets = await fetchWarTargetData(apiKey, war);
+                } catch (targetError) {
+                    warTargets = { enemyFactionId: war.oppId, enemyFactionName: war.oppName, targets: [], error: targetError.message };
+                }
+            }
+
             const result = {
                 userFaction: userFactionData,
                 factionBasic: factionBasicData,
@@ -1194,6 +1463,7 @@
                 factionNews: factionNewsResponse?.news || factionNewsResponse || [],
                 chain,
                 war,
+                warTargets,
                 personalContribution
             };
             setSectionStatus("faction", "Updated");
@@ -1283,7 +1553,80 @@
         `;
     }
 
-    function renderBarsPanel(bars) {
+    function getBarRecoveryDefaults(key, maximum) {
+        if (key === "energy") return { increment: 5, interval: maximum >= 150 ? 600 : 900 };
+        if (key === "nerve") return { increment: 1, interval: 300 };
+        if (key === "happy") return { increment: 5, interval: 900 };
+        return { increment: Math.max(1, Math.ceil(maximum * 0.05)), interval: 300 };
+    }
+
+    function getBarTimerConfig(key, value, fetchedAt) {
+        const currentValue = Number(value.current ?? (typeof value === "number" ? value : 0));
+        const maximumValue = Number(value.maximum ?? value.max ?? 0);
+        const current = Number.isFinite(currentValue) ? currentValue : 0;
+        const maximum = Number.isFinite(maximumValue) ? maximumValue : 0;
+        const defaults = getBarRecoveryDefaults(key, maximum);
+        const increment = Number(value.increment || 0) > 0 ? Number(value.increment) : defaults.increment;
+        const interval = Number(value.interval || 0) > 0 ? Number(value.interval) : defaults.interval;
+        const isFull = maximum <= 0 || current >= maximum;
+        const tickSeconds = isFull ? 0 : Math.max(0, Number(value.tick_time ?? interval));
+        const ticksNeeded = increment > 0 ? Math.ceil(Math.max(0, maximum - current) / increment) : 0;
+        const calculatedFullSeconds = ticksNeeded > 0 ? tickSeconds + (Math.max(0, ticksNeeded - 1) * interval) : 0;
+        const apiFullSeconds = Number(value.full_time || 0);
+        const fullSeconds = isFull ? 0 : (apiFullSeconds > 0 ? apiFullSeconds : calculatedFullSeconds);
+        return { key, current, maximum, increment, interval, tickSeconds, fullSeconds, fetchedAt: Number(fetchedAt || Date.now()) };
+    }
+
+    function getBarTimerState(config, now = Date.now()) {
+        const elapsed = Math.max(0, (now - config.fetchedAt) / 1000);
+        if (config.maximum <= 0) {
+            return { current: config.current, percent: 0, nextTick: 0, fullRemaining: 0, isFull: false, unavailable: true };
+        }
+        if (config.current >= config.maximum || config.fullSeconds <= elapsed) {
+            return { current: Math.max(config.current, config.maximum), percent: 100, nextTick: 0, fullRemaining: 0, isFull: true };
+        }
+        const ticks = elapsed < config.tickSeconds
+            ? 0
+            : 1 + Math.floor((elapsed - config.tickSeconds) / config.interval);
+        const current = Math.min(config.maximum, config.current + (ticks * config.increment));
+        const nextTick = ticks === 0
+            ? config.tickSeconds - elapsed
+            : config.interval - ((elapsed - config.tickSeconds) % config.interval);
+        const fullRemaining = Math.max(0, config.fullSeconds - elapsed);
+        const isFull = current >= config.maximum || fullRemaining <= 0;
+        return {
+            current: isFull ? config.maximum : current,
+            percent: config.maximum > 0 ? Math.min(100, Math.max(0, ((isFull ? config.maximum : current) / config.maximum) * 100)) : 0,
+            nextTick: isFull ? 0 : nextTick,
+            fullRemaining: isFull ? 0 : fullRemaining,
+            isFull
+        };
+    }
+
+    function updateBarTimers(now = Date.now()) {
+        document.querySelectorAll("[data-bar-timer]").forEach((row) => {
+            const config = {
+                current: Number(row.dataset.current || 0) || 0,
+                maximum: Number(row.dataset.maximum || 0) || 0,
+                increment: Number(row.dataset.increment || 0) || 0,
+                interval: Number(row.dataset.interval || 0) || 1,
+                tickSeconds: Number(row.dataset.tickSeconds || 0) || 0,
+                fullSeconds: Number(row.dataset.fullSeconds || 0) || 0,
+                fetchedAt: Number(row.dataset.fetchedAt || now) || now
+            };
+            const timer = getBarTimerState(config, now);
+            const valueEl = row.querySelector("[data-bar-value]");
+            const fillEl = row.querySelector("[data-bar-fill]");
+            const nextEl = row.querySelector("[data-bar-next]");
+            const fullEl = row.querySelector("[data-bar-full]");
+            if (valueEl) valueEl.textContent = `${formatInteger(timer.current)} / ${formatInteger(config.maximum)}`;
+            if (fillEl) fillEl.style.width = `${timer.percent}%`;
+            if (nextEl) nextEl.textContent = timer.unavailable ? "Timing unavailable" : (timer.isFull ? "Full" : `+${formatInteger(config.increment)} in ${formatDuration(Math.ceil(timer.nextTick))}`);
+            if (fullEl) fullEl.textContent = timer.unavailable ? "No bar data" : (timer.isFull ? "Fully replenished" : `Full in ${formatDuration(Math.ceil(timer.fullRemaining))}`);
+        });
+    }
+
+    function renderBarsPanel(bars, fetchedAt) {
         const barDefinitions = [
             { key: "energy", label: "Energy", color: "#7fe18d" },
             { key: "nerve", label: "Nerve", color: "#e05959" },
@@ -1292,16 +1635,22 @@
         ];
         const rows = barDefinitions.map(({ key, label, color }) => {
             const value = bars[key] || {};
-            const current = Number(value.current ?? value ?? 0);
-            const maximum = Number(value.maximum ?? value.max ?? 0);
-            const percent = maximum > 0 ? Math.min(100, Math.max(0, (current / maximum) * 100)) : 0;
+            const config = getBarTimerConfig(key, value, fetchedAt);
+            const timer = getBarTimerState(config);
             return `
-                <div style="display: grid; grid-template-columns: 58px 1fr auto; align-items: center; gap: 8px;">
-                    <span style="color: #e0e0e0; font-size: 12px; font-weight: 700;">${label}</span>
-                    <div style="height: 12px; border-radius: 6px; overflow: hidden; background: #202020; border: 1px solid #3a3a3a;">
-                        <div style="width: ${percent}%; height: 100%; background: ${color}; transition: width 0.3s;"></div>
+                <div data-bar-timer data-current="${config.current}" data-maximum="${config.maximum}" data-increment="${config.increment}" data-interval="${config.interval}" data-tick-seconds="${config.tickSeconds}" data-full-seconds="${config.fullSeconds}" data-fetched-at="${config.fetchedAt}">
+                    <div style="display: grid; grid-template-columns: 58px 1fr auto; align-items: center; gap: 8px;">
+                        <span style="color: #e0e0e0; font-size: 12px; font-weight: 700;">${label}</span>
+                        <div style="height: 12px; border-radius: 6px; overflow: hidden; background: #202020; border: 1px solid #3a3a3a;">
+                            <div data-bar-fill style="width: ${timer.percent}%; height: 100%; background: ${color}; transition: width 0.3s;"></div>
+                        </div>
+                        <span data-bar-value style="color: #fff; font-size: 12px; font-weight: 700; min-width: 68px; text-align: right;">${formatInteger(timer.current)} / ${formatInteger(config.maximum)}</span>
                     </div>
-                    <span style="color: #fff; font-size: 12px; font-weight: 700; min-width: 68px; text-align: right;">${formatInteger(current)} / ${formatInteger(maximum)}</span>
+                    <div style="margin: 3px 0 0 66px; color: #aeb7c2; font-size: 10px; line-height: 1.3;">
+                        <span data-bar-next>${timer.unavailable ? "Timing unavailable" : (timer.isFull ? "Full" : `+${formatInteger(config.increment)} in ${formatDuration(Math.ceil(timer.nextTick))}`)}</span>
+                        <span style="color: #666; padding: 0 4px;">·</span>
+                        <span data-bar-full>${timer.unavailable ? "No bar data" : (timer.isFull ? "Fully replenished" : `Full in ${formatDuration(Math.ceil(timer.fullRemaining))}`)}</span>
+                    </div>
                 </div>
             `;
         }).join("");
@@ -1313,21 +1662,58 @@
         `;
     }
 
-    function renderCooldownsRow(cooldowns, fetchedAt) {
+    function getCooldownDeadlines(icons) {
+        const deadlines = { drug: 0, medical: 0, booster: 0 };
+        normalizeIcons(icons).forEach((icon) => {
+            const title = String(icon?.title || "").toLowerCase();
+            const untilMs = Number(icon?.until || 0) * 1000;
+            if (!untilMs) return;
+            if (title.includes("drug cooldown")) deadlines.drug = untilMs;
+            if (title.includes("medical cooldown")) deadlines.medical = untilMs;
+            if (title.includes("booster cooldown")) deadlines.booster = untilMs;
+        });
+        return deadlines;
+    }
+
+    function getCountdownRemaining(seconds, fetchedAt, untilMs, now = Date.now()) {
+        if (Number(untilMs || 0) > 0) return Math.max(0, (Number(untilMs) - now) / 1000);
+        return Math.max(0, Number(seconds || 0) - ((now - Number(fetchedAt || now)) / 1000));
+    }
+
+    function buildCountdownStatCard(title, value, label, seconds, fetchedAt, color = "#8ec7ff") {
+        const remaining = getCountdownRemaining(seconds, fetchedAt, 0);
+        return `
+            <div style="background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border: 1px solid #333; border-radius: 8px; padding: 10px; min-height: 90px; box-sizing: border-box;">
+                <div style="color: #d4d4d4; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px;">${escapeHtml(title)}</div>
+                <div style="color: ${color}; font-size: 22px; font-weight: 700; line-height: 1.1;">${escapeHtml(String(value ?? "0"))}</div>
+                <div style="color: #d0d0d0; font-size: 12px; font-weight: 600; line-height: 1.35; margin-top: 7px;">${escapeHtml(label)} <span data-countdown-type="duration" data-seconds="${Number(seconds || 0)}" data-fetched-at="${Number(fetchedAt || Date.now())}">${formatDuration(Math.ceil(remaining))}</span></div>
+            </div>
+        `;
+    }
+
+    function renderCooldownsRow(cooldowns, fetchedAt, deadlines = {}) {
         const drug = Number(cooldowns.drug || 0);
         const medical = Number(cooldowns.medical || 0);
         const booster = Number(cooldowns.booster || 0);
+        const hasActiveCooldown = [
+            getCountdownRemaining(drug, fetchedAt, deadlines.drug),
+            getCountdownRemaining(medical, fetchedAt, deadlines.medical),
+            getCountdownRemaining(booster, fetchedAt, deadlines.booster)
+        ].some((remaining) => remaining > 0);
 
-        if (!drug && !medical && !booster) {
+        if (!hasActiveCooldown) {
             return `<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; color: #888; font-size: 11px;">No active cooldowns.</div>`;
         }
 
-        const cell = (key, label, seconds, color) => `
+        const cell = (key, label, seconds, color) => {
+            const remaining = getCountdownRemaining(seconds, fetchedAt, deadlines[key]);
+            return `
             <div style="flex: 1; text-align: center;">
                 <div style="color: #e0e0e0; font-size: 12px; font-weight: 800; margin-bottom: 3px;">${label}</div>
-                <div id="cooldown-${key}" data-seconds="${seconds}" data-fetched-at="${Number(fetchedAt || Date.now())}" data-active-color="${color}" style="color: ${seconds > 0 ? color : "#7fe18d"}; font-size: 13px; font-weight: 800;">${seconds > 0 ? formatDuration(seconds) : "Ready"}</div>
+                <div id="cooldown-${key}" data-seconds="${seconds}" data-fetched-at="${Number(fetchedAt || Date.now())}" data-until-ms="${Number(deadlines[key] || 0)}" data-active-color="${color}" style="color: ${remaining > 0 ? color : "#7fe18d"}; font-size: 13px; font-weight: 800;">${remaining > 0 ? formatDuration(Math.ceil(remaining)) : "Ready"}</div>
             </div>
         `;
+        };
 
         return `
             <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; display: flex; gap: 6px;">
@@ -1338,7 +1724,7 @@
         `;
     }
 
-    function renderTravelCard(basic, travel) {
+    function renderTravelCard(basic, travel, fetchedAt) {
         const status = basic.status || {};
         const stateText = String(status.state || "").toLowerCase();
         const isTraveling = stateText.includes("travel");
@@ -1347,12 +1733,14 @@
         const destination = travel.destination || status.description || "Unknown destination";
         const method = travel.method || "";
         const timeLeft = Number(travel.time_left || 0);
+        const arrivalUntilMs = Number(travel.arrival_at || 0) * 1000;
+        const remaining = getCountdownRemaining(timeLeft, fetchedAt, arrivalUntilMs);
 
         return `
             <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">
                 <div style="color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 4px;">✈️ Traveling</div>
                 <div style="color: #9dd8ff; font-size: 13px; margin-bottom: 2px;">${escapeHtml(String(destination))}${method ? ` · ${escapeHtml(String(method))}` : ""}</div>
-                <div style="color: #888; font-size: 10px;">${timeLeft > 0 ? `Arriving in ${formatDuration(timeLeft)}` : "Arriving soon"}</div>
+                <div data-countdown-type="travel" data-seconds="${timeLeft}" data-fetched-at="${Number(fetchedAt || Date.now())}" data-until-ms="${arrivalUntilMs}" style="color: #888; font-size: 10px;">${remaining > 0 ? `Arriving in ${formatDuration(Math.ceil(remaining))}` : "Arriving soon"}</div>
             </div>
         `;
     }
@@ -1380,10 +1768,10 @@
             if (until !== null && until !== undefined && until !== "") {
                 const date = Number.isFinite(timestamp) && timestamp > 0 ? new Date(timestamp * 1000).toLocaleString() : "Invalid timestamp";
                 if (timestamp > now) {
-                    expiry = `Until: ${timestamp} · ${date} · ${formatDuration(timestamp - now)} remaining`;
+                    expiry = `Until: ${timestamp} · ${escapeHtml(date)} · <span data-countdown-type="status" data-until-ms="${timestamp * 1000}">${formatDuration(timestamp - now)} remaining</span>`;
                     expiryColor = "#7fe18d";
                 } else {
-                    expiry = `Until: ${timestamp} · ${date} · Expired`;
+                    expiry = `Until: ${timestamp} · ${escapeHtml(date)} · Expired`;
                     expiryColor = "#e05959";
                 }
             }
@@ -1394,7 +1782,7 @@
                         <div style="color: #9dd8ff; border: 1px solid #35445a; border-radius: 999px; padding: 2px 6px; font-size: 9px; font-weight: 800; white-space: nowrap;">ID ${escapeHtml(String(icon?.id ?? "—"))}</div>
                     </div>
                     <div style="color: #d0d0d0; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; white-space: normal;">${formatStatusIconDescription(icon?.description)}</div>
-                    <div style="color: ${expiryColor}; font-size: 9px; line-height: 1.35; margin-top: 7px; overflow-wrap: anywhere;">${escapeHtml(expiry)}</div>
+                    <div style="color: ${expiryColor}; font-size: 9px; line-height: 1.35; margin-top: 7px; overflow-wrap: anywhere;">${expiry}</div>
                 </div>
             `;
         }).join("");
@@ -1435,7 +1823,6 @@
         // /faction/chain data if that hasn't loaded yet — either way, no wasted fetch.
         const chain = overview.chain || (state.caches.faction || {}).chain || {};
         const chainDisplay = chain.max ? `${formatInteger(chain.current)} / ${formatInteger(chain.max)}` : "No data";
-        const chainSubtext = chain.max ? `Breaks in ${formatDuration(chain.timeout)}` : "Visit Faction tab to load";
         const networthChange = networthComparison?.totalChange;
         const networthSubtext = networthChange === null || networthChange === undefined
             ? "Live total"
@@ -1447,7 +1834,9 @@
             buildStatCard("Total Net Worth", formatMoney(net), networthSubtext, networthChange < 0 ? "#e05959" : "#7fe18d"),
             buildStatCard("Faction", factionName, "Current faction"),
             buildStatCard("Company", companyName, "Current company"),
-            buildStatCard("Chain", chainDisplay, chainSubtext)
+            chain.max
+                ? buildCountdownStatCard("Chain", chainDisplay, "Breaks in", chain.timeout, chain.fetchedAt)
+                : buildStatCard("Chain", chainDisplay, "Visit Faction tab to load")
         ].join("");
 
         const subTabs = [
@@ -1459,9 +1848,9 @@
             <button data-overview-subtab="${tab.id}" style="background: ${activeSubTab === tab.id ? "#3b5998" : "#2a2a2a"}; border: 1px solid #3d3d3d; color: #fff; border-radius: 4px; padding: 6px 8px; font-size: 11px; cursor: pointer; ${activeSubTab === tab.id ? "font-weight: 700;" : ""}">${tab.label}</button>
         `).join("");
         const generalContent = `
-            ${renderBarsPanel(bars)}
-            ${renderCooldownsRow(cooldowns, overview.cooldownsFetchedAt)}
-            ${renderTravelCard(basic, travel)}
+            ${renderBarsPanel(bars, overview.barsFetchedAt)}
+            ${renderCooldownsRow(cooldowns, overview.cooldownsFetchedAt, overview.cooldownDeadlines)}
+            ${renderTravelCard(basic, travel, overview.travelFetchedAt)}
             <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">
                 ${summaryCards}
             </div>
@@ -1663,8 +2052,11 @@
     function renderEducationLine(education, currentCourseName) {
         const completedCount = Array.isArray(education.complete) ? education.complete.length : 0;
         const current = education.current || null;
+        const courseLabel = current ? (currentCourseName ? escapeHtml(currentCourseName) : `Course #${escapeHtml(current.id)}`) : "";
+        const courseUntilMs = Number(current?.until || 0) * 1000;
+        const courseRemaining = getCountdownRemaining(0, 0, courseUntilMs);
         const inProgressText = current
-            ? `${currentCourseName ? escapeHtml(currentCourseName) : `Course #${current.id}`}${current.until ? ` (${formatDuration(Math.max(0, Number(current.until) - Math.floor(Date.now() / 1000)))} left)` : ""}`
+            ? `${courseLabel}${courseUntilMs ? ` (<span data-countdown-type="education" data-until-ms="${courseUntilMs}">${formatDuration(Math.ceil(courseRemaining))} left</span>)` : ""}`
             : "None";
         const total = completedCount + (current ? 1 : 0);
         return `
@@ -1925,10 +2317,13 @@
     function renderChainBar(chain) {
         const current = Number(chain.current || 0);
         const max = Number(chain.max || 0);
+        const fetchedAt = Number(chain.fetchedAt || Date.now());
+        const timeoutRemaining = getCountdownRemaining(chain.timeout, fetchedAt, 0);
+        const cooldownRemaining = getCountdownRemaining(chain.cooldown, fetchedAt, 0);
         const pct = max > 0 ? Math.min(100, Math.round((current / max) * 100)) : 0;
         const barColor = pct >= 90 ? "#e05959" : pct >= 60 ? "#e0a25e" : "#7fe18d";
 
-        if (!max && !current && !chain.timeout) {
+        if (!max && !current && !chain.timeout && !chain.cooldown) {
             return `<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; color: #888; font-size: 11px;">No active chain.</div>`;
         }
 
@@ -1942,8 +2337,8 @@
                     <div style="width: ${pct}%; height: 100%; background: ${barColor}; transition: width 0.3s;"></div>
                 </div>
                 <div style="display: flex; justify-content: space-between; color: #888; font-size: 10px;">
-                    <span>Breaks in <span id="faction-chain-countdown" style="color: #ccc; font-weight: 700;">${formatDuration(chain.timeout)}</span></span>
-                    <span>Cooldown: ${formatDuration(chain.cooldown)}</span>
+                    <span>Breaks in <span id="faction-chain-countdown" data-chain-seconds="${Number(chain.timeout || 0)}" data-fetched-at="${fetchedAt}" data-expired-text="0s" data-active-color="#ccc" data-expired-color="#e05959" style="color: ${timeoutRemaining > 0 ? "#ccc" : "#e05959"}; font-weight: 700;">${formatDuration(Math.ceil(timeoutRemaining))}</span></span>
+                    <span>Cooldown: <span id="faction-chain-cooldown" data-chain-seconds="${Number(chain.cooldown || 0)}" data-fetched-at="${fetchedAt}" data-expired-text="Ready" data-active-color="#ccc" data-expired-color="#7fe18d" style="color: ${cooldownRemaining > 0 ? "#ccc" : "#7fe18d"}; font-weight: 700;">${cooldownRemaining > 0 ? formatDuration(Math.ceil(cooldownRemaining)) : "Ready"}</span></span>
                 </div>
             </div>
         `;
@@ -1978,6 +2373,125 @@
         `;
     }
 
+    function getWarTargetStatePriority(target) {
+        const online = String(target?.lastAction?.status || "").toLowerCase();
+        const health = String(target?.status?.state || "").toLowerCase();
+        const hospitalUntil = Number(target?.status?.until || 0);
+        const isHospitalized = health.includes("hospital") && hospitalUntil * 1000 > Date.now();
+        const healthPriority = health === "okay" ? 0 : isHospitalized ? 1 : 2;
+        const onlinePriority = online === "online" ? 0 : online === "idle" ? 1 : 2;
+        return (healthPriority * 10) + onlinePriority;
+    }
+
+    function getWarTargetSortValue(target, key) {
+        const online = String(target?.lastAction?.status || "unknown").toLowerCase();
+        const health = String(target?.status?.state || "unknown").toLowerCase();
+        const until = Number(target?.status?.until || 0);
+        const hospitalized = health.includes("hospital") && until * 1000 > Date.now();
+        switch (key) {
+            case "player": return String(target?.name || "").toLowerCase();
+            case "online": return ({ online: 0, idle: 1, offline: 2 })[online] ?? 3;
+            case "health": return health === "okay" ? 0 : (hospitalized ? until : Number.MAX_SAFE_INTEGER);
+            case "location": return String(target?.status?.description || target?.status?.details || "").toLowerCase();
+            case "stats": return Number(target?.battleStats || 0);
+            case "ff": return Number(target?.fairFight || 0);
+            case "attack": return getWarTargetStatePriority(target);
+            case "availability":
+            default: return health === "okay" ? 0 : (hospitalized ? until : Number.MAX_SAFE_INTEGER);
+        }
+    }
+
+    function sortWarTargets(targets) {
+        const { key, direction } = state.warTargetSort || { key: "health", direction: "asc" };
+        const factor = direction === "desc" ? -1 : 1;
+        return [...targets].sort((a, b) => {
+            const aValue = getWarTargetSortValue(a, key);
+            const bValue = getWarTargetSortValue(b, key);
+            const comparison = typeof aValue === "string"
+                ? aValue.localeCompare(String(bValue))
+                : Number(aValue) - Number(bValue);
+            return (comparison * factor)
+                || getWarTargetStatePriority(a) - getWarTargetStatePriority(b)
+                || String(a.name || "").localeCompare(String(b.name || ""));
+        });
+    }
+
+    function renderWarTargetSortHeader(label, key, style = "") {
+        const active = state.warTargetSort?.key === key;
+        const indicator = active ? (state.warTargetSort.direction === "asc" ? " ▲" : " ▼") : " ↕";
+        return `<th data-war-target-sort="${key}" style="padding:7px;cursor:pointer;user-select:none;white-space:nowrap;${style}">${escapeHtml(label)}<span style="color:${active ? "#9dd8ff" : "#697582"};font-size:9px;">${indicator}</span></th>`;
+    }
+
+    function renderFFScouterWarTargets(faction) {
+        const war = faction.war || null;
+        const data = faction.warTargets || null;
+        if (!war) {
+            return `<div style="border:1px solid #343a43;border-radius:8px;padding:12px;color:#aaa;background:rgba(20,20,20,.7);font-size:11px;">No active Ranked War enemy faction.</div>`;
+        }
+        if (!getStoredFFScouterKey()) {
+            return `<div style="border:1px solid #654d2d;border-radius:8px;padding:12px;color:#e0a25e;background:rgba(55,38,18,.55);font-size:11px;line-height:1.5;">Add and verify your separate FFScouter-linked Torn API key under <strong>Settings → Integrations</strong> to load projected stats and Fair Fight values.</div>`;
+        }
+
+        const targets = sortWarTargets(Array.isArray(data?.targets) ? data.targets : []);
+        const onlineCount = targets.filter((target) => /^(online|idle)$/i.test(String(target.lastAction?.status || ""))).length;
+        const okayCount = targets.filter((target) => /^okay$/i.test(String(target.status?.state || ""))).length;
+        const estimatedCount = targets.filter((target) => !target.noEstimate && target.battleStats > 0).length;
+        const refreshed = data?.liveFetchedAt ? new Date(data.liveFetchedAt).toLocaleTimeString() : "Not loaded";
+        const rateLimit = data?.ffLimits ? `${data.ffLimits.remaining}/${data.ffLimits.limit} FFScouter requests remaining` : "FFScouter rate limit unavailable";
+        const notices = [data?.error, data?.statsError ? `FFScouter: ${data.statsError}` : "", data?.liveError ? `Live profile batches unavailable; using faction roster status. ${data.liveError}` : ""].filter(Boolean);
+        const rows = targets.map((target) => {
+            const online = String(target.lastAction?.status || "Unknown");
+            const onlineColor = online === "Online" ? "#7fe18d" : online === "Idle" ? "#e0a25e" : "#9aa4b2";
+            const health = String(target.status?.state || "Unknown");
+            const healthColor = health === "Okay" ? "#7fe18d" : /hospital/i.test(health) ? "#e05959" : "#e0a25e";
+            const hospitalUntilMs = Number(target.status?.until || 0) * 1000;
+            const hospitalRemaining = Math.max(0, (hospitalUntilMs - Date.now()) / 1000);
+            const isHospitalized = /hospital/i.test(health) && hospitalRemaining > 0;
+            const location = target.status?.description || target.status?.details || "No location details";
+            const life = target.life && Number(target.life.maximum || 0) > 0
+                ? `${formatInteger(target.life.current)} / ${formatInteger(target.life.maximum)}`
+                : health;
+            const healthDisplay = isHospitalized
+                ? `<span data-countdown-type="war-hospital" data-until-ms="${hospitalUntilMs}">Out in ${formatDuration(Math.ceil(hospitalRemaining))}</span><div style="color:#9b6d6d;font-size:9px;font-weight:600;">Hospital</div>`
+                : escapeHtml(life);
+            const estimate = target.noEstimate || !target.battleStats
+                ? "No estimate"
+                : (target.battleStatsHuman || formatInteger(target.battleStats));
+            const ff = target.fairFight > 0 ? Number(target.fairFight).toFixed(2) : "—";
+            const estimateAge = target.estimateUpdatedAt ? formatRelativeTime(target.estimateUpdatedAt) : "—";
+            return `
+                <tr style="border-bottom:1px solid #2c333c;">
+                    <td style="padding:8px 7px;min-width:145px;"><a href="https://www.torn.com/profiles.php?XID=${target.id}" target="_blank" rel="noopener noreferrer" style="color:#9dd8ff;font-weight:800;text-decoration:none;">${escapeHtml(target.name)}</a><div style="color:#7f8996;font-size:9px;">ID ${target.id} · Level ${formatInteger(target.level)}</div></td>
+                    <td style="padding:8px 7px;color:${onlineColor};font-weight:800;">${escapeHtml(online)}<div style="color:#7f8996;font-size:9px;font-weight:500;">${escapeHtml(target.lastAction?.relative || "")}</div></td>
+                    <td style="padding:8px 7px;color:${healthColor};font-weight:800;white-space:nowrap;">${healthDisplay}</td>
+                    <td style="padding:8px 7px;min-width:175px;color:#c7ced7;line-height:1.35;overflow-wrap:anywhere;">${escapeHtml(location)}</td>
+                    <td style="padding:8px 7px;text-align:right;color:#c9a0ff;font-weight:800;white-space:nowrap;">${escapeHtml(estimate)}<div style="color:#7f8996;font-size:9px;font-weight:500;">${escapeHtml(target.estimateSource || "")} ${escapeHtml(estimateAge)}</div></td>
+                    <td style="padding:8px 7px;text-align:center;color:#7fe18d;font-size:13px;font-weight:900;">${ff}</td>
+                    <td style="padding:8px 7px;text-align:center;"><a href="https://www.torn.com/loader.php?sid=attack&user2ID=${target.id}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#8f3434;color:#fff;border-radius:5px;padding:5px 8px;font-size:10px;font-weight:800;text-decoration:none;">Attack</a></td>
+                </tr>
+            `;
+        }).join("");
+
+        return `
+            <div style="display:grid;gap:9px;">
+                <div style="border:1px solid #343a43;border-radius:8px;padding:10px;background:rgba(20,20,20,.72);display:grid;gap:8px;">
+                    <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap;">
+                        <div><div style="color:#fff;font-size:13px;font-weight:850;">${escapeHtml(war.oppTag)} War Targets</div><div style="color:#929eac;font-size:10px;margin-top:2px;">${targets.length} members · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div></div>
+                        <div style="display:flex;gap:6px;flex-wrap:wrap;"><button id="refresh-war-live-btn" style="background:#3b5998;color:#fff;border:0;border-radius:5px;padding:6px 9px;font-size:10px;cursor:pointer;">Refresh Live Status</button><button id="refresh-war-all-btn" style="background:#2f6f50;color:#fff;border:0;border-radius:5px;padding:6px 9px;font-size:10px;cursor:pointer;">Refresh All Data</button></div>
+                    </div>
+                    <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;">${buildStatCard("Online / Idle", onlineCount, "Live Torn status", "#7fe18d")}${buildStatCard("Healthy", okayCount, "Status: Okay", "#5ba7f7")}${buildStatCard("Estimates", `${estimatedCount} / ${targets.length}`, rateLimit, "#c9a0ff")}</div>
+                    ${notices.map((notice) => `<div style="color:#e0a25e;font-size:10px;line-height:1.4;">⚠ ${escapeHtml(notice)}</div>`).join("")}
+                </div>
+                <div style="border:1px solid #343a43;border-radius:8px;overflow:auto;max-height:430px;background:rgba(15,15,15,.78);">
+                    <table style="width:100%;border-collapse:collapse;font-size:10px;">
+                        <thead style="position:sticky;top:0;z-index:2;background:#252b33;color:#dce2e9;text-align:left;"><tr>${renderWarTargetSortHeader("Player", "player")}${renderWarTargetSortHeader("Online", "online")}${renderWarTargetSortHeader("Health / Release", "health")}${renderWarTargetSortHeader("Location", "location")}${renderWarTargetSortHeader("Est. Stats", "stats", "text-align:right;")}${renderWarTargetSortHeader("FF", "ff", "text-align:center;")}${renderWarTargetSortHeader("Attack", "attack", "text-align:center;")}</tr></thead>
+                        <tbody>${rows || `<tr><td colspan="7" style="padding:18px;text-align:center;color:#8f99a5;">${escapeHtml(data?.error || "No targets loaded yet.")}</td></tr>`}</tbody>
+                    </table>
+                </div>
+            </div>
+        `;
+    }
+
     function renderFactionPanel() {
         const faction = state.caches.faction || {};
         const userFaction = faction.userFaction || faction.faction || {};
@@ -2008,16 +2522,22 @@
             buildStatCard("Bonus Score", (contribution.bonusScore || 0).toFixed(2), "Respect from bonus hits only — excludes chain & war score", "#c9a0ff")
         ].join("");
 
-        return `
-            ${renderSectionMeta("faction", "Faction")}
-            <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px;">
-                ${cards}
-            </div>
+        const factionSubTabs = [
+            { id: "general", label: "General" },
+            { id: "ffscouter", label: "FFScouter" }
+        ];
+        const activeSubTab = factionSubTabs.some((tab) => tab.id === state.factionSubTab) ? state.factionSubTab : "general";
+        const subTabButtons = factionSubTabs.map((tab) => `<button data-faction-subtab="${tab.id}" style="background:${activeSubTab === tab.id ? "#3b5998" : "#2a2a2a"};border:1px solid #3d3d3d;color:#fff;border-radius:4px;padding:6px 8px;font-size:11px;cursor:pointer;${activeSubTab === tab.id ? "font-weight:700;" : ""}">${tab.label}</button>`).join("");
+        const generalContent = `
+            <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px;">${cards}</div>
             ${renderChainBar(chain)}
             ${renderWarCard(war)}
-            <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">
-                ${contributionCards}
-            </div>
+            <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">${contributionCards}</div>
+        `;
+        return `
+            ${renderSectionMeta("faction", "Faction")}
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">${subTabButtons}</div>
+            ${activeSubTab === "ffscouter" ? renderFFScouterWarTargets(faction) : generalContent}
         `;
     }
 
@@ -2193,7 +2713,8 @@
         const tradeList = trades.slice(0, 4).map((trade) => ({
             text: `Trade #${trade.id || "—"} with ${trade.trader?.name || trade.user?.name || "Unknown player"}`,
             timestamp: trade.modified_at || trade.expires_at,
-            detail: trade.expires_at ? formatTimeUntil(trade.expires_at) : "Ongoing"
+            detail: trade.expires_at ? "" : "Ongoing",
+            expiresAt: Number(trade.expires_at || 0)
         }));
 
         const lists = [
@@ -2211,7 +2732,10 @@
         const rows = safeItems.length ? safeItems.map((item) => {
             const text = item?.text || item?.message || item?.event || item?.title || item?.details?.title || "Unknown update";
             const timestamp = formatRelativeTime(item?.timestamp);
-            const detail = item?.detail ? `<div style="color: #888; font-size: 10px; margin-top: 3px;">${escapeHtml(item.detail)}</div>` : "";
+            const expiresAt = Number(item?.expiresAt || 0);
+            const detail = expiresAt
+                ? `<div style="color: #888; font-size: 10px; margin-top: 3px;"><span data-countdown-type="trade" data-until-ms="${expiresAt * 1000}">${escapeHtml(formatTimeUntil(expiresAt))}</span></div>`
+                : (item?.detail ? `<div style="color: #888; font-size: 10px; margin-top: 3px;">${escapeHtml(item.detail)}</div>` : "");
             return `<div style="padding: 8px 10px; border: 1px solid #2d2d2d; border-radius: 6px; background: rgba(255,255,255,0.02); color: #ddd; font-size: 11px;"><div style="display: flex; justify-content: space-between; gap: 8px;"><span>${escapeHtml(text)}</span>${timestamp ? `<span style="color: #888; font-size: 10px; white-space: nowrap;">${timestamp}</span>` : ""}</div>${detail}</div>`;
         }).join("") : `<div style="padding: 8px 10px; border: 1px solid #2d2d2d; border-radius: 6px; background: rgba(255,255,255,0.02); color: #888; font-size: 11px;">No ${title.toLowerCase()} available.</div>`;
 
@@ -2347,6 +2871,9 @@
         ];
 
         const currentSubTab = state.settingsSubTab || "controls";
+        const dialogBackground = state.theme === "light" ? "#f7f9fc" : "#17191d";
+        const dialogText = state.theme === "light" ? "#17202b" : "#f1f3f5";
+        const dialogMuted = state.theme === "light" ? "#536170" : "#aeb7c2";
         const exportMarkup = snapshotButtons.map(({ key, label }) => `
             <button data-export-section="${key}" style="background: #2f5d3d; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Download ${label} to .csv</button>
         `).join("");
@@ -2357,20 +2884,20 @@
 
         const subTabButtons = [
             { id: "controls", label: "Controls" },
+            { id: "integrations", label: "Integrations" },
             { id: "export", label: "Exports" }
         ].map(({ id, label }) => `
             <button data-settings-subtab="${id}" style="background: ${currentSubTab === id ? '#3b5998' : '#2a2a2a'}; border: 1px solid #3d3d3d; color: #fff; border-radius: 4px; padding: 6px 8px; font-size: 10px; cursor: pointer;">${label}</button>
         `).join("");
 
-        const content = currentSubTab === "controls"
-            ? `
+        const controlsContent = `
                 <div style="display: grid; gap: 10px;">
                     <div style="border: 1px solid #3d3d3d; border-radius: 6px; padding: 10px; display: grid; gap: 7px;">
                         <div style="color: #fff; font-weight: 700; font-size: 12px;">Appearance</div>
                         <div style="color: #aaa; font-size: 11px;">Current mode: ${state.theme === "light" ? "Light" : "Dark"}</div>
                         <button id="theme-toggle-btn" style="background: #3b5998; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Switch to ${state.theme === "light" ? "Dark" : "Light"} Mode</button>
                     </div>
-                    <div style="color: #fff; font-weight: 700; font-size: 12px;">API Key</div>
+                    <div style="color: #fff; font-weight: 700; font-size: 12px;">Naughty Torn Companion · Torn API Key</div>
                     <div style="display: flex; gap: 8px;">
                         <input type="password" id="torn-api-key-input" value="${escapeHtml(getStoredKey())}" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 1; font-size: 11px;" placeholder="Enter Torn API key" />
                         <button id="save-api-key-btn" style="background: #3b5998; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Save</button>
@@ -2378,12 +2905,39 @@
                     <button id="full-refresh-btn" style="background: #a13b3b; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Refresh all sections</button>
                     <div style="display: grid; gap: 6px;">${refreshMarkup}</div>
                 </div>
-            `
-            : `
+            `;
+        const integrationsContent = `
+                <div style="border: 1px solid #3d3d3d; border-radius: 8px; padding: 11px; display: grid; gap: 9px; background: rgba(255,255,255,0.02);">
+                    <div>
+                        <div style="color: #fff; font-weight: 800; font-size: 13px;">FFScouter</div>
+                        <div style="color: #aaa; font-size: 11px; line-height: 1.45; margin-top: 3px;">Enter the Torn API key registered with FFScouter. This credential is stored separately and is never substituted for the Naughty Torn Companion Torn API key.</div>
+                    </div>
+                    <div style="display: flex; gap: 7px; flex-wrap: wrap;">
+                        <input type="password" id="ffscouter-api-key-input" value="${escapeHtml(getStoredFFScouterKey())}" maxlength="16" autocomplete="off" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 1 1 190px; min-width: 0; font-size: 11px;" placeholder="16-character FFScouter-linked Torn key" />
+                        <button id="save-ffscouter-key-btn" style="background: #3b5998; color: white; border: none; border-radius: 6px; padding: 8px 11px; font-size: 11px; cursor: pointer;">Save</button>
+                        <button id="verify-ffscouter-key-btn" style="background: #2f6f50; color: white; border: none; border-radius: 6px; padding: 8px 11px; font-size: 11px; cursor: pointer;">Verify</button>
+                        <button id="clear-ffscouter-key-btn" style="background: #7a3535; color: white; border: none; border-radius: 6px; padding: 8px 11px; font-size: 11px; cursor: pointer;">Clear</button>
+                    </div>
+                    <div id="ffscouter-key-status" style="color: ${state.ffscouterStatus.startsWith("Verified") ? "#7fe18d" : "#bfc7d1"}; font-size: 11px; line-height: 1.4;">${escapeHtml(state.ffscouterStatus)}</div>
+                    <a href="https://ffscouter.com/api-docs" target="_blank" rel="noopener noreferrer" style="color: #70b7ff; font-size: 10px; text-decoration: underline; width: fit-content;">FFScouter API documentation</a>
+                    <dialog id="ffscouter-verification-dialog" style="width: min(420px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow-y: auto; border: 1px solid #4a5564; border-radius: 10px; padding: 0; background: ${dialogBackground}; color: ${dialogText}; box-shadow: 0 18px 60px rgba(0,0,0,0.55);">
+                        <div style="padding: 16px; display: grid; gap: 12px;">
+                            <div id="ffscouter-dialog-title" style="font-size: 15px; font-weight: 850; line-height: 1.3;">FFScouter Key Status</div>
+                            <div id="ffscouter-dialog-summary" style="color: ${dialogMuted}; font-size: 11px; line-height: 1.5;"></div>
+                            <div id="ffscouter-dialog-details" style="display: grid; gap: 6px;"></div>
+                            <button id="close-ffscouter-dialog-btn" type="button" style="justify-self: end; background: #3b5998; color: #fff; border: none; border-radius: 6px; padding: 8px 16px; font-size: 11px; font-weight: 700; cursor: pointer;">Close</button>
+                        </div>
+                    </dialog>
+                </div>
+            `;
+        const exportContent = `
                 <div style="display: grid; gap: 6px;">
                     ${exportMarkup}
                 </div>
             `;
+        const content = currentSubTab === "integrations"
+            ? integrationsContent
+            : (currentSubTab === "export" ? exportContent : controlsContent);
 
         return `
             ${renderSectionMeta("settings", "Settings")}
@@ -2474,10 +3028,57 @@
         const fullRefreshButton = document.getElementById("full-refresh-btn");
         const themeToggleButton = document.getElementById("theme-toggle-btn");
         const apiKeyInput = document.getElementById("torn-api-key-input");
+        const ffscouterKeyInput = document.getElementById("ffscouter-api-key-input");
+        const saveFFScouterButton = document.getElementById("save-ffscouter-key-btn");
+        const verifyFFScouterButton = document.getElementById("verify-ffscouter-key-btn");
+        const clearFFScouterButton = document.getElementById("clear-ffscouter-key-btn");
+        const ffscouterStatus = document.getElementById("ffscouter-key-status");
+        const ffscouterDialog = document.getElementById("ffscouter-verification-dialog");
+        const ffscouterDialogTitle = document.getElementById("ffscouter-dialog-title");
+        const ffscouterDialogSummary = document.getElementById("ffscouter-dialog-summary");
+        const ffscouterDialogDetails = document.getElementById("ffscouter-dialog-details");
+        const closeFFScouterDialogButton = document.getElementById("close-ffscouter-dialog-btn");
         const status = document.getElementById("fetch-status-bar");
         const exportButtons = contentEl.querySelectorAll("[data-export-section]");
         const refreshSectionButtons = contentEl.querySelectorAll("[data-refresh-section]");
         const subTabButtons = contentEl.querySelectorAll("[data-settings-subtab]");
+
+        const setFFScouterStatus = (message, color = "#bfc7d1") => {
+            state.ffscouterStatus = message;
+            if (ffscouterStatus) {
+                ffscouterStatus.textContent = message;
+                ffscouterStatus.style.color = color;
+            }
+        };
+
+        const showFFScouterDialog = ({ title, summary, color, rows = [] }) => {
+            if (ffscouterDialogTitle) {
+                ffscouterDialogTitle.textContent = title;
+                ffscouterDialogTitle.style.color = color || "#f1f3f5";
+            }
+            if (ffscouterDialogSummary) ffscouterDialogSummary.textContent = summary;
+            if (ffscouterDialogDetails) {
+                ffscouterDialogDetails.replaceChildren();
+                rows.forEach(([label, value]) => {
+                    const row = document.createElement("div");
+                    row.style.cssText = "display:grid;grid-template-columns:minmax(115px,0.8fr) minmax(0,1.2fr);gap:10px;padding:7px 8px;border:1px solid #3d4652;border-radius:6px;font-size:10px;line-height:1.4;";
+                    const labelEl = document.createElement("span");
+                    labelEl.style.cssText = "color:#929eac;font-weight:750;";
+                    labelEl.textContent = String(label);
+                    const valueEl = document.createElement("span");
+                    valueEl.style.cssText = "color:inherit;font-weight:650;overflow-wrap:anywhere;text-align:right;";
+                    valueEl.textContent = String(value);
+                    row.append(labelEl, valueEl);
+                    ffscouterDialogDetails.appendChild(row);
+                });
+            }
+            if (ffscouterDialog?.showModal && !ffscouterDialog.open) ffscouterDialog.showModal();
+        };
+
+        if (closeFFScouterDialogButton && !closeFFScouterDialogButton.dataset.bound) {
+            closeFFScouterDialogButton.dataset.bound = "true";
+            closeFFScouterDialogButton.onclick = () => ffscouterDialog?.close();
+        }
 
         if (saveButton && !saveButton.dataset.bound) {
             saveButton.dataset.bound = "true";
@@ -2486,6 +3087,66 @@
                 setStoredKey(apiKey);
                 debugLog("API key saved", { length: String(apiKey || "").length });
                 if (status) status.innerText = "🔑 API key saved locally.";
+            };
+        }
+
+        if (saveFFScouterButton && !saveFFScouterButton.dataset.bound) {
+            saveFFScouterButton.dataset.bound = "true";
+            saveFFScouterButton.onclick = () => {
+                try {
+                    const key = validateFFScouterKey(ffscouterKeyInput?.value);
+                    setStoredFFScouterKey(key);
+                    setFFScouterStatus("Saved · Not verified");
+                    if (status) status.textContent = "FFScouter key saved separately.";
+                } catch (error) {
+                    setFFScouterStatus(error.message, "#e05959");
+                }
+            };
+        }
+
+        if (verifyFFScouterButton && !verifyFFScouterButton.dataset.bound) {
+            verifyFFScouterButton.dataset.bound = "true";
+            verifyFFScouterButton.onclick = async () => {
+                verifyFFScouterButton.disabled = true;
+                setFFScouterStatus("Verifying with FFScouter...", "#9dd8ff");
+                try {
+                    const result = await verifyFFScouterKey(ffscouterKeyInput?.value);
+                    const details = getFFScouterVerificationDetails(result.data);
+                    showFFScouterDialog(details);
+                    if (!result.data?.is_registered) {
+                        setFFScouterStatus("Unregistered · FFScouter does not recognize this key", "#e0a25e");
+                        if (status) status.textContent = "FFScouter key is not registered.";
+                        return;
+                    }
+                    setStoredFFScouterKey(result.key);
+                    const premium = result.data?.is_premium
+                        ? ` · Premium (${String(result.data.premium_entitlement_source || "active").replaceAll("_", " ")})`
+                        : (Number(result.data?.premium_expires_at || 0) > 0 ? " · Premium expired" : " · Premium inactive");
+                    const policy = result.data?.policy_update_required ? " · Policy update required" : "";
+                    const remaining = result.limits ? ` · ${result.limits.remaining}/${result.limits.limit} requests remaining` : "";
+                    setFFScouterStatus(`Verified · Registered${premium}${policy}${remaining}`, result.data?.policy_update_required ? "#e0a25e" : "#7fe18d");
+                    if (status) status.textContent = "FFScouter connection verified and key saved.";
+                } catch (error) {
+                    setFFScouterStatus(`Verification failed · ${error.message}`, "#e05959");
+                    showFFScouterDialog({
+                        title: "FFScouter Verification Failed",
+                        summary: error.message,
+                        color: "#e05959",
+                        rows: [["Status", "Invalid, inactive, or unavailable"]]
+                    });
+                } finally {
+                    verifyFFScouterButton.disabled = false;
+                }
+            };
+        }
+
+        if (clearFFScouterButton && !clearFFScouterButton.dataset.bound) {
+            clearFFScouterButton.dataset.bound = "true";
+            clearFFScouterButton.onclick = () => {
+                setStoredFFScouterKey("");
+                if (ffscouterKeyInput) ffscouterKeyInput.value = "";
+                setFFScouterStatus("Not configured");
+                if (status) status.textContent = "FFScouter key cleared.";
             };
         }
 
@@ -2559,6 +3220,96 @@
         });
     }
 
+    async function refreshWarTargets(includeStats = false) {
+        if (state.warTargetsRefreshInFlight) return false;
+        const faction = state.caches.faction || {};
+        const war = faction.war || null;
+        const apiKey = getStoredKey();
+        if (!apiKey || !war || !getStoredFFScouterKey()) return false;
+        const existing = faction.warTargets || {};
+        state.warTargetsRefreshInFlight = true;
+        try {
+            const refreshed = await fetchWarTargetData(apiKey, war, [], {
+                includeStats: includeStats || !Array.isArray(existing.ffResults) || existing.ffResults.length === 0,
+                existingStats: existing.ffResults || [],
+                statsFetchedAt: existing.statsFetchedAt || 0
+            });
+            state.caches.faction = { ...faction, warTargets: refreshed };
+            void gmSetValue(APP_STORAGE.sections.faction, {
+                data: state.caches.faction,
+                lastRefresh: state.lastRefreshBySection.faction,
+                status: state.sectionStatus.faction
+            });
+            if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") renderTabContent();
+            return true;
+        } catch (error) {
+            state.caches.faction = { ...faction, warTargets: { ...existing, error: error.message, liveFetchedAt: Date.now() } };
+            if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") renderTabContent();
+            return false;
+        } finally {
+            state.warTargetsRefreshInFlight = false;
+        }
+    }
+
+    function bindFactionControls() {
+        const contentEl = document.getElementById("torn-companion-content");
+        if (!contentEl || state.currentTab !== "faction") return;
+        contentEl.querySelectorAll("[data-war-target-sort]").forEach((header) => {
+            header.onclick = () => {
+                const key = header.getAttribute("data-war-target-sort");
+                if (!key) return;
+                const current = state.warTargetSort || {};
+                const defaultDirection = ["stats", "ff"].includes(key) ? "desc" : "asc";
+                state.warTargetSort = {
+                    key,
+                    direction: current.key === key ? (current.direction === "asc" ? "desc" : "asc") : defaultDirection
+                };
+                renderTabContent();
+            };
+        });
+        contentEl.querySelectorAll("[data-faction-subtab]").forEach((button) => {
+            button.onclick = () => {
+                const subTab = button.getAttribute("data-faction-subtab");
+                if (!subTab || subTab === state.factionSubTab) return;
+                state.factionSubTab = subTab;
+                setStoredDashboardState({ factionSubTab: subTab });
+                renderTabContent();
+                if (subTab === "ffscouter") void refreshWarTargets(false);
+            };
+        });
+        const liveButton = document.getElementById("refresh-war-live-btn");
+        const allButton = document.getElementById("refresh-war-all-btn");
+        if (liveButton) liveButton.onclick = async () => {
+            liveButton.disabled = true;
+            liveButton.textContent = "Refreshing...";
+            await refreshWarTargets(false);
+        };
+        if (allButton) allButton.onclick = async () => {
+            allButton.disabled = true;
+            allButton.textContent = "Refreshing...";
+            await refreshWarTargets(true);
+        };
+    }
+
+    function stopWarTargetsRefreshTimer() {
+        if (state.warTargetsRefreshTimer) {
+            clearInterval(state.warTargetsRefreshTimer);
+            state.warTargetsRefreshTimer = null;
+        }
+    }
+
+    function startWarTargetsRefreshTimer() {
+        stopWarTargetsRefreshTimer();
+        if (state.currentTab !== "faction" || state.factionSubTab !== "ffscouter") return;
+        state.warTargetsRefreshTimer = setInterval(() => {
+            if (state.currentTab !== "faction" || state.factionSubTab !== "ffscouter") {
+                stopWarTargetsRefreshTimer();
+                return;
+            }
+            void refreshWarTargets(false);
+        }, 30 * 1000);
+    }
+
     function bindOverviewControls() {
         const contentEl = document.getElementById("torn-companion-content");
         if (!contentEl || state.currentTab !== "overview") return;
@@ -2609,6 +3360,7 @@
         bindInventoryTableControls();
         bindSettingsControls();
         bindPersonalControls();
+        bindFactionControls();
         bindOverviewControls();
 
         if (state.currentTab === "faction") {
@@ -2616,11 +3368,9 @@
         } else {
             stopChainCountdownTimer();
         }
-        if (state.currentTab === "overview" && state.overviewSubTab === "general") {
-            startCooldownCountdownTimer();
-        } else {
-            stopCooldownCountdownTimer();
-        }
+        if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") startWarTargetsRefreshTimer();
+        else stopWarTargetsRefreshTimer();
+        startCooldownCountdownTimer();
     }
 
     function stopChainCountdownTimer() {
@@ -2633,17 +3383,18 @@
     function startChainCountdownTimer() {
         stopChainCountdownTimer();
         const updateCountdown = () => {
-            const el = document.getElementById("faction-chain-countdown");
-            if (!el || state.currentTab !== "faction") {
+            const elements = document.querySelectorAll("[data-chain-seconds]");
+            if (!elements.length || state.currentTab !== "faction") {
                 stopChainCountdownTimer();
                 return;
             }
-            const chain = (state.caches.faction || {}).chain || {};
-            if (!chain.fetchedAt || !Number.isFinite(chain.timeout)) return;
-            const elapsedSeconds = Math.floor((Date.now() - chain.fetchedAt) / 1000);
-            const remaining = Math.max(0, Number(chain.timeout) - elapsedSeconds);
-            el.textContent = formatDuration(remaining);
-            el.style.color = remaining <= 0 ? "#e05959" : "#ccc";
+            elements.forEach((el) => {
+                const seconds = Number(el.dataset.chainSeconds || 0);
+                const fetchedAt = Number(el.dataset.fetchedAt || Date.now());
+                const remaining = getCountdownRemaining(seconds, fetchedAt, 0);
+                el.textContent = remaining > 0 ? formatDuration(Math.ceil(remaining)) : (el.dataset.expiredText || "0s");
+                el.style.color = remaining > 0 ? (el.dataset.activeColor || "#ccc") : (el.dataset.expiredColor || "#e05959");
+            });
         };
         updateCountdown();
         state.chainCountdownTimer = setInterval(updateCountdown, 250);
@@ -2659,18 +3410,37 @@
     function startCooldownCountdownTimer() {
         stopCooldownCountdownTimer();
         const updateCountdown = () => {
-            if (state.currentTab !== "overview") {
-                stopCooldownCountdownTimer();
-                return;
-            }
+            updateBarTimers();
             const elements = document.querySelectorAll("[id^='cooldown-'][data-seconds]");
-            if (!elements.length) return;
             elements.forEach((el) => {
                 const seconds = Number(el.dataset.seconds || 0);
                 const fetchedAt = Number(el.dataset.fetchedAt || Date.now());
-                const remaining = Math.max(0, seconds - ((Date.now() - fetchedAt) / 1000));
+                const untilMs = Number(el.dataset.untilMs || 0);
+                const remaining = getCountdownRemaining(seconds, fetchedAt, untilMs);
                 el.textContent = remaining > 0 ? formatDuration(Math.ceil(remaining)) : "Ready";
                 el.style.color = remaining > 0 ? (el.dataset.activeColor || "#fff") : "#7fe18d";
+            });
+            document.querySelectorAll("[data-countdown-type]").forEach((el) => {
+                const type = el.dataset.countdownType;
+                const seconds = Number(el.dataset.seconds || 0);
+                const fetchedAt = Number(el.dataset.fetchedAt || Date.now());
+                const untilMs = Number(el.dataset.untilMs || 0);
+                const remaining = getCountdownRemaining(seconds, fetchedAt, untilMs);
+                if (type === "travel") {
+                    el.textContent = remaining > 0 ? `Arriving in ${formatDuration(Math.ceil(remaining))}` : "Arriving soon";
+                } else if (type === "status") {
+                    el.textContent = remaining > 0 ? `${formatDuration(Math.ceil(remaining))} remaining` : "Expired";
+                    el.style.color = remaining > 0 ? "#7fe18d" : "#e05959";
+                } else if (type === "education") {
+                    el.textContent = remaining > 0 ? `${formatDuration(Math.ceil(remaining))} left` : "Complete";
+                } else if (type === "war-hospital") {
+                    el.textContent = remaining > 0 ? `Out in ${formatDuration(Math.ceil(remaining))}` : "Attackable now";
+                    el.style.color = remaining > 0 ? "#e05959" : "#7fe18d";
+                } else if (type === "trade") {
+                    el.textContent = formatTimeUntil(untilMs / 1000);
+                } else {
+                    el.textContent = formatDuration(Math.ceil(remaining));
+                }
             });
         };
         updateCountdown();

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.19.7
+// @version      5.19.8
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -1796,7 +1796,7 @@
     }
 
     function renderStatusIcons(icons) {
-        const entries = normalizeIcons(icons);
+        const entries = normalizeIcons(icons).filter((icon) => Number(icon?.id) !== 6);
         if (!entries.length) {
             return `<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 12px; background: rgba(20,20,20,0.7); color: #888; font-size: 11px;">No status icons are currently active.</div>`;
         }

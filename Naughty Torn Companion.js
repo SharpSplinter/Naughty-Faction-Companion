@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.17.0
+// @version      5.18.1
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -90,7 +90,9 @@
 
     const state = {
         sortState: { key: "value", direction: "desc" },
-        warTargetSort: { key: "health", direction: "asc" },
+        warTargetSort: { key: "status", direction: "asc" },
+        warTargetColumnOrder: ["player", "online", "status", "stats", "ff", "attack"],
+        warTargetColumnWidths: { player: 150, online: 84, status: 280, stats: 112, ff: 58, attack: 76 },
         expandedCategories: new Set(),
         currentTab: "overview",
         overviewSubTab: "general",
@@ -249,7 +251,9 @@
         personalSubTab: state.personalSubTab,
         theme: state.theme,
         isMinimized: state.isMinimized,
-        windowSizes: state.windowSizes
+        windowSizes: state.windowSizes,
+        warTargetColumnOrder: state.warTargetColumnOrder,
+        warTargetColumnWidths: state.warTargetColumnWidths
     });
     const setStoredDashboardState = (payload) => {
         if (payload && payload.currentTab) state.currentTab = payload.currentTab;
@@ -260,6 +264,8 @@
         if (payload && ["light", "dark"].includes(payload.theme)) state.theme = payload.theme;
         if (payload && typeof payload.isMinimized === "boolean") state.isMinimized = payload.isMinimized;
         if (payload && payload.windowSizes && typeof payload.windowSizes === "object") state.windowSizes = payload.windowSizes;
+        if (payload && Array.isArray(payload.warTargetColumnOrder)) state.warTargetColumnOrder = payload.warTargetColumnOrder;
+        if (payload && payload.warTargetColumnWidths && typeof payload.warTargetColumnWidths === "object") state.warTargetColumnWidths = payload.warTargetColumnWidths;
         void gmSetValue(APP_STORAGE.dashboard, getStoredDashboardState());
     };
 
@@ -446,6 +452,21 @@
         state.windowSizes = dashboardState.windowSizes && typeof dashboardState.windowSizes === "object"
             ? dashboardState.windowSizes
             : {};
+        const warTargetColumns = ["player", "online", "status", "stats", "ff", "attack"];
+        const savedWarTargetOrder = Array.isArray(dashboardState.warTargetColumnOrder)
+            ? [...new Set(dashboardState.warTargetColumnOrder.map((key) => key === "health" ? "status" : key).filter((key) => key !== "location"))]
+            : [];
+        state.warTargetColumnOrder = savedWarTargetOrder.length === warTargetColumns.length
+            && warTargetColumns.every((key) => savedWarTargetOrder.includes(key))
+            ? savedWarTargetOrder
+            : warTargetColumns;
+        state.warTargetColumnWidths = dashboardState.warTargetColumnWidths && typeof dashboardState.warTargetColumnWidths === "object"
+            ? { ...state.warTargetColumnWidths, ...dashboardState.warTargetColumnWidths }
+            : state.warTargetColumnWidths;
+        if (!Number(dashboardState.warTargetColumnWidths?.status)) {
+            const combinedStatusWidth = Number(dashboardState.warTargetColumnWidths?.health || 0) + Number(dashboardState.warTargetColumnWidths?.location || 0);
+            if (combinedStatusWidth) state.warTargetColumnWidths.status = Math.min(600, Math.max(150, combinedStatusWidth));
+        }
 
         const sectionNames = Object.keys(APP_STORAGE.sections);
         await Promise.all(sectionNames.map(async (name) => {
@@ -2389,6 +2410,22 @@
         return (healthPriority * 10) + onlinePriority;
     }
 
+    function getWarTargetStatus(target) {
+        const rawState = String(target?.status?.state || "");
+        const description = String(target?.status?.description || target?.status?.details || "");
+        const untilMs = Number(target?.status?.until || 0) * 1000;
+        const isHospitalized = /hospital/i.test(rawState) || /hospital/i.test(description);
+        const isTraveling = /travel/i.test(rawState) || /travel/i.test(description);
+        const destinationMatch = description.match(/\bto\s+(.+?)(?:[.!]|$)/i);
+        const destination = isTraveling && destinationMatch ? destinationMatch[1].trim() : "";
+        return {
+            kind: isHospitalized ? "hospital" : isTraveling ? "travel" : "okay",
+            label: isHospitalized ? "Hospitalized" : isTraveling ? "Traveling" : "Okay",
+            untilMs,
+            destination
+        };
+    }
+
     function getWarTargetSortValue(target, key) {
         const online = String(target?.lastAction?.status || "unknown").toLowerCase();
         const health = String(target?.status?.state || "unknown").toLowerCase();
@@ -2397,8 +2434,11 @@
         switch (key) {
             case "player": return String(target?.name || "").toLowerCase();
             case "online": return ({ online: 0, idle: 1, offline: 2 })[online] ?? 3;
-            case "health": return health === "okay" ? 0 : (hospitalized ? until : Number.MAX_SAFE_INTEGER);
-            case "location": return String(target?.status?.description || target?.status?.details || "").toLowerCase();
+            case "status": {
+                const status = getWarTargetStatus(target);
+                const priority = status.kind === "okay" ? 0 : status.kind === "hospital" ? 1 : 2;
+                return priority === 0 ? 0 : (priority * 1_000_000_000_000_000) + (status.untilMs || 900_000_000_000_000);
+            }
             case "stats": return Number(target?.battleStats || 0);
             case "ff": return Number(target?.fairFight || 0);
             case "attack": return getWarTargetStatePriority(target);
@@ -2408,7 +2448,7 @@
     }
 
     function sortWarTargets(targets) {
-        const { key, direction } = state.warTargetSort || { key: "health", direction: "asc" };
+        const { key, direction } = state.warTargetSort || { key: "status", direction: "asc" };
         const factor = direction === "desc" ? -1 : 1;
         return [...targets].sort((a, b) => {
             const aValue = getWarTargetSortValue(a, key);
@@ -2422,10 +2462,42 @@
         });
     }
 
-    function renderWarTargetSortHeader(label, key, style = "") {
+    const WAR_TARGET_COLUMNS = {
+        player: { label: "Player", align: "left", minWidth: 110 },
+        online: { label: "Online", align: "left", minWidth: 70 },
+        status: { label: "Status", align: "left", minWidth: 150 },
+        stats: { label: "Est. Stats", align: "right", minWidth: 90 },
+        ff: { label: "FF", align: "center", minWidth: 48 },
+        attack: { label: "Attack", align: "center", minWidth: 68 }
+    };
+
+    function renderWarTargetSortHeader(key) {
+        const column = WAR_TARGET_COLUMNS[key];
         const active = state.warTargetSort?.key === key;
         const indicator = active ? (state.warTargetSort.direction === "asc" ? " ▲" : " ▼") : " ↕";
-        return `<th data-war-target-sort="${key}" style="padding:7px;cursor:pointer;user-select:none;white-space:nowrap;${style}">${escapeHtml(label)}<span style="color:${active ? "#9dd8ff" : "#697582"};font-size:9px;">${indicator}</span></th>`;
+        return `<th data-war-target-sort="${key}" data-war-column-key="${key}" style="position:relative;padding:7px 15px 7px 7px;cursor:pointer;user-select:none;white-space:nowrap;text-align:${column.align};overflow:hidden;text-overflow:ellipsis;">
+            <span data-war-column-drag="${key}" draggable="true" title="Drag to reorder" style="display:inline-block;margin-right:4px;color:#697582;cursor:grab;font-size:10px;">⠿</span>${escapeHtml(column.label)}<span style="color:${active ? "#9dd8ff" : "#697582"};font-size:9px;">${indicator}</span>
+            <span data-war-column-resize="${key}" title="Drag to resize" style="position:absolute;right:0;top:0;width:8px;height:100%;cursor:col-resize;border-right:2px solid #46505d;"></span>
+        </th>`;
+    }
+
+    function renderWarTargetCell(key, target, display) {
+        switch (key) {
+            case "player":
+                return `<td style="padding:8px 7px;overflow:hidden;"><a href="https://www.torn.com/profiles.php?XID=${target.id}" target="_blank" rel="noopener noreferrer" style="color:#9dd8ff;font-weight:800;text-decoration:none;overflow-wrap:anywhere;">${escapeHtml(target.name)}</a><div style="color:#7f8996;font-size:9px;white-space:nowrap;">ID ${target.id} · Level ${formatInteger(target.level)}</div></td>`;
+            case "online":
+                return `<td style="padding:8px 7px;color:${display.onlineColor};font-weight:800;overflow:hidden;">${escapeHtml(display.online)}<div style="color:#7f8996;font-size:9px;font-weight:500;overflow-wrap:anywhere;">${escapeHtml(target.lastAction?.relative || "")}</div></td>`;
+            case "status":
+                return `<td style="padding:8px 7px;color:${display.statusColor};font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${display.statusDisplay}</td>`;
+            case "stats":
+                return `<td style="padding:8px 7px;text-align:right;color:#c9a0ff;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(display.estimate)}<div style="color:#7f8996;font-size:9px;font-weight:500;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(target.estimateSource || "")} ${escapeHtml(display.estimateAge)}</div></td>`;
+            case "ff":
+                return `<td style="padding:8px 7px;text-align:center;color:#7fe18d;font-size:13px;font-weight:900;white-space:nowrap;">${display.ff}</td>`;
+            case "attack":
+                return `<td style="padding:8px 7px;text-align:center;white-space:nowrap;"><a class="ntc-attack-button" href="https://www.torn.com/loader.php?sid=attack&user2ID=${target.id}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#8f3434;color:#fff;border-radius:5px;padding:5px 8px;font-size:10px;font-weight:800;text-decoration:none;white-space:nowrap;overflow-wrap:normal;word-break:keep-all;">Attack</a></td>`;
+            default:
+                return "";
+        }
     }
 
     function renderFFScouterWarTargets(faction) {
@@ -2440,40 +2512,31 @@
 
         const targets = sortWarTargets(Array.isArray(data?.targets) ? data.targets : []);
         const onlineCount = targets.filter((target) => /^(online|idle)$/i.test(String(target.lastAction?.status || ""))).length;
-        const okayCount = targets.filter((target) => /^okay$/i.test(String(target.status?.state || ""))).length;
+        const okayCount = targets.filter((target) => getWarTargetStatus(target).kind === "okay").length;
         const estimatedCount = targets.filter((target) => !target.noEstimate && target.battleStats > 0).length;
         const refreshed = data?.liveFetchedAt ? new Date(data.liveFetchedAt).toLocaleTimeString() : "Not loaded";
         const rateLimit = data?.ffLimits ? `${data.ffLimits.remaining}/${data.ffLimits.limit} FFScouter requests remaining` : "FFScouter rate limit unavailable";
         const notices = [data?.error, data?.statsError ? `FFScouter: ${data.statsError}` : "", data?.liveError ? `Live profile batches unavailable; using faction roster status. ${data.liveError}` : ""].filter(Boolean);
+        const columnOrder = state.warTargetColumnOrder.filter((key) => WAR_TARGET_COLUMNS[key]);
         const rows = targets.map((target) => {
             const online = String(target.lastAction?.status || "Unknown");
             const onlineColor = online === "Online" ? "#7fe18d" : online === "Idle" ? "#e0a25e" : "#9aa4b2";
-            const health = String(target.status?.state || "Unknown");
-            const healthColor = health === "Okay" ? "#7fe18d" : /hospital/i.test(health) ? "#e05959" : "#e0a25e";
-            const hospitalUntilMs = Number(target.status?.until || 0) * 1000;
-            const hospitalRemaining = Math.max(0, (hospitalUntilMs - Date.now()) / 1000);
-            const isHospitalized = /hospital/i.test(health) && hospitalRemaining > 0;
-            const location = target.status?.description || target.status?.details || "No location details";
-            const life = target.life && Number(target.life.maximum || 0) > 0
-                ? `${formatInteger(target.life.current)} / ${formatInteger(target.life.maximum)}`
-                : health;
-            const healthDisplay = isHospitalized
-                ? `<span data-countdown-type="war-hospital" data-until-ms="${hospitalUntilMs}">Out in ${formatDuration(Math.ceil(hospitalRemaining))}</span><div style="color:#9b6d6d;font-size:9px;font-weight:600;">Hospital</div>`
-                : escapeHtml(life);
+            const status = getWarTargetStatus(target);
+            const statusRemaining = Math.max(0, (status.untilMs - Date.now()) / 1000);
+            const statusSuffix = status.kind === "travel" && status.destination ? ` · ${status.destination}` : "";
+            const statusColor = status.kind === "okay" ? "#7fe18d" : status.kind === "hospital" ? "#e05959" : "#e0a25e";
+            const statusDisplay = status.kind !== "okay" && statusRemaining > 0
+                ? `<span data-countdown-type="war-target-status" data-until-ms="${status.untilMs}" data-status-suffix="${escapeHtml(statusSuffix)}" data-status-fallback="${escapeHtml(status.label + statusSuffix)}">${formatDuration(Math.ceil(statusRemaining))}${escapeHtml(statusSuffix)}</span>`
+                : escapeHtml(status.label + statusSuffix);
             const estimate = target.noEstimate || !target.battleStats
                 ? "No estimate"
                 : (target.battleStatsHuman || formatInteger(target.battleStats));
             const ff = target.fairFight > 0 ? Number(target.fairFight).toFixed(2) : "—";
             const estimateAge = target.estimateUpdatedAt ? formatRelativeTime(target.estimateUpdatedAt) : "—";
+            const display = { online, onlineColor, statusColor, statusDisplay, estimate, ff, estimateAge };
             return `
                 <tr style="border-bottom:1px solid #2c333c;">
-                    <td style="padding:8px 7px;min-width:145px;"><a href="https://www.torn.com/profiles.php?XID=${target.id}" target="_blank" rel="noopener noreferrer" style="color:#9dd8ff;font-weight:800;text-decoration:none;">${escapeHtml(target.name)}</a><div style="color:#7f8996;font-size:9px;">ID ${target.id} · Level ${formatInteger(target.level)}</div></td>
-                    <td style="padding:8px 7px;color:${onlineColor};font-weight:800;">${escapeHtml(online)}<div style="color:#7f8996;font-size:9px;font-weight:500;">${escapeHtml(target.lastAction?.relative || "")}</div></td>
-                    <td style="padding:8px 7px;color:${healthColor};font-weight:800;white-space:nowrap;">${healthDisplay}</td>
-                    <td style="padding:8px 7px;min-width:175px;color:#c7ced7;line-height:1.35;overflow-wrap:anywhere;">${escapeHtml(location)}</td>
-                    <td style="padding:8px 7px;text-align:right;color:#c9a0ff;font-weight:800;white-space:nowrap;">${escapeHtml(estimate)}<div style="color:#7f8996;font-size:9px;font-weight:500;">${escapeHtml(target.estimateSource || "")} ${escapeHtml(estimateAge)}</div></td>
-                    <td style="padding:8px 7px;text-align:center;color:#7fe18d;font-size:13px;font-weight:900;">${ff}</td>
-                    <td style="padding:8px 7px;text-align:center;"><a href="https://www.torn.com/loader.php?sid=attack&user2ID=${target.id}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#8f3434;color:#fff;border-radius:5px;padding:5px 8px;font-size:10px;font-weight:800;text-decoration:none;">Attack</a></td>
+                    ${columnOrder.map((key) => renderWarTargetCell(key, target, display)).join("")}
                 </tr>
             `;
         }).join("");
@@ -2482,16 +2545,17 @@
             <div style="display:grid;gap:9px;">
                 <div style="border:1px solid #343a43;border-radius:8px;padding:10px;background:rgba(20,20,20,.72);display:grid;gap:8px;">
                     <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap;">
-                        <div><div style="color:#fff;font-size:13px;font-weight:850;">${escapeHtml(war.oppTag)} War Targets</div><div style="color:#929eac;font-size:10px;margin-top:2px;">${targets.length} members · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div></div>
+                        <div><div style="color:#fff;font-size:13px;font-weight:850;">${escapeHtml(war.oppTag)} War Targets</div><div style="color:#929eac;font-size:10px;margin-top:2px;">${targets.length} members · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div><div style="color:#697582;font-size:9px;margin-top:3px;">Drag ⠿ to reorder columns · drag a header's right edge to resize</div></div>
                         <div style="display:flex;gap:6px;flex-wrap:wrap;"><button id="refresh-war-live-btn" style="background:#3b5998;color:#fff;border:0;border-radius:5px;padding:6px 9px;font-size:10px;cursor:pointer;">Refresh Live Status</button><button id="refresh-war-all-btn" style="background:#2f6f50;color:#fff;border:0;border-radius:5px;padding:6px 9px;font-size:10px;cursor:pointer;">Refresh All Data</button></div>
                     </div>
                     <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;">${buildStatCard("Online / Idle", onlineCount, "Live Torn status", "#7fe18d")}${buildStatCard("Healthy", okayCount, "Status: Okay", "#5ba7f7")}${buildStatCard("Estimates", `${estimatedCount} / ${targets.length}`, rateLimit, "#c9a0ff")}</div>
                     ${notices.map((notice) => `<div style="color:#e0a25e;font-size:10px;line-height:1.4;">⚠ ${escapeHtml(notice)}</div>`).join("")}
                 </div>
-                <div style="border:1px solid #343a43;border-radius:8px;overflow:auto;max-height:430px;background:rgba(15,15,15,.78);">
-                    <table style="width:100%;border-collapse:collapse;font-size:10px;">
-                        <thead style="position:sticky;top:0;z-index:2;background:#252b33;color:#dce2e9;text-align:left;"><tr>${renderWarTargetSortHeader("Player", "player")}${renderWarTargetSortHeader("Online", "online")}${renderWarTargetSortHeader("Health / Release", "health")}${renderWarTargetSortHeader("Location", "location")}${renderWarTargetSortHeader("Est. Stats", "stats", "text-align:right;")}${renderWarTargetSortHeader("FF", "ff", "text-align:center;")}${renderWarTargetSortHeader("Attack", "attack", "text-align:center;")}</tr></thead>
-                        <tbody>${rows || `<tr><td colspan="7" style="padding:18px;text-align:center;color:#8f99a5;">${escapeHtml(data?.error || "No targets loaded yet.")}</td></tr>`}</tbody>
+                <div class="ntc-war-target-table-wrap" style="width:100%;min-width:0;border:1px solid #343a43;border-radius:8px;overflow:auto;max-height:430px;background:rgba(15,15,15,.78);">
+                    <table class="ntc-war-target-table" style="width:max-content;min-width:100%;max-width:none;border-collapse:collapse;font-size:10px;table-layout:fixed;">
+                        <colgroup>${columnOrder.map((key) => `<col data-war-column="${key}" style="width:${Math.max(WAR_TARGET_COLUMNS[key].minWidth, Number(state.warTargetColumnWidths[key]) || WAR_TARGET_COLUMNS[key].minWidth)}px;">`).join("")}</colgroup>
+                        <thead style="position:sticky;top:0;z-index:2;background:#252b33;color:#dce2e9;text-align:left;"><tr>${columnOrder.map(renderWarTargetSortHeader).join("")}</tr></thead>
+                        <tbody>${rows || `<tr><td colspan="${columnOrder.length}" style="padding:18px;text-align:center;color:#8f99a5;">${escapeHtml(data?.error || "No targets loaded yet.")}</td></tr>`}</tbody>
                     </table>
                 </div>
             </div>
@@ -3265,7 +3329,8 @@
         const contentEl = document.getElementById("torn-companion-content");
         if (!contentEl || state.currentTab !== "faction") return;
         contentEl.querySelectorAll("[data-war-target-sort]").forEach((header) => {
-            header.onclick = () => {
+            header.onclick = (event) => {
+                if (event.target.closest("[data-war-column-resize], [data-war-column-drag]")) return;
                 const key = header.getAttribute("data-war-target-sort");
                 if (!key) return;
                 const current = state.warTargetSort || {};
@@ -3275,6 +3340,71 @@
                     direction: current.key === key ? (current.direction === "asc" ? "desc" : "asc") : defaultDirection
                 };
                 renderTabContent();
+            };
+        });
+        let draggedColumn = null;
+        contentEl.querySelectorAll("[data-war-column-drag]").forEach((handle) => {
+            handle.ondragstart = (event) => {
+                draggedColumn = handle.getAttribute("data-war-column-drag");
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", draggedColumn);
+                handle.style.cursor = "grabbing";
+            };
+            handle.ondragend = () => {
+                draggedColumn = null;
+                handle.style.cursor = "grab";
+            };
+        });
+        contentEl.querySelectorAll("[data-war-column-key]").forEach((header) => {
+            header.ondragover = (event) => {
+                if (!draggedColumn) return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                header.style.boxShadow = "inset 3px 0 #9dd8ff";
+            };
+            header.ondragleave = () => {
+                header.style.boxShadow = "";
+            };
+            header.ondrop = (event) => {
+                event.preventDefault();
+                header.style.boxShadow = "";
+                const source = draggedColumn || event.dataTransfer.getData("text/plain");
+                const target = header.getAttribute("data-war-column-key");
+                if (!source || !target || source === target) return;
+                const order = state.warTargetColumnOrder.filter((key) => key !== source);
+                const targetIndex = order.indexOf(target);
+                order.splice(Math.max(0, targetIndex), 0, source);
+                state.warTargetColumnOrder = order;
+                setStoredDashboardState({ warTargetColumnOrder: order });
+                renderTabContent();
+            };
+        });
+        contentEl.querySelectorAll("[data-war-column-resize]").forEach((handle) => {
+            handle.onmousedown = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const key = handle.getAttribute("data-war-column-resize");
+                const column = contentEl.querySelector(`[data-war-column="${key}"]`);
+                const definition = WAR_TARGET_COLUMNS[key];
+                if (!column || !definition) return;
+                const startX = event.clientX;
+                const startWidth = column.getBoundingClientRect().width;
+                handle.style.borderRightColor = "#9dd8ff";
+                document.body.style.userSelect = "none";
+                const onMove = (moveEvent) => {
+                    const width = Math.min(600, Math.max(definition.minWidth, startWidth + moveEvent.clientX - startX));
+                    column.style.width = `${width}px`;
+                    state.warTargetColumnWidths = { ...state.warTargetColumnWidths, [key]: Math.round(width) };
+                };
+                const onUp = () => {
+                    document.removeEventListener("mousemove", onMove);
+                    document.removeEventListener("mouseup", onUp);
+                    document.body.style.userSelect = "";
+                    handle.style.borderRightColor = "#46505d";
+                    setStoredDashboardState({ warTargetColumnWidths: state.warTargetColumnWidths });
+                };
+                document.addEventListener("mousemove", onMove);
+                document.addEventListener("mouseup", onUp);
             };
         });
         contentEl.querySelectorAll("[data-faction-subtab]").forEach((button) => {
@@ -3450,6 +3580,11 @@
                 } else if (type === "war-hospital") {
                     el.textContent = remaining > 0 ? `Out in ${formatDuration(Math.ceil(remaining))}` : "Attackable now";
                     el.style.color = remaining > 0 ? "#e05959" : "#7fe18d";
+                } else if (type === "war-target-status") {
+                    const suffix = el.dataset.statusSuffix || "";
+                    el.textContent = remaining > 0
+                        ? `${formatDuration(Math.ceil(remaining))}${suffix}`
+                        : (el.dataset.statusFallback || "Okay");
                 } else if (type === "trade") {
                     el.textContent = formatTimeUntil(untilMs / 1000);
                 } else {
@@ -3834,6 +3969,23 @@
                 }
                 #torn-v2-inventory-wrapper #torn-companion-content table {
                     max-width: 100%;
+                }
+                #torn-v2-inventory-wrapper #torn-companion-content .ntc-war-target-table-wrap {
+                    width: 100% !important;
+                    min-width: 0 !important;
+                    max-width: 100% !important;
+                }
+                #torn-v2-inventory-wrapper #torn-companion-content .ntc-war-target-table {
+                    width: max-content !important;
+                    min-width: 100% !important;
+                    max-width: none !important;
+                }
+                #torn-v2-inventory-wrapper #torn-companion-content .ntc-attack-button {
+                    min-width: max-content !important;
+                    max-width: none !important;
+                    white-space: nowrap !important;
+                    overflow-wrap: normal !important;
+                    word-break: keep-all !important;
                 }
                 @container (max-width: 430px) {
                     #torn-v2-inventory-wrapper #torn-companion-content [style*="grid-template-columns"] {

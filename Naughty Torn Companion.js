@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.14.7
+// @version      5.14.8
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -1363,29 +1363,27 @@
             const base = Number(stats[key] || 0);
             const bonus = Number(bonuses[key] || 0);
             const xanaxDebuff = hasXanaxDebuff ? -25 : 0;
-            return { label: labels[key], base, bonus, xanaxDebuff, effective: base * (1 + (bonus + xanaxDebuff) / 100) };
+            const modifier = bonus + xanaxDebuff;
+            return { label: labels[key], base, modifier, effective: base * (1 + modifier / 100) };
         });
         const rows = entries.map((entry) =>
-            '<div style="display: grid; grid-template-columns: minmax(72px, 1fr) minmax(92px, 1.2fr) minmax(54px, 0.7fr) minmax(58px, 0.75fr) minmax(92px, 1.2fr); gap: 6px; align-items: center; padding: 4px 0; border-bottom: 1px solid #222;">'
+            '<div style="display: grid; grid-template-columns: minmax(78px, 1fr) minmax(100px, 1.2fr) minmax(62px, 0.7fr) minmax(100px, 1.2fr); gap: 6px; align-items: center; padding: 4px 0; border-bottom: 1px solid #222;">'
             + '<span style="color: #d0d0d0; font-size: 12px; font-weight: 600;">' + entry.label + '</span>'
             + '<span style="color: #fff; font-size: 12px; font-weight: 700; text-align: right;">' + formatInteger(entry.base) + '</span>'
-            + '<span style="color: #9dd8ff; font-size: 12px; font-weight: 700; text-align: center;">' + (entry.bonus ? '+' + entry.bonus + '%' : '—') + '</span>'
-            + '<span style="color: ' + (entry.xanaxDebuff ? '#e05959' : '#888') + '; font-size: 12px; font-weight: 700; text-align: center;">' + (entry.xanaxDebuff ? '−25%' : '—') + '</span>'
+            + '<span style="color: ' + (entry.modifier < 0 ? '#e05959' : '#9dd8ff') + '; font-size: 12px; font-weight: 700; text-align: center;">' + (entry.modifier ? (entry.modifier > 0 ? '+' : '') + entry.modifier + '%' : '—') + '</span>'
             + '<span style="color: #7fe18d; font-size: 12px; font-weight: 700; text-align: right;">' + formatInteger(entry.effective) + '</span>'
             + '</div>'
         ).join("");
         const effectiveTotal = entries.reduce((sum, entry) => sum + entry.effective, 0);
         return '<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">'
-            + '<div style="color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 3px;">Battle Stats</div>'
-            + (hasXanaxDebuff ? '<div style="color: #e05959; font-size: 10px; font-weight: 700; margin-bottom: 6px;">Under the influence of Xanax · −25% to all stats</div>' : '')
-            + '<div style="display: grid; grid-template-columns: minmax(72px, 1fr) minmax(92px, 1.2fr) minmax(54px, 0.7fr) minmax(58px, 0.75fr) minmax(92px, 1.2fr); gap: 6px; padding-bottom: 4px; color: #888; font-size: 10px; font-weight: 700;">'
-            + '<span>Stat</span><span style="text-align: right;">Battle Stat</span><span style="text-align: center;">Perk</span><span style="text-align: center;">Xanax</span><span style="text-align: right;">Effective</span></div>'
+            + '<div style="color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 6px;">Battle Stats</div>'
+            + '<div style="display: grid; grid-template-columns: minmax(78px, 1fr) minmax(100px, 1.2fr) minmax(62px, 0.7fr) minmax(100px, 1.2fr); gap: 6px; padding-bottom: 4px; color: #888; font-size: 10px; font-weight: 700;">'
+            + '<span>Stat</span><span style="text-align: right;">Battle Stat</span><span style="text-align: center;">Perk</span><span style="text-align: right;">Effective</span></div>'
             + rows
-            + '<div style="display: grid; grid-template-columns: minmax(72px, 1fr) minmax(92px, 1.2fr) minmax(54px, 0.7fr) minmax(58px, 0.75fr) minmax(92px, 1.2fr); gap: 6px; padding-top: 5px;">'
+            + '<div style="display: grid; grid-template-columns: minmax(78px, 1fr) minmax(100px, 1.2fr) minmax(62px, 0.7fr) minmax(100px, 1.2fr); gap: 6px; padding-top: 5px;">'
             + '<span style="color: #d0d0d0; font-size: 12px; font-weight: 700;">Total</span>'
             + '<span style="color: #fff; font-size: 12px; font-weight: 700; text-align: right;">' + formatInteger(total) + '</span>'
             + '<span style="color: #9dd8ff; font-size: 12px; font-weight: 700; text-align: center;">—</span>'
-            + '<span style="color: ' + (hasXanaxDebuff ? '#e05959' : '#888') + '; font-size: 12px; font-weight: 700; text-align: center;">' + (hasXanaxDebuff ? '−25%' : '—') + '</span>'
             + '<span style="color: #7fe18d; font-size: 12px; font-weight: 700; text-align: right;">' + formatInteger(effectiveTotal) + '</span>'
             + '</div></div>';
     }

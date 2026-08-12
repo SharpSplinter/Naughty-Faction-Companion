@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.19.8
+// @version      5.19.9
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -172,6 +172,11 @@
         const seconds = Number(unixSeconds || 0);
         if (!seconds) return "";
         return new Date(seconds * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    };
+    const formatUtcDateTime = (unixSeconds) => {
+        const seconds = Number(unixSeconds || 0);
+        if (!Number.isFinite(seconds) || seconds <= 0) return "Unknown UTC time";
+        return `${new Date(seconds * 1000).toISOString().replace("T", " ").replace(".000Z", "")} UTC`;
     };
     const formatRelativeTime = (unixSeconds) => {
         const seconds = Number(unixSeconds || 0);
@@ -1805,15 +1810,15 @@
         const rows = entries.map((icon) => {
             const until = icon?.until;
             const timestamp = Number(until || 0);
-            let expiry = "Until: null · No expiry";
+            let expiry = "No expiry";
             let expiryColor = "#9aa4b2";
             if (until !== null && until !== undefined && until !== "") {
-                const date = Number.isFinite(timestamp) && timestamp > 0 ? new Date(timestamp * 1000).toLocaleString() : "Invalid timestamp";
+                const utcDate = formatUtcDateTime(timestamp);
                 if (timestamp > now) {
-                    expiry = `Until: ${timestamp} · ${escapeHtml(date)} · <span data-countdown-type="status" data-until-ms="${timestamp * 1000}">${formatDuration(timestamp - now)} remaining</span>`;
+                    expiry = `${escapeHtml(utcDate)} · <span data-countdown-type="status" data-until-ms="${timestamp * 1000}">${formatDuration(timestamp - now)} remaining</span>`;
                     expiryColor = "#7fe18d";
                 } else {
-                    expiry = `Until: ${timestamp} · ${escapeHtml(date)} · Expired`;
+                    expiry = `${escapeHtml(utcDate)} · Expired`;
                     expiryColor = "#e05959";
                 }
             }
@@ -2443,14 +2448,26 @@
         const description = String(target?.status?.description || target?.status?.details || "");
         const untilMs = Number(target?.status?.until || 0) * 1000;
         const isHospitalized = /hospital/i.test(rawState) || /hospital/i.test(description);
-        const isTraveling = /travel/i.test(rawState) || /travel/i.test(description);
+        const isTraveling = /(travel|abroad)/i.test(rawState) || /(travel|abroad)/i.test(description);
         const destinationMatch = description.match(/\bto\s+(.+?)(?:[.!]|$)/i);
-        const destination = isTraveling && destinationMatch ? destinationMatch[1].trim() : "";
+        const abroadDestination = description.match(/\bin\s+(.+?)(?:[.!]|$)/i);
+        const destination = isTraveling ? (destinationMatch?.[1] || abroadDestination?.[1] || "").trim() : "";
         return {
             kind: isHospitalized ? "hospital" : isTraveling ? "travel" : "okay",
-            label: isHospitalized ? "Hospitalized" : isTraveling ? "Traveling" : "Okay",
+            label: isHospitalized ? "Hospitalized" : /abroad/i.test(rawState) ? "Abroad" : isTraveling ? "Traveling" : "Okay",
             untilMs,
             destination
+        };
+    }
+
+    function getWarTargetAvailability(target) {
+        const status = getWarTargetStatus(target);
+        return {
+            status,
+            priority: status.kind === "okay" ? 0 : status.kind === "hospital" ? 1 : 2,
+            hospitalRelease: status.kind === "hospital" && status.untilMs > 0
+                ? status.untilMs
+                : Number.MAX_SAFE_INTEGER
         };
     }
 
@@ -2479,6 +2496,16 @@
         const { key, direction } = state.warTargetSort || { key: "status", direction: "asc" };
         const factor = direction === "desc" ? -1 : 1;
         return [...targets].sort((a, b) => {
+            const aAvailability = getWarTargetAvailability(a);
+            const bAvailability = getWarTargetAvailability(b);
+            const availabilityComparison = aAvailability.priority - bAvailability.priority;
+            if (availabilityComparison) return availabilityComparison;
+
+            if (aAvailability.status.kind === "hospital") {
+                const releaseComparison = aAvailability.hospitalRelease - bAvailability.hospitalRelease;
+                if (releaseComparison) return releaseComparison;
+            }
+
             const aValue = getWarTargetSortValue(a, key);
             const bValue = getWarTargetSortValue(b, key);
             const comparison = typeof aValue === "string"
@@ -2573,7 +2600,7 @@
             <div class="ntc-ffscouter-layout" style="display:flex;flex-direction:column;gap:9px;min-height:0;height:100%;">
                 <div style="border:1px solid #343a43;border-radius:8px;padding:10px;background:rgba(20,20,20,.72);display:grid;gap:8px;">
                     <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap;">
-                        <div><div style="color:#fff;font-size:13px;font-weight:850;">${escapeHtml(war.oppTag)} War Targets</div><div style="color:#929eac;font-size:10px;margin-top:2px;">${targets.length} members · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div><div style="color:#697582;font-size:9px;margin-top:3px;">Drag ⠿ to reorder columns · drag a header's right edge to resize</div></div>
+                        <div><div style="color:#fff;font-size:13px;font-weight:850;">${escapeHtml(war.oppTag)} War Targets</div><div style="color:#929eac;font-size:10px;margin-top:2px;">${targets.length} members · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div><div style="color:#697582;font-size:9px;margin-top:3px;">Availability: Okay → Hospital (soonest first) → Traveling/Abroad · click headers to sort within groups</div><div style="color:#697582;font-size:9px;margin-top:2px;">Drag ⠿ to reorder columns · drag a header's right edge to resize</div></div>
                         <div style="display:flex;gap:6px;flex-wrap:wrap;"><button id="refresh-war-live-btn" style="background:#3b5998;color:#fff;border:0;border-radius:5px;padding:6px 9px;font-size:10px;cursor:pointer;">Refresh Live Status</button><button id="refresh-war-all-btn" style="background:#2f6f50;color:#fff;border:0;border-radius:5px;padding:6px 9px;font-size:10px;cursor:pointer;">Refresh All Data</button></div>
                     </div>
                     <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;">${buildStatCard("Online / Idle", onlineCount, "Live Torn status", "#7fe18d")}${buildStatCard("Healthy", okayCount, "Status: Okay", "#5ba7f7")}${buildStatCard("Estimates", `${estimatedCount} / ${targets.length}`, rateLimit, "#c9a0ff")}</div>
@@ -3425,7 +3452,9 @@
                 const defaultDirection = ["stats", "ff"].includes(key) ? "desc" : "asc";
                 state.warTargetSort = {
                     key,
-                    direction: current.key === key ? (current.direction === "asc" ? "desc" : "asc") : defaultDirection
+                    direction: key === "status"
+                        ? "asc"
+                        : current.key === key ? (current.direction === "asc" ? "desc" : "asc") : defaultDirection
                 };
                 renderTabContent();
             };

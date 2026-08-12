@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.14.5
+// @version      5.14.6
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -812,38 +812,70 @@
         };
     }
 
-    const AWARD_PROGRESS_TRACKS = [
-        ...[10, 100, 1000, 10000, 100000].map((target, index) => ({ id: 380 + index, type: "medal", path: ["attacking", "attacks", "won"], target })),
-        ...["theft", "counterfeiting", "vandalism", "fraud", "illicit_services", "cybercrime"].flatMap((crime, groupIndex) =>
-            [10, 100, 500, 2000, 5000, 10000].map((target, index) => ({ id: 800 + (groupIndex * 6) + index, type: "medal", path: ["crimes", "offenses", crime], target }))
-        ),
-        ...[50, 250, 500, 1000].map((target, index) => ({ id: 52 + index, type: "honor", path: ["drugs", "xanax"], target })),
-        ...[50, 250, 500, 1000, 2000].map((target, index) => ({ id: 12 + index, type: "honor", path: ["jail", "busts", "success"], target })),
-        ...[10, 50, 250, 1000, 5000].map((target, index) => ({ id: 210 + index, type: "medal", path: ["hospital", "reviving", "revives"], target })),
-        ...[10, 50, 250, 1000].map((target, index) => ({ id: 440 + index, type: "medal", path: ["missions", "missions"], target }))
-    ];
+    const CRIME_PROGRESS_PATHS = {
+        vandalism: ["crimes", "offenses", "vandalism"],
+        theft: ["crimes", "offenses", "theft"],
+        counterfeiting: ["crimes", "offenses", "counterfeiting"],
+        fraud: ["crimes", "offenses", "fraud"],
+        "illicit service": ["crimes", "offenses", "illicit_services"],
+        cybercrime: ["crimes", "offenses", "cybercrime"],
+        extortion: ["crimes", "offenses", "extortion"],
+        "illegal production": ["crimes", "offenses", "illegal_production"]
+    };
 
     function getNestedNumber(value, path) {
         const result = path.reduce((current, key) => current && current[key], value);
         return Number(result || 0);
     }
 
+    function buildCatalogProgressTracks(catalogRaw, type) {
+        return normalizeAwardCatalog(catalogRaw).flatMap((award) => {
+            const description = String(award.description || "");
+            let match = description.match(/^Win ([\d,]+) attacks$/i);
+            if (type === "medal" && match) {
+                return [{ id: Number(award.id), type, path: ["attacking", "attacks", "won"], target: Number(match[1].replace(/,/g, "")), award }];
+            }
+
+            match = description.match(/^Commit ([\d,]+) (.+?) offenses$/i);
+            const crime = match && match[2].toLowerCase();
+            if (type === "medal" && crime && CRIME_PROGRESS_PATHS[crime]) {
+                return [{ id: Number(award.id), type, path: CRIME_PROGRESS_PATHS[crime], target: Number(match[1].replace(/,/g, "")), award }];
+            }
+
+            match = description.match(/^Use ([\d,]+) Xanax$/i);
+            if (type === "honor" && match) {
+                return [{ id: Number(award.id), type, path: ["drugs", "xanax"], target: Number(match[1].replace(/,/g, "")), award }];
+            }
+
+            match = description.match(/^Bust ([\d,]+) people from the Torn City jail$/i);
+            if (type === "honor" && match) {
+                return [{ id: Number(award.id), type, path: ["jail", "busts", "success"], target: Number(match[1].replace(/,/g, "")), award }];
+            }
+
+            match = description.match(/^Revive ([\d,]+) people$/i);
+            if (type === "honor" && match) {
+                return [{ id: Number(award.id), type, path: ["hospital", "reviving", "revives"], target: Number(match[1].replace(/,/g, "")), award }];
+            }
+
+            return [];
+        });
+    }
+
     function buildAwardProgress(personalstats, medalsCatalogRaw, honorsCatalogRaw, userMedalsRaw, userHonorsRaw) {
-        const medalCatalog = getAwardCatalogById(medalsCatalogRaw);
-        const honorCatalog = getAwardCatalogById(honorsCatalogRaw);
         const earnedMedals = new Set((Array.isArray(userMedalsRaw) ? userMedalsRaw : []).map((item) => Number(item.id)));
         const earnedHonors = new Set((Array.isArray(userHonorsRaw) ? userHonorsRaw : []).map((item) => Number(item.id)));
 
-        return AWARD_PROGRESS_TRACKS
+        return [
+            ...buildCatalogProgressTracks(medalsCatalogRaw, "medal"),
+            ...buildCatalogProgressTracks(honorsCatalogRaw, "honor")
+        ]
             .filter((track) => !(track.type === "medal" ? earnedMedals : earnedHonors).has(track.id))
             .map((track) => {
-                const catalog = track.type === "medal" ? medalCatalog : honorCatalog;
-                const award = catalog.get(track.id);
                 const current = getNestedNumber(personalstats, track.path);
                 return {
-                    name: award?.name || `${track.type === "medal" ? "Medal" : "Honor"} #${track.id}`,
+                    name: track.award.name,
                     type: track.type,
-                    rarity: award?.rarity || "Unknown",
+                    rarity: track.award.rarity || "Unknown",
                     current,
                     target: track.target,
                     percent: Math.min(100, (current / track.target) * 100)
@@ -858,7 +890,7 @@
         setSectionStatus("personal", "Refreshing...");
         debugLog("Fetching personal data");
         try {
-            const [profileResponse, skillsResponse, educationResponse, workstatsResponse, battlestatsResponse, perksResponse, jobResponse, moneyResponse, networthResponse, jobpointsResponse, medalsCatalogResponse, userMedalsResponse, honorsCatalogResponse, userHonorsResponse, personalstatsResponse] = await Promise.all([
+            const [profileResponse, skillsResponse, educationResponse, workstatsResponse, battlestatsResponse, perksResponse, jobResponse, moneyResponse, networthResponse, jobpointsResponse, medalsCatalogResponse, userMedalsResponse, honorsCatalogResponse, userHonorsResponse] = await Promise.all([
                 fetchJson(withKey(`${BASE_URL}user/profile`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/skills`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/education`, apiKey)).catch(() => null),
@@ -872,9 +904,13 @@
                 fetchJson(withKey(`${BASE_URL}torn/medals`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/medals`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}torn/honors`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}user/honors`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}user/personalstats`, apiKey)).catch(() => null)
+                fetchJson(withKey(`${BASE_URL}user/honors`, apiKey)).catch(() => null)
             ]);
+            const personalstatResponses = await Promise.all(
+                ["attacking", "crimes", "drugs", "jail", "hospital"].map((cat) =>
+                    fetchJson(withKey(`${BASE_URL}user/personalstats`, apiKey, { cat })).catch(() => null)
+                )
+            );
 
             const education = educationResponse?.education || educationResponse || {};
             let currentCourseName = "";
@@ -907,7 +943,7 @@
                 userHonorsResponse?.honors || userHonorsResponse,
                 "Honor"
             );
-            const personalstats = personalstatsResponse?.personalstats || personalstatsResponse || {};
+            const personalstats = Object.assign({}, ...personalstatResponses.map((response) => response?.personalstats || response || {}));
             const awardProgress = buildAwardProgress(
                 personalstats,
                 medalsCatalogResponse?.medals || medalsCatalogResponse,

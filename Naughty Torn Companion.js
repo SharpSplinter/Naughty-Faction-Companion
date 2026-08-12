@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.12.7
+// @version      5.13.4
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -88,6 +88,7 @@
         expandedCategories: new Set(),
         currentTab: "overview",
         settingsSubTab: "controls",
+        personalSubTab: "info",
         isMinimized: false,
         companyStockHistory: {},
         apiKey: "",
@@ -96,6 +97,7 @@
         lastRefresh: null,
         autoRefreshTimer: null,
         chainCountdownTimer: null,
+        cooldownCountdownTimer: null,
         lastRefreshBySection: {
             overview: 0,
             personal: 0,
@@ -215,11 +217,13 @@
     const getStoredDashboardState = () => ({
         currentTab: state.currentTab,
         settingsSubTab: state.settingsSubTab,
+        personalSubTab: state.personalSubTab,
         isMinimized: state.isMinimized
     });
     const setStoredDashboardState = (payload) => {
         if (payload && payload.currentTab) state.currentTab = payload.currentTab;
         if (payload && payload.settingsSubTab) state.settingsSubTab = payload.settingsSubTab;
+        if (payload && payload.personalSubTab) state.personalSubTab = payload.personalSubTab;
         if (payload && typeof payload.isMinimized === "boolean") state.isMinimized = payload.isMinimized;
         void gmSetValue(APP_STORAGE.dashboard, getStoredDashboardState());
     };
@@ -316,6 +320,7 @@
         const dashboardState = await gmGetValue(APP_STORAGE.dashboard, { currentTab: "overview" });
         state.currentTab = dashboardState.currentTab || "overview";
         state.settingsSubTab = dashboardState.settingsSubTab || state.settingsSubTab;
+        state.personalSubTab = dashboardState.personalSubTab || state.personalSubTab;
         state.isMinimized = dashboardState.isMinimized === true;
 
         const sectionNames = Object.keys(APP_STORAGE.sections);
@@ -673,7 +678,9 @@
                 fetchJson(withKey(`${BASE_URL}user/money`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/networth`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/bars`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}user/cooldowns`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}user/cooldowns`, apiKey))
+                    .then((data) => ({ data, fetchedAt: Date.now() }))
+                    .catch(() => ({ data: null, fetchedAt: Date.now() })),
                 fetchJson(withKey(`${BASE_URL}user/travel`, apiKey)).catch(() => null)
             ]);
 
@@ -689,7 +696,8 @@
                 profile: profileResponse?.profile || profileResponse || {},
                 faction: factionResponse?.faction || factionResponse || {},
                 company: companyResponse?.profile || companyResponse || {},
-                cooldowns: cooldownsResponse?.cooldowns || cooldownsResponse || {},
+                cooldowns: cooldownsResponse?.data?.cooldowns || cooldownsResponse?.data || {},
+                cooldownsFetchedAt: cooldownsResponse?.fetchedAt || Date.now(),
                 travel: travelResponse?.travel || travelResponse || {}
             };
 
@@ -911,31 +919,16 @@
         }
     }
 
-    // Reconstructs Torn's Chaining 2.0 respect formula so milestone chain hits (which
-    // receive a hardcoded flat bonus on top of the normal formula) can be identified —
-    // the API returns each attack's actual applied multipliers under `modifiers`, so no
-    // guessing is needed there; only Base Respect (from target level) is derived.
-    function computeBaseRespect(targetLevel) {
-        const level = Number(targetLevel || 0);
-        if (level <= 0) return 0;
-        const raw = (Math.log(level) + 1.0) / 4.0;
-        return Math.round(raw * 100) / 100;
-    }
+    // Official fixed chain-bonus values. Bonus hits do not receive other respect
+    // modifiers, so reading the attack's chain number is exact and avoids inference.
+    const CHAIN_BONUS_RESPECT = {
+        10: 10, 25: 20, 50: 40, 100: 80, 250: 160, 500: 320,
+        1000: 640, 2500: 1280, 5000: 2560, 10000: 5120,
+        25000: 10240, 50000: 20480, 100000: 40960
+    };
 
-    function computeEstimatedRespect(attack) {
-        const baseRespect = computeBaseRespect(attack.defender?.level);
-        const mods = attack.modifiers || {};
-        const multiplier = ["fair_fight", "war", "retaliation", "group", "overseas", "chain", "warlord"]
-            .reduce((acc, key) => acc * Number(mods[key] ?? 1), 1);
-        return baseRespect * multiplier;
-    }
-
-    function computeMilestoneBonus(attack) {
-        const actual = Number(attack.respect_gain || 0);
-        const estimated = computeEstimatedRespect(attack);
-        const bonus = actual - estimated;
-        // Filter out floating-point/rounding noise so only genuine flat bonuses count.
-        return Math.abs(bonus) > 0.05 ? bonus : 0;
+    function getChainBonusRespect(attack) {
+        return CHAIN_BONUS_RESPECT[Number(attack?.chain || 0)] || 0;
     }
 
     async function fetchFactionData(apiKey) {
@@ -1020,7 +1013,7 @@
                         if (chainStart && started >= chainStart && started <= chainEnd) {
                             personalContribution.chainHits += 1;
                             personalContribution.chainRespect += respectGain;
-                            personalContribution.bonusScore += computeMilestoneBonus(atk);
+                            personalContribution.bonusScore += getChainBonusRespect(atk);
                         }
                     });
                 }
@@ -1124,8 +1117,9 @@
     function renderBarsPanel(bars) {
         const barDefinitions = [
             { key: "energy", label: "Energy", color: "#7fe18d" },
-            { key: "nerve", label: "Nerve", color: "#c9a0ff" },
-            { key: "life", label: "Life", color: "#ff7b7b" }
+            { key: "nerve", label: "Nerve", color: "#e05959" },
+            { key: "life", label: "Life", color: "#5ba7f7" },
+            { key: "happy", label: "Happiness", color: "#f0d34f" }
         ];
         const rows = barDefinitions.map(({ key, label, color }) => {
             const value = bars[key] || {};
@@ -1150,7 +1144,7 @@
         `;
     }
 
-    function renderCooldownsRow(cooldowns) {
+    function renderCooldownsRow(cooldowns, fetchedAt) {
         const drug = Number(cooldowns.drug || 0);
         const medical = Number(cooldowns.medical || 0);
         const booster = Number(cooldowns.booster || 0);
@@ -1159,18 +1153,18 @@
             return `<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; color: #888; font-size: 11px;">No active cooldowns.</div>`;
         }
 
-        const cell = (label, seconds, color) => `
+        const cell = (key, label, seconds, color) => `
             <div style="flex: 1; text-align: center;">
-                <div style="color: #888; font-size: 10px; margin-bottom: 2px;">${label}</div>
-                <div style="color: ${seconds > 0 ? color : "#555"}; font-size: 13px; font-weight: 700;">${seconds > 0 ? formatDuration(seconds) : "Ready"}</div>
+                <div style="color: #e0e0e0; font-size: 12px; font-weight: 800; margin-bottom: 3px;">${label}</div>
+                <div id="cooldown-${key}" data-seconds="${seconds}" data-fetched-at="${Number(fetchedAt || Date.now())}" data-active-color="${color}" style="color: ${seconds > 0 ? color : "#7fe18d"}; font-size: 13px; font-weight: 800;">${seconds > 0 ? formatDuration(seconds) : "Ready"}</div>
             </div>
         `;
 
         return `
             <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; display: flex; gap: 6px;">
-                ${cell("Drug", drug, "#e0a25e")}
-                ${cell("Medical", medical, "#9dd8ff")}
-                ${cell("Booster", booster, "#c9a0ff")}
+                ${cell("drug", "Drug", drug, "#e0a25e")}
+                ${cell("medical", "Medical", medical, "#9dd8ff")}
+                ${cell("booster", "Booster", booster, "#c9a0ff")}
             </div>
         `;
     }
@@ -1233,7 +1227,7 @@
         return `
             ${renderSectionMeta("overview", "Overview")}
             ${renderBarsPanel(bars)}
-            ${renderCooldownsRow(cooldowns)}
+            ${renderCooldownsRow(cooldowns, overview.cooldownsFetchedAt)}
             ${renderTravelCard(basic, travel)}
             <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">
                 ${summaryCards}
@@ -1493,21 +1487,37 @@
             { label: "Total", value: formatInteger(workStats.total), color: "#7fe18d" }
         ]);
 
-        return `
-            ${renderSectionMeta("personal", "Personal")}
+        const subTabs = [
+            { id: "info", label: "Info" },
+            { id: "skills-perks", label: "Skills/Perks" },
+            { id: "awards", label: "Awards" }
+        ];
+        const activeSubTab = subTabs.some((tab) => tab.id === state.personalSubTab) ? state.personalSubTab : "info";
+        const subTabButtons = subTabs.map((tab) => `
+            <button data-personal-subtab="${tab.id}" style="background: ${activeSubTab === tab.id ? "#3b5998" : "#2a2a2a"}; border: 1px solid #3d3d3d; color: #fff; border-radius: 4px; padding: 6px 8px; font-size: 11px; cursor: pointer; ${activeSubTab === tab.id ? "font-weight: 700;" : ""}">${tab.label}</button>
+        `).join("");
+        const subTabContent = activeSubTab === "skills-perks" ? `
+            ${renderSkillsBox(skills)}
+            ${renderPerksBox(perks)}
+        ` : activeSubTab === "awards" ? `
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 8px; align-items: start;">
+                ${renderAchievementsBox(personal.medals, personal.honors)}
+                ${renderAwardProgressBox(personal.awardProgress)}
+            </div>
+        ` : `
             <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px;">
                 ${topCards}
             </div>
             ${wealthBox}
             ${battleBox}
             ${workBox}
-            ${renderSkillsBox(skills)}
             ${renderEducationLine(education, currentCourseName)}
-            ${renderPerksBox(perks)}
-            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 8px; align-items: start;">
-                ${renderAchievementsBox(personal.medals, personal.honors)}
-                ${renderAwardProgressBox(personal.awardProgress)}
-            </div>
+        `;
+
+        return `
+            ${renderSectionMeta("personal", "Personal")}
+            <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px;">${subTabButtons}</div>
+            ${subTabContent}
         `;
     }
 
@@ -1543,11 +1553,11 @@
             return `<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; color: #888; font-size: 11px;">No active ranked war.</div>`;
         }
 
-        const scoreLimit = Math.max(1, Number(war.target || 0), war.ownScore, war.oppScore);
+        const scoreLimit = Math.max(1, Number(war.target || 0), Math.abs(war.ownScore - war.oppScore));
         const scoreDifference = war.ownScore - war.oppScore;
         const markerPosition = Math.min(100, Math.max(0, 50 - ((scoreDifference / scoreLimit) * 50)));
         const markerColor = "#4fb86a";
-        const targetText = war.target > 0 ? `First to ${formatInteger(war.target)}` : "Live score";
+        const targetText = war.target > 0 ? `Lead target: ${formatInteger(war.target)}` : "Live score";
 
         return `
             <div style="border: 1px solid #3a3a3a; border-radius: 8px; padding: 12px; background: rgba(20,20,20,0.82); margin-bottom: 10px; text-align: center;">
@@ -1688,6 +1698,22 @@
         `;
     }
 
+    function humanizeActivityKey(key) {
+        return String(key || "")
+            .replace(/([a-z])([A-Z])/g, "$1 $2")
+            .replace(/[_-]+/g, " ")
+            .replace(/\b\w/g, (letter) => letter.toUpperCase());
+    }
+
+    function summarizeLogPayload(payload) {
+        if (!payload || typeof payload !== "object") return "";
+        const values = Object.entries(payload)
+            .filter(([, value]) => value !== null && value !== undefined && value !== "" && typeof value !== "object")
+            .slice(0, 3)
+            .map(([key, value]) => `${humanizeActivityKey(key)}: ${value}`);
+        return values.join(" · ");
+    }
+
     function renderActivityPanel() {
         const activity = state.caches.activity || {};
         const notifications = activity.notifications || {};
@@ -1696,23 +1722,29 @@
         const trades = Array.isArray(activity.trades) ? activity.trades : [];
 
         const notificationLabels = {
-            messages: "new messages",
-            events: "new events",
-            awards: "new awards",
-            competition: "competition updates"
+            messages: { icon: "✉", label: "Messages", detail: "Unread messages waiting for you" },
+            events: { icon: "⚡", label: "Events", detail: "New events in your activity feed" },
+            awards: { icon: "★", label: "Awards", detail: "New medals or honors earned" },
+            competition: { icon: "🏁", label: "Competition", detail: "Competition updates need your attention" }
         };
         const notificationList = Object.entries(notificationLabels)
-            .map(([key, label]) => ({ text: `${formatInteger(notifications[key])} ${label}` }))
-            .filter((item) => !item.text.startsWith("0 "));
+            .map(([key, config]) => {
+                const count = Number(notifications[key] || 0);
+                return {
+                    text: `${config.icon} ${formatInteger(count)} ${config.label}${count === 1 ? "" : ""}`,
+                    detail: config.detail
+                };
+            })
+            .filter((item) => !item.text.includes(" 0 "));
 
         const logList = Array.isArray(log) ? log.slice(0, 4).map((item) => ({
-            text: item?.details?.title || item?.data?.text || item?.event || "Log update",
+            text: `${humanizeActivityKey(item?.details?.category || "Activity")} · ${item?.details?.title || item?.data?.text || item?.event || "Log update"}`,
             timestamp: item?.timestamp,
-            detail: item?.details?.category || ""
+            detail: summarizeLogPayload(item?.data) || summarizeLogPayload(item?.params) || "Recorded in your personal activity log"
         })) : (Array.isArray(log.log) ? log.log.slice(0, 4).map((item) => ({
-            text: item?.details?.title || item?.data?.text || item?.event || "Log update",
+            text: `${humanizeActivityKey(item?.details?.category || "Activity")} · ${item?.details?.title || item?.data?.text || item?.event || "Log update"}`,
             timestamp: item?.timestamp,
-            detail: item?.details?.category || ""
+            detail: summarizeLogPayload(item?.data) || summarizeLogPayload(item?.params) || "Recorded in your personal activity log"
         })) : []);
 
         const eventList = Array.isArray(events) ? events.slice(0, 4).map((item) => ({
@@ -2061,6 +2093,20 @@
         });
     }
 
+    function bindPersonalControls() {
+        const contentEl = document.getElementById("torn-companion-content");
+        if (!contentEl || state.currentTab !== "personal") return;
+        contentEl.querySelectorAll("[data-personal-subtab]").forEach((button) => {
+            button.onclick = () => {
+                const subTab = button.getAttribute("data-personal-subtab");
+                if (!subTab || subTab === state.personalSubTab) return;
+                state.personalSubTab = subTab;
+                setStoredDashboardState({ personalSubTab: subTab });
+                renderTabContent();
+            };
+        });
+    }
+
     function renderTabContent() {
         const contentEl = document.getElementById("torn-companion-content");
         if (!contentEl) return;
@@ -2096,11 +2142,17 @@
         contentEl.innerHTML = innerHtml;
         bindInventoryTableControls();
         bindSettingsControls();
+        bindPersonalControls();
 
         if (state.currentTab === "faction") {
             startChainCountdownTimer();
         } else {
             stopChainCountdownTimer();
+        }
+        if (state.currentTab === "overview") {
+            startCooldownCountdownTimer();
+        } else {
+            stopCooldownCountdownTimer();
         }
     }
 
@@ -2128,6 +2180,34 @@
         };
         updateCountdown();
         state.chainCountdownTimer = setInterval(updateCountdown, 250);
+    }
+
+    function stopCooldownCountdownTimer() {
+        if (state.cooldownCountdownTimer) {
+            clearInterval(state.cooldownCountdownTimer);
+            state.cooldownCountdownTimer = null;
+        }
+    }
+
+    function startCooldownCountdownTimer() {
+        stopCooldownCountdownTimer();
+        const updateCountdown = () => {
+            if (state.currentTab !== "overview") {
+                stopCooldownCountdownTimer();
+                return;
+            }
+            const elements = document.querySelectorAll("[id^='cooldown-'][data-seconds]");
+            if (!elements.length) return;
+            elements.forEach((el) => {
+                const seconds = Number(el.dataset.seconds || 0);
+                const fetchedAt = Number(el.dataset.fetchedAt || Date.now());
+                const remaining = Math.max(0, seconds - ((Date.now() - fetchedAt) / 1000));
+                el.textContent = remaining > 0 ? formatDuration(Math.ceil(remaining)) : "Ready";
+                el.style.color = remaining > 0 ? (el.dataset.activeColor || "#fff") : "#7fe18d";
+            });
+        };
+        updateCountdown();
+        state.cooldownCountdownTimer = setInterval(updateCountdown, 500);
     }
 
     function inventoryRowsExist() {
@@ -2288,6 +2368,8 @@
             dashboard.title = "Naughty Torn Companion — click to restore";
         } else {
             widgetBody.style.display = "block";
+            widgetBody.style.maxHeight = "calc(80vh - 37px)";
+            widgetBody.style.overflowY = "auto";
             dashboard.style.width = "480px";
             dashboard.style.maxHeight = "80vh";
             dragHandle.style.padding = "8px 10px";
@@ -2323,6 +2405,8 @@
         dashboard.style.boxShadow = "0 6px 22px rgba(0,0,0,0.6)";
         dashboard.style.fontFamily = "Arial, sans-serif";
         dashboard.style.overflow = "hidden";
+        dashboard.style.display = "flex";
+        dashboard.style.flexDirection = "column";
 
         const tabs = [
             { id: "overview", label: "Overview" },
@@ -2344,7 +2428,7 @@
                 <button id="widget-toggle-view-btn" style="background-color: #444; color: #fff; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 11px;">_</button>
             </div>
 
-            <div id="widget-main-body" style="padding: 10px;">
+            <div id="widget-main-body" style="padding: 10px; box-sizing: border-box; max-height: calc(80vh - 37px); overflow-y: auto; overflow-x: hidden;">
                 <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px;">${navHtml}</div>
                 <div id="torn-companion-content" style="display: grid; gap: 8px; color: #fff; font-size: 11px;"></div>
             </div>

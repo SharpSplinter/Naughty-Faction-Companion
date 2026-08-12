@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.13.7
+// @version      5.14.2
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -418,6 +418,14 @@
         }
 
         return priceMap;
+    }
+
+    function buildRacingNameMap(response, collectionKey, nameKeys) {
+        const rawEntries = response?.[collectionKey] || response || [];
+        const entries = Array.isArray(rawEntries) ? rawEntries : Object.values(rawEntries);
+        return Object.fromEntries(entries
+            .filter((entry) => entry?.id !== undefined)
+            .map((entry) => [String(entry.id), nameKeys.map((key) => entry?.[key]).find(Boolean) || ""]));
     }
 
     function isRelevantBonusItemType(typeName) {
@@ -844,7 +852,7 @@
         setSectionStatus("personal", "Refreshing...");
         debugLog("Fetching personal data");
         try {
-            const [profileResponse, skillsResponse, educationResponse, workstatsResponse, battlestatsResponse, perksResponse, jobResponse, moneyResponse, jobpointsResponse, medalsCatalogResponse, userMedalsResponse, honorsCatalogResponse, userHonorsResponse, personalstatsResponse] = await Promise.all([
+            const [profileResponse, skillsResponse, educationResponse, workstatsResponse, battlestatsResponse, perksResponse, jobResponse, moneyResponse, networthResponse, jobpointsResponse, medalsCatalogResponse, userMedalsResponse, honorsCatalogResponse, userHonorsResponse, personalstatsResponse] = await Promise.all([
                 fetchJson(withKey(`${BASE_URL}user/profile`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/skills`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/education`, apiKey)).catch(() => null),
@@ -853,6 +861,7 @@
                 fetchJson(withKey(`${BASE_URL}user/perks`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/job`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/money`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}user/networth`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/jobpoints`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}torn/medals`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/medals`, apiKey)).catch(() => null),
@@ -911,6 +920,7 @@
                 perks: perksResponse?.perks || perksResponse || {},
                 job,
                 money: moneyResponse?.money || moneyResponse || {},
+                networth: networthResponse?.networth || networthResponse || {},
                 currentJobPoints,
                 medals,
                 honors,
@@ -1087,17 +1097,21 @@
         setSectionStatus("activity", "Refreshing...");
         debugLog("Fetching activity data");
         try {
-            const [notificationsResponse, userLogResponse, eventsResponse, tradesResponse] = await Promise.all([
+            const [notificationsResponse, userLogResponse, eventsResponse, tradesResponse, racingCarsResponse, racingTracksResponse] = await Promise.all([
                 fetchJson(withKey(`${BASE_URL}user/notifications`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/log`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/events`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}user/trades`, apiKey, { cat: "ongoing" })).catch(() => null)
+                fetchJson(withKey(`${BASE_URL}user/trades`, apiKey, { cat: "ongoing" })).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}racing/cars`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}racing/tracks`, apiKey)).catch(() => null)
             ]);
             const result = {
                 notifications: notificationsResponse?.notifications || notificationsResponse || {},
                 userLog: userLogResponse?.log || userLogResponse || {},
                 events: eventsResponse?.events || eventsResponse || {},
-                trades: tradesResponse?.trades || tradesResponse || []
+                trades: tradesResponse?.trades || tradesResponse || [],
+                carNames: buildRacingNameMap(racingCarsResponse, "cars", ["name", "title"]),
+                trackNames: buildRacingNameMap(racingTracksResponse, "tracks", ["title", "name"])
             };
             setSectionStatus("activity", "Updated");
             markSectionRefreshed("activity");
@@ -1273,6 +1287,51 @@
         `;
     }
 
+    function getBattleStatBonuses(perks) {
+        const texts = Object.values(perks || {})
+            .flatMap((items) => Array.isArray(items) ? items : [])
+            .map((item) => String(item || ""));
+        const bonuses = { strength: 0, defense: 0, speed: 0, dexterity: 0 };
+        Object.keys(bonuses).forEach((stat) => {
+            texts.forEach((text) => {
+                const normalized = text.toLowerCase();
+                if (!normalized.includes(stat) || /(gain|training|train|gym|experience)/.test(normalized)) return;
+                const match = normalized.match(/([+-]?\d+(?:\.\d+)?)\s*%/);
+                if (match) bonuses[stat] += Number(match[1]) || 0;
+            });
+        });
+        return bonuses;
+    }
+
+    function renderEffectiveBattleStatsBox(stats, bonuses, total) {
+        const labels = { strength: "Strength", defense: "Defense", speed: "Speed", dexterity: "Dexterity" };
+        const entries = Object.keys(labels).map((key) => {
+            const base = Number(stats[key] || 0);
+            const bonus = Number(bonuses[key] || 0);
+            return { label: labels[key], base, bonus, effective: base * (1 + bonus / 100) };
+        });
+        const rows = entries.map((entry) =>
+            '<div style="display: grid; grid-template-columns: minmax(78px, 1fr) minmax(100px, 1.2fr) minmax(62px, 0.7fr) minmax(100px, 1.2fr); gap: 6px; align-items: center; padding: 4px 0; border-bottom: 1px solid #222;">'
+            + '<span style="color: #d0d0d0; font-size: 12px; font-weight: 600;">' + entry.label + '</span>'
+            + '<span style="color: #fff; font-size: 12px; font-weight: 700; text-align: right;">' + formatInteger(entry.base) + '</span>'
+            + '<span style="color: #9dd8ff; font-size: 12px; font-weight: 700; text-align: center;">' + (entry.bonus ? '+' + entry.bonus + '%' : '—') + '</span>'
+            + '<span style="color: #7fe18d; font-size: 12px; font-weight: 700; text-align: right;">' + formatInteger(entry.effective) + '</span>'
+            + '</div>'
+        ).join("");
+        const effectiveTotal = entries.reduce((sum, entry) => sum + entry.effective, 0);
+        return '<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">'
+            + '<div style="color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 6px;">Battle Stats</div>'
+            + '<div style="display: grid; grid-template-columns: minmax(78px, 1fr) minmax(100px, 1.2fr) minmax(62px, 0.7fr) minmax(100px, 1.2fr); gap: 6px; padding-bottom: 4px; color: #888; font-size: 10px; font-weight: 700;">'
+            + '<span>Stat</span><span style="text-align: right;">Battle Stat</span><span style="text-align: center;">Perk</span><span style="text-align: right;">Effective</span></div>'
+            + rows
+            + '<div style="display: grid; grid-template-columns: minmax(78px, 1fr) minmax(100px, 1.2fr) minmax(62px, 0.7fr) minmax(100px, 1.2fr); gap: 6px; padding-top: 5px;">'
+            + '<span style="color: #d0d0d0; font-size: 12px; font-weight: 700;">Total</span>'
+            + '<span style="color: #fff; font-size: 12px; font-weight: 700; text-align: right;">' + formatInteger(total) + '</span>'
+            + '<span style="color: #9dd8ff; font-size: 12px; font-weight: 700; text-align: center;">—</span>'
+            + '<span style="color: #7fe18d; font-size: 12px; font-weight: 700; text-align: right;">' + formatInteger(effectiveTotal) + '</span>'
+            + '</div></div>';
+    }
+
     function normalizeSkillsList(skills) {
         if (Array.isArray(skills)) return skills;
         if (skills && typeof skills === "object") {
@@ -1440,6 +1499,10 @@
         const perks = personal.perks || {};
         const job = personal.job || {};
         const money = personal.money || {};
+        const networth = personal.networth || {};
+        const networthMoney = networth.money || {};
+        const networthItems = networth.items || {};
+        const networthAssets = networth.assets || {};
 
         const battleTotal = Number(battlestats.total ?? 0);
         const battleStats = {
@@ -1454,6 +1517,7 @@
             intelligence: Number(workstats.intelligence ?? 0),
             total: Number(workstats.total ?? 0)
         };
+        const battleBonuses = getBattleStatBonuses(perks);
 
         const playerId = profile.player_id ?? profile.id ?? "-";
         const jobName = job.name || "Unemployed";
@@ -1473,20 +1537,42 @@
             buildStatCard("Job", jobName, jobSubtext)
         ].join("");
 
-        const wealthBox = renderInfoBox("Wealth", [
-            { label: "Wallet", value: formatMoney(wallet), color: "#7fe18d" },
-            { label: "City Bank", value: formatMoney(cityBank), color: "#7fe18d" },
-            { label: "Vault", value: formatMoney(vault), color: "#7fe18d" },
-            { label: "Points", value: formatInteger(points), color: "#9dd8ff" }
-        ]);
+        const wealthBox = `
+            ${renderInfoBox("Wealth Summary", [
+                { label: "Total Net Worth", value: formatMoney(networth.total ?? 0), color: "#7fe18d" },
+                { label: "Points Held", value: formatInteger(points), color: "#9dd8ff" },
+                { label: "Points Value", value: formatMoney(networth.points ?? 0), color: "#9dd8ff" }
+            ])}
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); gap: 8px;">
+                ${renderInfoBox("Money", [
+                    { label: "Pending", value: formatMoney(networthMoney.pending ?? 0) },
+                    { label: "Wallet", value: formatMoney(networthMoney.wallet ?? wallet), color: "#7fe18d" },
+                    { label: "Vault", value: formatMoney(networthMoney.vault ?? vault), color: "#7fe18d" },
+                    { label: "Bookie", value: formatMoney(networthMoney.bookie ?? 0) },
+                    { label: "City Bank", value: formatMoney(networthMoney.city_bank ?? cityBank), color: "#7fe18d" },
+                    { label: "Cayman Bank", value: formatMoney(networthMoney.cayman_bank ?? 0) },
+                    { label: "Piggy Bank", value: formatMoney(networthMoney.piggy_bank ?? 0) },
+                    { label: "Loans", value: formatMoney(networthMoney.loans ?? 0), color: "#e05959" },
+                    { label: "Unpaid Fees", value: formatMoney(networthMoney.unpaid_fees ?? 0), color: "#e05959" }
+                ])}
+                ${renderInfoBox("Items", [
+                    { label: "Inventory", value: formatMoney(networthItems.inventory ?? 0) },
+                    { label: "Display Case", value: formatMoney(networthItems.display_case ?? 0) },
+                    { label: "Bazaar", value: formatMoney(networthItems.bazaar ?? 0) },
+                    { label: "Trades", value: formatMoney(networthItems.trades ?? 0) },
+                    { label: "Item Market", value: formatMoney(networthItems.item_market ?? 0) },
+                    { label: "Auction House", value: formatMoney(networthItems.auction_house ?? 0) },
+                    { label: "Enlisted Cars", value: formatMoney(networthItems.enlisted_cars ?? 0) }
+                ])}
+                ${renderInfoBox("Assets", [
+                    { label: "Property", value: formatMoney(networthAssets.property ?? 0) },
+                    { label: "Stock Market", value: formatMoney(networthAssets.stock_market ?? 0) },
+                    { label: "Company", value: formatMoney(networthAssets.company ?? 0) }
+                ])}
+            </div>
+        `;
 
-        const battleBox = renderInfoBox("Battle Stats", [
-            { label: "Strength", value: formatInteger(battleStats.strength) },
-            { label: "Defense", value: formatInteger(battleStats.defense) },
-            { label: "Speed", value: formatInteger(battleStats.speed) },
-            { label: "Dexterity", value: formatInteger(battleStats.dexterity) },
-            { label: "Total", value: formatInteger(battleTotal), color: "#7fe18d" }
-        ]);
+        const battleBox = renderEffectiveBattleStatsBox(battleStats, battleBonuses, battleTotal);
 
         const workBox = renderInfoBox("Work Stats", [
             { label: "Manual Labor", value: formatInteger(workStats.manualLabor) },
@@ -1715,12 +1801,45 @@
             .replace(/\b\w/g, (letter) => letter.toUpperCase());
     }
 
-    function summarizeLogPayload(payload) {
+    function isCurrencyLogField(key, context = {}) {
+        const normalizedKey = String(key || "").toLowerCase().replace(/[^a-z]/g, "");
+        const contextText = [
+            context?.details?.category,
+            context?.details?.title,
+            context?.event,
+            context?.data?.text
+        ].join(" ").toLowerCase();
+        const directCurrencyFields = new Set([
+            "amount", "balance", "deposited", "withdrawn", "deposit", "withdrawal",
+            "money", "cash", "wallet", "vault", "bank", "price", "profit", "fee",
+            "payment", "refund", "winnings", "salary", "income", "interest"
+        ]);
+        return directCurrencyFields.has(normalizedKey)
+            || /(vault|bank|money|cash|casino|lottery|bazaar|market|stock|property)/.test(contextText)
+                && /(amount|balance|cost|price|value|profit|fee|payment|reward|income|wage|salary)/.test(normalizedKey);
+    }
+
+    function summarizeLogPayload(payload, context, carNames = {}, trackNames = {}) {
         if (!payload || typeof payload !== "object") return "";
         const values = Object.entries(payload)
             .filter(([, value]) => value !== null && value !== undefined && value !== "" && typeof value !== "object")
             .slice(0, 3)
-            .map(([key, value]) => `${humanizeActivityKey(key)}: ${value}`);
+            .map(([key, value]) => {
+                const number = Number(value);
+                const isRacing = /racing/.test(`${context?.details?.category || ""} ${context?.details?.title || ""}`.toLowerCase());
+                const normalizedKey = String(key).toLowerCase();
+                const racingName = isRacing && normalizedKey === "car"
+                    ? carNames[String(value)]
+                    : isRacing && normalizedKey === "track"
+                        ? trackNames[String(value)]
+                        : "";
+                const formattedValue = racingName
+                    ? racingName
+                    : Number.isFinite(number)
+                    ? (isCurrencyLogField(key, context) ? formatMoney(number) : formatInteger(number))
+                    : value;
+                return `${humanizeActivityKey(key)}: ${formattedValue}`;
+            });
         return values.join(" · ");
     }
 
@@ -1730,6 +1849,8 @@
         const log = activity.userLog || {};
         const events = activity.events || {};
         const trades = Array.isArray(activity.trades) ? activity.trades : [];
+        const carNames = activity.carNames || {};
+        const trackNames = activity.trackNames || {};
 
         const notificationLabels = {
             messages: { icon: "✉", label: "Messages", detail: "Unread messages waiting for you" },
@@ -1750,11 +1871,11 @@
         const logList = Array.isArray(log) ? log.slice(0, 4).map((item) => ({
             text: `${humanizeActivityKey(item?.details?.category || "Activity")} · ${item?.details?.title || item?.data?.text || item?.event || "Log update"}`,
             timestamp: item?.timestamp,
-            detail: summarizeLogPayload(item?.data) || summarizeLogPayload(item?.params) || "Recorded in your personal activity log"
+            detail: summarizeLogPayload(item?.data, item, carNames, trackNames) || summarizeLogPayload(item?.params, item, carNames, trackNames) || "Recorded in your personal activity log"
         })) : (Array.isArray(log.log) ? log.log.slice(0, 4).map((item) => ({
             text: `${humanizeActivityKey(item?.details?.category || "Activity")} · ${item?.details?.title || item?.data?.text || item?.event || "Log update"}`,
             timestamp: item?.timestamp,
-            detail: summarizeLogPayload(item?.data) || summarizeLogPayload(item?.params) || "Recorded in your personal activity log"
+            detail: summarizeLogPayload(item?.data, item, carNames, trackNames) || summarizeLogPayload(item?.params, item, carNames, trackNames) || "Recorded in your personal activity log"
         })) : []);
 
         const eventList = Array.isArray(events) ? events.slice(0, 4).map((item) => ({

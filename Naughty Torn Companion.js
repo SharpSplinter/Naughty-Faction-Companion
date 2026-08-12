@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.14.9
+// @version      5.14.11
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -891,7 +891,7 @@
         setSectionStatus("personal", "Refreshing...");
         debugLog("Fetching personal data");
         try {
-            const [profileResponse, skillsResponse, educationResponse, workstatsResponse, battlestatsResponse, perksResponse, jobResponse, moneyResponse, networthResponse, jobpointsResponse, medalsCatalogResponse, userMedalsResponse, honorsCatalogResponse, userHonorsResponse, eventsResponse, cooldownsResponse] = await Promise.all([
+            const [profileResponse, skillsResponse, educationResponse, workstatsResponse, battlestatsResponse, perksResponse, jobResponse, moneyResponse, networthResponse, jobpointsResponse, medalsCatalogResponse, userMedalsResponse, honorsCatalogResponse, userHonorsResponse, drugLogResponse, cooldownsResponse] = await Promise.all([
                 fetchJson(withKey(`${BASE_URL}user/profile`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/skills`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/education`, apiKey)).catch(() => null),
@@ -906,7 +906,7 @@
                 fetchJson(withKey(`${BASE_URL}user/medals`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}torn/honors`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/honors`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}user/events`, apiKey, { limit: 100, sort: "DESC" })).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}user/log`, apiKey, { cat: 62 })).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/cooldowns`, apiKey)).catch(() => null)
             ]);
             const personalstatResponses = await Promise.all(
@@ -947,7 +947,7 @@
                 "Honor"
             );
             const personalstats = Object.assign({}, ...personalstatResponses.map((response) => response?.personalstats || response || {}));
-            const events = eventsResponse?.events || eventsResponse || [];
+            const drugLogs = drugLogResponse?.log || drugLogResponse || [];
             const cooldowns = cooldownsResponse?.cooldowns || cooldownsResponse || {};
             const awardProgress = buildAwardProgress(
                 personalstats,
@@ -972,7 +972,7 @@
                 medals,
                 honors,
                 awardProgress,
-                xanaxDebuffActive: isActiveXanaxCooldown(events, cooldowns)
+                xanaxDebuffActive: isActiveXanaxCooldown(drugLogs, cooldowns)
             };
             setSectionStatus("personal", "Updated");
             markSectionRefreshed("personal");
@@ -1354,10 +1354,11 @@
     const XANAX_COOLDOWN_MIN_SECONDS = 360 * 60;
     const XANAX_COOLDOWN_MAX_SECONDS = 480 * 60;
 
-    function isActiveXanaxCooldown(events, cooldowns, now = Math.floor(Date.now() / 1000)) {
-        const latestXanax = (Array.isArray(events) ? events : [])
-            .filter((event) => /\btook (?:some |an )?xanax\b/i.test(String(event.event || "")))
-            .map((event) => Number(event.timestamp || 0))
+    function isActiveXanaxCooldown(drugLogs, cooldowns, now = Math.floor(Date.now() / 1000)) {
+        const entries = Array.isArray(drugLogs) ? drugLogs : (Array.isArray(drugLogs?.log) ? drugLogs.log : []);
+        const latestXanax = entries
+            .filter((entry) => /\bxanax\b/i.test(JSON.stringify(entry)))
+            .map((entry) => Number(entry.timestamp || 0))
             .sort((a, b) => b - a)[0] || 0;
         const remaining = Number(cooldowns?.drug || 0);
         const elapsed = now - latestXanax;

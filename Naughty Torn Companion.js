@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.5.0
+// @version      5.12.0
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -16,10 +16,6 @@
 // @match        https://torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/jobs.php*
 // @match        https://torn.com/jobs.php*
-// @match        https://www.torn.com/bazaar.php*
-// @match        https://torn.com/bazaar.php*
-// @match        https://www.torn.com/forums.php*
-// @match        https://torn.com/forums.php*
 // @source       https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.js
 // @updateURL    https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.js
 // @downloadURL  https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.js
@@ -93,6 +89,7 @@
         expandedCategories: new Set(),
         currentTab: "overview",
         settingsSubTab: "controls",
+        isMinimized: false,
         apiKey: "",
         widgetPosition: null,
         dashboard: null,
@@ -144,6 +141,29 @@
         if (m > 0) return `${m}m ${String(s).padStart(2, "0")}s`;
         return `${s}s`;
     };
+    const formatDate = (unixSeconds) => {
+        const seconds = Number(unixSeconds || 0);
+        if (!seconds) return "";
+        return new Date(seconds * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    };
+    const formatRelativeTime = (unixSeconds) => {
+        const seconds = Number(unixSeconds || 0);
+        if (!seconds) return "";
+        const elapsed = Math.max(0, Math.floor(Date.now() / 1000) - seconds);
+        if (elapsed < 60) return "just now";
+        if (elapsed < 3600) return `${Math.floor(elapsed / 60)}m ago`;
+        if (elapsed < 86400) return `${Math.floor(elapsed / 3600)}h ago`;
+        return `${Math.floor(elapsed / 86400)}d ago`;
+    };
+    const formatTimeUntil = (unixSeconds) => {
+        const seconds = Number(unixSeconds || 0);
+        if (!seconds) return "";
+        const remaining = Math.max(0, seconds - Math.floor(Date.now() / 1000));
+        if (remaining < 60) return "expires now";
+        if (remaining < 3600) return `expires in ${Math.floor(remaining / 60)}m`;
+        if (remaining < 86400) return `expires in ${Math.floor(remaining / 3600)}h`;
+        return `expires in ${Math.floor(remaining / 86400)}d`;
+    };
     const debugLog = (...args) => {
         if (typeof console !== "undefined" && console.log) {
             console.log("[Torn Companion]", ...args);
@@ -192,11 +212,13 @@
 
     const getStoredDashboardState = () => ({
         currentTab: state.currentTab,
-        settingsSubTab: state.settingsSubTab
+        settingsSubTab: state.settingsSubTab,
+        isMinimized: state.isMinimized
     });
     const setStoredDashboardState = (payload) => {
         if (payload && payload.currentTab) state.currentTab = payload.currentTab;
         if (payload && payload.settingsSubTab) state.settingsSubTab = payload.settingsSubTab;
+        if (payload && typeof payload.isMinimized === "boolean") state.isMinimized = payload.isMinimized;
         void gmSetValue(APP_STORAGE.dashboard, getStoredDashboardState());
     };
 
@@ -276,6 +298,7 @@
         const dashboardState = await gmGetValue(APP_STORAGE.dashboard, { currentTab: "overview" });
         state.currentTab = dashboardState.currentTab || "overview";
         state.settingsSubTab = dashboardState.settingsSubTab || state.settingsSubTab;
+        state.isMinimized = dashboardState.isMinimized === true;
 
         const sectionNames = Object.keys(APP_STORAGE.sections);
         await Promise.all(sectionNames.map(async (name) => {
@@ -703,11 +726,91 @@
         return "";
     }
 
+    // Cross-references an earned-items list (id + timestamp only, as returned by
+    // user/medals or user/honors) against a full catalog (id -> name/description/
+    // rarity, as returned by torn/medals or torn/honors) to build a display-ready
+    // summary: total earned/available, rarity breakdown, and most recently earned.
+    function buildAwardSummary(catalogResponseRaw, earnedResponseRaw, itemLabel) {
+        const catalogRaw = catalogResponseRaw || [];
+        const catalog = {};
+        (Array.isArray(catalogRaw) ? catalogRaw : []).forEach((entry) => {
+            catalog[entry.id] = entry;
+        });
+
+        const earnedRaw = earnedResponseRaw || [];
+        const earned = (Array.isArray(earnedRaw) ? earnedRaw : [])
+            .map((entry) => {
+                const info = catalog[entry.id] || {};
+                return {
+                    id: entry.id,
+                    timestamp: Number(entry.timestamp || 0),
+                    name: info.name || `${itemLabel} #${entry.id}`,
+                    rarity: info.rarity || "Unknown",
+                    description: info.description || ""
+                };
+            })
+            .sort((a, b) => b.timestamp - a.timestamp);
+
+        const rarityBreakdown = {};
+        earned.forEach((item) => {
+            rarityBreakdown[item.rarity] = (rarityBreakdown[item.rarity] || 0) + 1;
+        });
+
+        return {
+            totalEarned: earned.length,
+            totalAvailable: Array.isArray(catalogRaw) ? catalogRaw.length : 0,
+            recent: earned.slice(0, 5),
+            rarityBreakdown
+        };
+    }
+
+    const AWARD_PROGRESS_TRACKS = [
+        ...[10, 100, 1000, 10000, 100000].map((target, index) => ({ id: 380 + index, type: "medal", path: ["attacking", "attacks", "won"], target })),
+        ...["theft", "counterfeiting", "vandalism", "fraud", "illicit_services", "cybercrime"].flatMap((crime, groupIndex) =>
+            [10, 100, 500, 2000, 5000, 10000].map((target, index) => ({ id: 800 + (groupIndex * 6) + index, type: "medal", path: ["crimes", "offenses", crime], target }))
+        ),
+        ...[50, 250, 500, 1000].map((target, index) => ({ id: 52 + index, type: "honor", path: ["drugs", "xanax"], target })),
+        ...[50, 250, 500, 1000, 2000].map((target, index) => ({ id: 12 + index, type: "honor", path: ["jail", "busts", "success"], target })),
+        ...[10, 50, 250, 1000, 5000].map((target, index) => ({ id: 210 + index, type: "medal", path: ["hospital", "reviving", "revives"], target })),
+        ...[10, 50, 250, 1000].map((target, index) => ({ id: 440 + index, type: "medal", path: ["missions", "missions"], target }))
+    ];
+
+    function getNestedNumber(value, path) {
+        const result = path.reduce((current, key) => current && current[key], value);
+        return Number(result || 0);
+    }
+
+    function buildAwardProgress(personalstats, medalsCatalogRaw, honorsCatalogRaw, userMedalsRaw, userHonorsRaw) {
+        const medalCatalog = new Map((Array.isArray(medalsCatalogRaw) ? medalsCatalogRaw : []).map((item) => [Number(item.id), item]));
+        const honorCatalog = new Map((Array.isArray(honorsCatalogRaw) ? honorsCatalogRaw : []).map((item) => [Number(item.id), item]));
+        const earnedMedals = new Set((Array.isArray(userMedalsRaw) ? userMedalsRaw : []).map((item) => Number(item.id)));
+        const earnedHonors = new Set((Array.isArray(userHonorsRaw) ? userHonorsRaw : []).map((item) => Number(item.id)));
+
+        return AWARD_PROGRESS_TRACKS
+            .filter((track) => !(track.type === "medal" ? earnedMedals : earnedHonors).has(track.id))
+            .map((track) => {
+                const catalog = track.type === "medal" ? medalCatalog : honorCatalog;
+                const award = catalog.get(track.id);
+                const current = getNestedNumber(personalstats, track.path);
+                return {
+                    name: award?.name || `${track.type === "medal" ? "Medal" : "Honor"} #${track.id}`,
+                    type: track.type,
+                    rarity: award?.rarity || "Unknown",
+                    current,
+                    target: track.target,
+                    percent: Math.min(100, (current / track.target) * 100)
+                };
+            })
+            .filter((track) => track.current < track.target)
+            .sort((a, b) => b.percent - a.percent || a.target - b.target)
+            .slice(0, 5);
+    }
+
     async function fetchPersonalData(apiKey) {
         setSectionStatus("personal", "Refreshing...");
         debugLog("Fetching personal data");
         try {
-            const [profileResponse, skillsResponse, educationResponse, workstatsResponse, battlestatsResponse, perksResponse, jobResponse, moneyResponse, jobpointsResponse] = await Promise.all([
+            const [profileResponse, skillsResponse, educationResponse, workstatsResponse, battlestatsResponse, perksResponse, jobResponse, moneyResponse, jobpointsResponse, medalsCatalogResponse, userMedalsResponse, honorsCatalogResponse, userHonorsResponse, personalstatsResponse] = await Promise.all([
                 fetchJson(withKey(`${BASE_URL}user/profile`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/skills`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/education`, apiKey)).catch(() => null),
@@ -716,7 +819,12 @@
                 fetchJson(withKey(`${BASE_URL}user/perks`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/job`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/money`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}user/jobpoints`, apiKey)).catch(() => null)
+                fetchJson(withKey(`${BASE_URL}user/jobpoints`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}torn/medals`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}user/medals`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}torn/honors`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}user/honors`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}user/personalstats`, apiKey)).catch(() => null)
             ]);
 
             const education = educationResponse?.education || educationResponse || {};
@@ -740,6 +848,25 @@
                 if (jobsMap[key] !== undefined) currentJobPoints = Number(jobsMap[key]);
             }
 
+            const medals = buildAwardSummary(
+                medalsCatalogResponse?.medals || medalsCatalogResponse,
+                userMedalsResponse?.medals || userMedalsResponse,
+                "Medal"
+            );
+            const honors = buildAwardSummary(
+                honorsCatalogResponse?.honors || honorsCatalogResponse,
+                userHonorsResponse?.honors || userHonorsResponse,
+                "Honor"
+            );
+            const personalstats = personalstatsResponse?.personalstats || personalstatsResponse || {};
+            const awardProgress = buildAwardProgress(
+                personalstats,
+                medalsCatalogResponse?.medals || medalsCatalogResponse,
+                honorsCatalogResponse?.honors || honorsCatalogResponse,
+                userMedalsResponse?.medals || userMedalsResponse,
+                userHonorsResponse?.honors || userHonorsResponse
+            );
+
             const result = {
                 profile: profileResponse?.profile || profileResponse || {},
                 skills: skillsResponse?.skills || skillsResponse || {},
@@ -750,7 +877,10 @@
                 perks: perksResponse?.perks || perksResponse || {},
                 job,
                 money: moneyResponse?.money || moneyResponse || {},
-                currentJobPoints
+                currentJobPoints,
+                medals,
+                honors,
+                awardProgress
             };
             setSectionStatus("personal", "Updated");
             markSectionRefreshed("personal");
@@ -761,6 +891,33 @@
             debugLog("Personal data refresh failed", { error: error.message });
             return null;
         }
+    }
+
+    // Reconstructs Torn's Chaining 2.0 respect formula so milestone chain hits (which
+    // receive a hardcoded flat bonus on top of the normal formula) can be identified —
+    // the API returns each attack's actual applied multipliers under `modifiers`, so no
+    // guessing is needed there; only Base Respect (from target level) is derived.
+    function computeBaseRespect(targetLevel) {
+        const level = Number(targetLevel || 0);
+        if (level <= 0) return 0;
+        const raw = (Math.log(level) + 1.0) / 4.0;
+        return Math.round(raw * 100) / 100;
+    }
+
+    function computeEstimatedRespect(attack) {
+        const baseRespect = computeBaseRespect(attack.defender?.level);
+        const mods = attack.modifiers || {};
+        const multiplier = ["fair_fight", "war", "retaliation", "group", "overseas", "chain", "warlord"]
+            .reduce((acc, key) => acc * Number(mods[key] ?? 1), 1);
+        return baseRespect * multiplier;
+    }
+
+    function computeMilestoneBonus(attack) {
+        const actual = Number(attack.respect_gain || 0);
+        const estimated = computeEstimatedRespect(attack);
+        const bonus = actual - estimated;
+        // Filter out floating-point/rounding noise so only genuine flat bonuses count.
+        return Math.abs(bonus) > 0.05 ? bonus : 0;
     }
 
     async function fetchFactionData(apiKey) {
@@ -814,7 +971,7 @@
             // Personal chain/war contribution has no direct API field — approximated
             // client-side by pulling own attacks since the earlier of chain/war start
             // and tallying hits + respect_gain within each window. See project notes.
-            const personalContribution = { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0 };
+            const personalContribution = { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0, bonusScore: 0 };
             try {
                 const chainStart = chain.start;
                 const chainEnd = chain.end || Math.floor(Date.now() / 1000);
@@ -839,6 +996,7 @@
                         if (chainStart && started >= chainStart && started <= chainEnd) {
                             personalContribution.chainHits += 1;
                             personalContribution.chainRespect += respectGain;
+                            personalContribution.bonusScore += computeMilestoneBonus(atk);
                         }
                     });
                 }
@@ -871,17 +1029,19 @@
         setSectionStatus("company", "Refreshing...");
         debugLog("Fetching company data");
         try {
-            const [companyProfileResponse, companyEmployeesResponse, companyNewsResponse, companyStockResponse] = await Promise.all([
+            const [companyProfileResponse, companyEmployeesResponse, companyNewsResponse, companyStockResponse, companyApplicationsResponse] = await Promise.all([
                 fetchJson(withKey(`${BASE_URL}company/profile`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}company/employees`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}company/news`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}company/stock`, apiKey)).catch(() => null)
+                fetchJson(withKey(`${BASE_URL}company/stock`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}company/applications`, apiKey)).catch(() => null)
             ]);
             const result = {
                 companyProfile: companyProfileResponse?.profile || companyProfileResponse || {},
                 companyEmployees: companyEmployeesResponse?.employees || companyEmployeesResponse || [],
                 companyNews: companyNewsResponse?.news || companyNewsResponse || [],
-                companyStock: companyStockResponse?.stock || companyStockResponse || []
+                companyStock: companyStockResponse?.stock || companyStockResponse || [],
+                companyApplications: companyApplicationsResponse ? (companyApplicationsResponse?.applications || companyApplicationsResponse || []) : null
             };
             setSectionStatus("company", "Updated");
             markSectionRefreshed("company");
@@ -898,15 +1058,17 @@
         setSectionStatus("activity", "Refreshing...");
         debugLog("Fetching activity data");
         try {
-            const [notificationsResponse, userLogResponse, eventsResponse] = await Promise.all([
+            const [notificationsResponse, userLogResponse, eventsResponse, tradesResponse] = await Promise.all([
                 fetchJson(withKey(`${BASE_URL}user/notifications`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/log`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}user/events`, apiKey)).catch(() => null)
+                fetchJson(withKey(`${BASE_URL}user/events`, apiKey)).catch(() => null),
+                fetchJson(withKey(`${BASE_URL}user/trades`, apiKey, { cat: "ongoing" })).catch(() => null)
             ]);
             const result = {
                 notifications: notificationsResponse?.notifications || notificationsResponse || {},
                 userLog: userLogResponse?.log || userLogResponse || {},
-                events: eventsResponse?.events || eventsResponse || {}
+                events: eventsResponse?.events || eventsResponse || {},
+                trades: tradesResponse?.trades || tradesResponse || []
             };
             setSectionStatus("activity", "Updated");
             markSectionRefreshed("activity");
@@ -999,9 +1161,10 @@
         const nerveCurrent = Number(bars.nerve?.current ?? bars.nerve ?? 0);
         const nerveMax = Number(bars.nerve?.maximum ?? bars.max_nerve ?? 0);
 
-        // Chain mini-indicator reuses the Faction tab's cached /faction/chain data —
-        // no duplicate fetch here. Shows "No data" until the Faction tab has loaded once.
-        const chain = (state.caches.faction || {}).chain || {};
+        // Chain mini-indicator: prefers the chain snapshot embedded in this tab's own
+        // user/bars fetch (overview.chain), falling back to the Faction tab's cached
+        // /faction/chain data if that hasn't loaded yet — either way, no wasted fetch.
+        const chain = overview.chain || (state.caches.faction || {}).chain || {};
         const chainDisplay = chain.max ? `${formatInteger(chain.current)} / ${formatInteger(chain.max)}` : "No data";
         const chainSubtext = chain.max ? `Breaks in ${formatDuration(chain.timeout)}` : "Visit Faction tab to load";
 
@@ -1136,6 +1299,81 @@
         `;
     }
 
+    const MEDAL_RARITY_COLORS = {
+        "Common": "#999",
+        "Very Common": "#888",
+        "Limited": "#e0a25e",
+        "Uncommon": "#7fe18d",
+        "Rare": "#9dd8ff",
+        "Very Rare": "#e0a25e",
+        "Extremely Rare": "#c9a0ff",
+        "Ultra Rare": "#e05959"
+    };
+
+    function renderAwardSection(title, summary) {
+        if (!summary || !summary.totalAvailable) {
+            return `<div style="margin-bottom: 8px;"><span style="color: #fff; font-size: 12px; font-weight: 700;">${escapeHtml(title)}</span> <span style="color: #888; font-size: 11px;">— no data.</span></div>`;
+        }
+
+        const breakdownEntries = Object.entries(summary.rarityBreakdown || {});
+        const breakdownHtml = breakdownEntries.length ? `
+            <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px;">
+                ${breakdownEntries.map(([rarity, count]) => `
+                    <span style="font-size: 10px; color: ${MEDAL_RARITY_COLORS[rarity] || "#ccc"}; border: 1px solid #333; border-radius: 4px; padding: 2px 6px;">${escapeHtml(rarity)}: ${count}</span>
+                `).join("")}
+            </div>
+        ` : "";
+
+        const recentHtml = (summary.recent || []).map((item) => `
+            <div style="display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #222;">
+                <span style="color: ${MEDAL_RARITY_COLORS[item.rarity] || "#ccc"}; font-size: 11px;">${escapeHtml(item.name)}</span>
+                <span style="color: #888; font-size: 10px;">${formatDate(item.timestamp)}</span>
+            </div>
+        `).join("");
+
+        return `
+            <div style="margin-bottom: 10px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                    <span style="color: #fff; font-size: 12px; font-weight: 700;">${escapeHtml(title)}</span>
+                    <span style="color: #9dd8ff; font-size: 11px;">${formatInteger(summary.totalEarned)} / ${formatInteger(summary.totalAvailable)}</span>
+                </div>
+                ${breakdownHtml}
+                ${recentHtml || `<div style="color: #888; font-size: 10px;">None earned yet.</div>`}
+            </div>
+        `;
+    }
+
+    function renderAchievementsBox(medals, honors) {
+        return `
+            <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">
+                ${renderAwardSection("Medals", medals)}
+                ${renderAwardSection("Honors", honors)}
+            </div>
+        `;
+    }
+
+    function renderAwardProgressBox(progress) {
+        const rows = (Array.isArray(progress) ? progress : []).map((item) => `
+            <div style="padding: 7px 0; border-bottom: 1px solid #222;">
+                <div style="display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px;">
+                    <span style="color: ${MEDAL_RARITY_COLORS[item.rarity] || "#ccc"}; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(item.name)}</span>
+                    <span style="color: #9dd8ff; font-size: 10px; white-space: nowrap;">${item.percent.toFixed(1)}%</span>
+                </div>
+                <div style="height: 6px; border-radius: 3px; overflow: hidden; background: #222;">
+                    <div style="width: ${item.percent}%; height: 100%; background: #7fe18d;"></div>
+                </div>
+                <div style="color: #888; font-size: 10px; margin-top: 3px;">${formatInteger(item.current)} / ${formatInteger(item.target)} · ${escapeHtml(item.type)}</div>
+            </div>
+        `).join("");
+
+        return `
+            <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">
+                <div style="color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 6px;">Closest to Completion</div>
+                ${rows || `<div style="color: #888; font-size: 10px;">No configured award progress is available.</div>`}
+            </div>
+        `;
+    }
+
     function renderPersonalPanel() {
         const personal = state.caches.personal || {};
         const profile = personal.profile || {};
@@ -1213,6 +1451,10 @@
             ${renderSkillsBox(skills)}
             ${renderEducationLine(education, currentCourseName)}
             ${renderPerksBox(perks)}
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 8px; align-items: start;">
+                ${renderAchievementsBox(personal.medals, personal.honors)}
+                ${renderAwardProgressBox(personal.awardProgress)}
+            </div>
         `;
     }
 
@@ -1287,12 +1529,13 @@
 
         const chain = faction.chain || {};
         const war = faction.war || null;
-        const contribution = faction.personalContribution || { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0 };
+        const contribution = faction.personalContribution || { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0, bonusScore: 0 };
         const contributionCards = [
             buildStatCard("Chain Hits", contribution.chainHits, "Your hits this chain (approx)", "#9dd8ff"),
             buildStatCard("Chain Respect", contribution.chainRespect, "Respect earned this chain (approx)", "#7fe18d"),
             buildStatCard("War Hits", contribution.warHits, "Your hits this war (approx)", "#9dd8ff"),
-            buildStatCard("War Respect", contribution.warRespect, "Respect earned this war (approx)", "#7fe18d")
+            buildStatCard("War Respect", contribution.warRespect, "Respect earned this war (approx)", "#7fe18d"),
+            buildStatCard("Bonus Score", (contribution.bonusScore || 0).toFixed(2), "Respect from bonus hits only — excludes chain & war score", "#c9a0ff")
         ].join("");
 
         return `
@@ -1316,22 +1559,71 @@
             company.companyNews && Array.isArray(company.companyNews.news) ? company.companyNews.news : []
         );
         const stock = Array.isArray(company.companyStock) ? company.companyStock : [];
+        const applications = Array.isArray(company.companyApplications) ? company.companyApplications : null;
         const companyEmployees = profile.employees || {};
 
         const currentRoster = Number(companyEmployees.hired ?? employees.length ?? 0);
         const maxRoster = Number(companyEmployees.capacity ?? 0);
         const stockTotal = stock.reduce((sum, item) => sum + Number(item.in_stock ?? item.quantity ?? 0), 0);
+        const pendingApplications = applications ? applications.filter((item) => item?.status === "active").length : null;
+        const companyType = profile.type?.name || profile.type || "Unknown";
+        const rating = Number(profile.rating || 0);
+        const income = profile.income || {};
+        const adsBudget = profile.advertisement_budget;
+        const hasWages = employees.length === currentRoster && employees.every((employee) => employee?.wage !== undefined && employee?.wage !== null);
+        const canShowProfit = adsBudget !== undefined && adsBudget !== null && hasWages;
+        const totalWages = canShowProfit ? employees.reduce((sum, employee) => sum + Number(employee.wage || 0), 0) : 0;
+        const dailyIncome = Number(income.daily || 0);
+        const weeklyIncome = Number(income.weekly || 0);
+        const financialNote = "Estimated using current ads budget and wages — actual profit may differ if these were changed during the week.";
         const cards = [
             buildStatCard("Company", profile.name || "Unknown", `ID ${profile.id || "-"}`),
+            buildStatCard("Type & Rating", companyType, rating ? `${rating}★ rating` : "No rating available"),
             buildStatCard("Employees", `${formatInteger(currentRoster)} / ${formatInteger(maxRoster)}`, "Current roster / max roster"),
             buildStatCard("Stock", stockTotal, "Total stock quantity"),
+            buildStatCard("Applications", pendingApplications === null ? "—" : pendingApplications, pendingApplications === null ? "Requires manager access" : "Pending applications"),
             buildStatCard("News", rawNews.length, "Recent news entries")
         ].join("");
+
+        const financialRows = canShowProfit ? [
+            { label: "Daily Income", value: formatMoney(dailyIncome), color: "#7fe18d" },
+            { label: "Weekly Income", value: formatMoney(weeklyIncome), color: "#7fe18d" },
+            { label: "Ads Budget", value: formatMoney(Number(adsBudget)), color: "#e0a25e" },
+            { label: "Total Wages", value: formatMoney(totalWages), color: "#e0a25e" },
+            { label: "Daily Profit", value: formatMoney(dailyIncome - Number(adsBudget) - totalWages), color: "#9dd8ff" },
+            { label: "Weekly Profit", value: formatMoney(weeklyIncome - (Number(adsBudget) * 7) - (totalWages * 7)), color: "#9dd8ff" }
+        ] : [
+            { label: "Daily Income", value: formatMoney(dailyIncome), color: "#7fe18d" },
+            { label: "Weekly Income", value: formatMoney(weeklyIncome), color: "#7fe18d" },
+            { label: "Profit", value: "Unavailable", color: "#e0a25e" }
+        ];
+        const topEmployees = [...employees]
+            .sort((a, b) => Number(b?.effectiveness?.total ?? -Infinity) - Number(a?.effectiveness?.total ?? -Infinity))
+            .slice(0, 5)
+            .map((employee) => ({
+                label: employee.name || "Unknown employee",
+                value: `${employee.position?.name || employee.position || "Unknown role"}${employee.effectiveness?.total !== undefined ? ` · ${formatInteger(employee.effectiveness.total)}% effectiveness` : ""}`
+            }));
+        const topStock = [...stock]
+            .sort((a, b) => Number(b?.in_stock ?? b?.quantity ?? 0) - Number(a?.in_stock ?? a?.quantity ?? 0))
+            .slice(0, 5)
+            .map((item) => ({
+                label: item.name || "Unknown item",
+                value: `${formatInteger(item.in_stock ?? item.quantity ?? 0)} in stock · ${formatMoney(Number(item.price || 0))}`
+            }));
 
         return `
             ${renderSectionMeta("company", "Company")}
             <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">
                 ${cards}
+            </div>
+            <div style="margin-top: 10px;" title="${escapeHtml(financialNote)}">
+                ${renderInfoBox("Finances", financialRows)}
+                ${canShowProfit ? `<div style="color: #888; font-size: 10px; margin: -5px 0 10px;">ⓘ ${escapeHtml(financialNote)}</div>` : `<div style="color: #e0a25e; font-size: 10px; margin: -5px 0 10px;">ⓘ Profit unavailable — requires company manager access.</div>`}
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px;">
+                ${renderInfoBox("Top Employees", topEmployees)}
+                ${renderInfoBox("Top Stock", topStock)}
             </div>
         `;
     }
@@ -1341,29 +1633,46 @@
         const notifications = activity.notifications || {};
         const log = activity.userLog || {};
         const events = activity.events || {};
+        const trades = Array.isArray(activity.trades) ? activity.trades : [];
 
-        const notificationCounts = notifications && typeof notifications === "object" ? notifications : {};
-        const notificationList = Object.entries(notificationCounts)
-            .filter(([key, value]) => key !== "_metadata" && value !== undefined && value !== null)
-            .slice(0, 4)
-            .map(([key, value]) => ({ title: key, text: `${key}: ${value}` }));
+        const notificationLabels = {
+            messages: "new messages",
+            events: "new events",
+            awards: "new awards",
+            competition: "competition updates"
+        };
+        const notificationList = Object.entries(notificationLabels)
+            .map(([key, label]) => ({ text: `${formatInteger(notifications[key])} ${label}` }))
+            .filter((item) => !item.text.startsWith("0 "));
 
         const logList = Array.isArray(log) ? log.slice(0, 4).map((item) => ({
-            text: item?.details?.title || item?.data?.text || item?.event || "Log update"
+            text: item?.details?.title || item?.data?.text || item?.event || "Log update",
+            timestamp: item?.timestamp,
+            detail: item?.details?.category || ""
         })) : (Array.isArray(log.log) ? log.log.slice(0, 4).map((item) => ({
-            text: item?.details?.title || item?.data?.text || item?.event || "Log update"
+            text: item?.details?.title || item?.data?.text || item?.event || "Log update",
+            timestamp: item?.timestamp,
+            detail: item?.details?.category || ""
         })) : []);
 
         const eventList = Array.isArray(events) ? events.slice(0, 4).map((item) => ({
-            text: item?.event || item?.text || item?.title || "Event update"
+            text: item?.event || item?.text || item?.title || "Event update",
+            timestamp: item?.timestamp
         })) : (Array.isArray(events.events) ? events.events.slice(0, 4).map((item) => ({
-            text: item?.event || item?.text || item?.title || "Event update"
+            text: item?.event || item?.text || item?.title || "Event update",
+            timestamp: item?.timestamp
         })) : []);
+        const tradeList = trades.slice(0, 4).map((trade) => ({
+            text: `Trade #${trade.id || "—"} with ${trade.trader?.name || trade.user?.name || "Unknown player"}`,
+            timestamp: trade.modified_at || trade.expires_at,
+            detail: trade.expires_at ? formatTimeUntil(trade.expires_at) : "Ongoing"
+        }));
 
         const lists = [
             renderStreamList("Notifications", notificationList),
             renderStreamList("Recent Log", logList),
-            renderStreamList("Events", eventList)
+            renderStreamList("Events", eventList),
+            renderStreamList("Ongoing Trades", tradeList)
         ].join("");
 
         return `${renderSectionMeta("activity", "Activity")}<div style="display: grid; gap: 8px;">${lists}</div>`;
@@ -1373,7 +1682,9 @@
         const safeItems = Array.isArray(items) ? items : [];
         const rows = safeItems.length ? safeItems.map((item) => {
             const text = item?.text || item?.message || item?.event || item?.title || item?.details?.title || "Unknown update";
-            return `<div style="padding: 8px 10px; border: 1px solid #2d2d2d; border-radius: 6px; background: rgba(255,255,255,0.02); color: #ddd; font-size: 11px;">${escapeHtml(text)}</div>`;
+            const timestamp = formatRelativeTime(item?.timestamp);
+            const detail = item?.detail ? `<div style="color: #888; font-size: 10px; margin-top: 3px;">${escapeHtml(item.detail)}</div>` : "";
+            return `<div style="padding: 8px 10px; border: 1px solid #2d2d2d; border-radius: 6px; background: rgba(255,255,255,0.02); color: #ddd; font-size: 11px;"><div style="display: flex; justify-content: space-between; gap: 8px;"><span>${escapeHtml(text)}</span>${timestamp ? `<span style="color: #888; font-size: 10px; white-space: nowrap;">${timestamp}</span>` : ""}</div>${detail}</div>`;
         }).join("") : `<div style="padding: 8px 10px; border: 1px solid #2d2d2d; border-radius: 6px; background: rgba(255,255,255,0.02); color: #888; font-size: 11px;">No ${title.toLowerCase()} available.</div>`;
 
         return `
@@ -1660,6 +1971,7 @@
                 const tabKey = button.getAttribute("data-settings-subtab");
                 if (tabKey) {
                     state.settingsSubTab = tabKey;
+                    setStoredDashboardState({ settingsSubTab: tabKey });
                     debugLog("Settings subtab changed", { tabKey });
                     renderTabContent();
                 }
@@ -1890,6 +2202,44 @@
         state.autoRefreshTimer = setTimeout(performAutoRefreshCycle, 60 * 1000);
     }
 
+    function applyWidgetView() {
+        const dashboard = state.dashboard;
+        if (!dashboard) return;
+        const widgetBody = dashboard.querySelector("#widget-main-body");
+        const dragHandle = dashboard.querySelector("#widget-drag-handle");
+        const title = dashboard.querySelector("#widget-title");
+        const toggleBtn = dashboard.querySelector("#widget-toggle-view-btn");
+        if (!widgetBody || !dragHandle || !title || !toggleBtn) return;
+
+        if (state.isMinimized) {
+            widgetBody.style.display = "none";
+            dashboard.style.width = "48px";
+            dashboard.style.maxHeight = "36px";
+            dragHandle.style.padding = "0";
+            dragHandle.style.height = "36px";
+            dragHandle.style.justifyContent = "center";
+            dragHandle.style.cursor = "move";
+            title.textContent = "NTC";
+            title.style.fontSize = "11px";
+            title.style.letterSpacing = "0.06em";
+            toggleBtn.style.display = "none";
+            dashboard.title = "Naughty Torn Companion — click to restore";
+        } else {
+            widgetBody.style.display = "block";
+            dashboard.style.width = "480px";
+            dashboard.style.maxHeight = "80vh";
+            dragHandle.style.padding = "8px 10px";
+            dragHandle.style.height = "auto";
+            dragHandle.style.justifyContent = "space-between";
+            title.textContent = "🧭 Naughty Torn Companion";
+            title.style.fontSize = "12px";
+            title.style.letterSpacing = "normal";
+            toggleBtn.style.display = "block";
+            toggleBtn.innerText = "_";
+            dashboard.title = "";
+        }
+    }
+
     function initializeDOMDashboard() {
         if (document.getElementById("torn-v2-inventory-wrapper")) return;
 
@@ -1928,7 +2278,7 @@
 
         dashboard.innerHTML = `
             <div id="widget-drag-handle" style="background-color: #2c2c2c; padding: 8px 10px; display: flex; justify-content: space-between; align-items: center; cursor: move; border-bottom: 1px solid #444; user-select: none;">
-                <span style="color: #fff; font-size: 12px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">🧭 Naughty Torn Companion</span>
+                <span id="widget-title" style="color: #fff; font-size: 12px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">🧭 Naughty Torn Companion</span>
                 <button id="widget-toggle-view-btn" style="background-color: #444; color: #fff; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 11px;">_</button>
             </div>
 
@@ -1939,6 +2289,8 @@
         `;
 
         document.body.appendChild(dashboard);
+        state.dashboard = dashboard;
+        applyWidgetView();
 
         const savedPos = getStoredPosition();
         if (savedPos && typeof savedPos.left === "number" && typeof savedPos.top === "number") {
@@ -1952,27 +2304,22 @@
             dashboard.style.top = `${clampedTop}px`;
         }
 
-        const widgetBody = document.getElementById("widget-main-body");
         const toggleBtn = document.getElementById("widget-toggle-view-btn");
         toggleBtn.addEventListener("click", () => {
-            if (widgetBody.style.display === "none") {
-                widgetBody.style.display = "block";
-                toggleBtn.innerText = "_";
-                dashboard.style.width = "480px";
-            } else {
-                widgetBody.style.display = "none";
-                toggleBtn.innerText = "▢";
-                dashboard.style.width = "160px";
-            }
+            state.isMinimized = !state.isMinimized;
+            setStoredDashboardState({ isMinimized: state.isMinimized });
+            applyWidgetView();
         });
 
         const dragHandle = document.getElementById("widget-drag-handle");
         let isDragging = false;
+        let didDrag = false;
         let offsetX, offsetY;
 
         dragHandle.addEventListener("mousedown", (e) => {
             if (e.target === toggleBtn) return;
             isDragging = true;
+            didDrag = false;
             offsetX = e.clientX - dashboard.getBoundingClientRect().left;
             offsetY = e.clientY - dashboard.getBoundingClientRect().top;
             dashboard.style.bottom = "auto";
@@ -1981,6 +2328,7 @@
 
         document.addEventListener("mousemove", (e) => {
             if (!isDragging) return;
+            didDrag = true;
             dashboard.style.left = `${e.clientX - offsetX}px`;
             dashboard.style.top = `${e.clientY - offsetY}px`;
         });
@@ -1991,6 +2339,13 @@
                 setStoredPosition({ left: rect.left, top: rect.top });
             }
             isDragging = false;
+        });
+
+        dragHandle.addEventListener("click", () => {
+            if (!state.isMinimized || didDrag) return;
+            state.isMinimized = false;
+            setStoredDashboardState({ isMinimized: false });
+            applyWidgetView();
         });
 
         dashboard.querySelectorAll(".torn-companion-tab").forEach((button) => {

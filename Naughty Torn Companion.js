@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.14.2
+// @version      5.14.3
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -768,10 +768,16 @@
     // user/medals or user/honors) against a full catalog (id -> name/description/
     // rarity, as returned by torn/medals or torn/honors) to build a display-ready
     // summary: total earned/available, rarity breakdown, and most recently earned.
+    function normalizeAwardCatalog(catalogResponseRaw) {
+        if (Array.isArray(catalogResponseRaw)) return catalogResponseRaw;
+        return Object.entries(catalogResponseRaw || {}).map(([id, entry]) => ({
+            ...(entry || {}),
+            id: entry?.id ?? Number(id)
+        }));
+    }
+
     function buildAwardSummary(catalogResponseRaw, earnedResponseRaw, itemLabel) {
-        const catalogRaw = Array.isArray(catalogResponseRaw)
-            ? catalogResponseRaw
-            : Object.values(catalogResponseRaw || {});
+        const catalogRaw = normalizeAwardCatalog(catalogResponseRaw);
         const catalog = {};
         catalogRaw.forEach((entry) => {
             catalog[entry.id] = entry;
@@ -821,8 +827,8 @@
     }
 
     function buildAwardProgress(personalstats, medalsCatalogRaw, honorsCatalogRaw, userMedalsRaw, userHonorsRaw) {
-        const medalsCatalog = Array.isArray(medalsCatalogRaw) ? medalsCatalogRaw : Object.values(medalsCatalogRaw || {});
-        const honorsCatalog = Array.isArray(honorsCatalogRaw) ? honorsCatalogRaw : Object.values(honorsCatalogRaw || {});
+        const medalsCatalog = normalizeAwardCatalog(medalsCatalogRaw);
+        const honorsCatalog = normalizeAwardCatalog(honorsCatalogRaw);
         const medalCatalog = new Map(medalsCatalog.map((item) => [Number(item.id), item]));
         const honorCatalog = new Map(honorsCatalog.map((item) => [Number(item.id), item]));
         const earnedMedals = new Set((Array.isArray(userMedalsRaw) ? userMedalsRaw : []).map((item) => Number(item.id)));

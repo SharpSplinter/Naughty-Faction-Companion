@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.22.0
+// @version      5.22.1
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/index.php*
@@ -1437,6 +1437,7 @@
         setSectionStatus("faction", "Refreshing...");
         debugLog("Fetching faction data");
         try {
+            const previousFaction = state.caches.faction || {};
             const factionRequestedAt = Date.now();
             const [userFactionResponse, factionBasicResponse, factionStatsResponse, factionMembersResponse, factionNewsResponse, factionChainResponse, factionWarsResponse] = await Promise.all([
                 fetchJson(withKey(`${BASE_URL}user/faction`, apiKey)).catch(() => null),
@@ -1466,10 +1467,11 @@
                 fetchedAt: factionChainResponse?.fetchedAt || factionRequestedAt
             };
 
+            const warsRequestFailed = factionWarsResponse === null;
             const warsData = factionWarsResponse?.wars || factionWarsResponse || {};
             const rankedWar = warsData.ranked || null;
             const rankedFactions = Array.isArray(rankedWar?.factions) ? rankedWar.factions : [];
-            let war = null;
+            let war = warsRequestFailed ? (previousFaction.war || null) : null;
             if (rankedFactions.length >= 2) {
                 const ownEntry = rankedFactions.find((entry) => Number(entry.id) === ownFactionId) || rankedFactions[0];
                 const oppEntry = rankedFactions.find((entry) => Number(entry.id) !== ownFactionId) || rankedFactions[1];
@@ -1525,14 +1527,24 @@
                 console.warn("Personal contribution calculation failed:", contributionError);
             }
 
-            let warTargets = null;
+            const previousWarTargets = war && Number(previousFaction.war?.warId || 0) === Number(war.warId || 0)
+                ? previousFaction.warTargets
+                : null;
+            let warTargets = previousWarTargets || null;
             if (war && getStoredFFScouterKey()) {
                 try {
                     warTargets = await fetchWarTargetData(apiKey, war);
                 } catch (targetError) {
-                    warTargets = { enemyFactionId: war.oppId, enemyFactionName: war.oppName, targets: [], error: targetError.message };
+                    warTargets = {
+                        ...(previousWarTargets || {}),
+                        enemyFactionId: war.oppId,
+                        enemyFactionName: war.oppName,
+                        targets: Array.isArray(previousWarTargets?.targets) ? previousWarTargets.targets : [],
+                        error: targetError.message
+                    };
                 }
             }
+            if (warTargets && war) warTargets = { ...warTargets, war: { ...war } };
 
             const result = {
                 userFaction: userFactionData,
@@ -2628,8 +2640,8 @@
     }
 
     function renderFFScouterWarTargets(faction) {
-        const war = faction.war || null;
         const data = faction.warTargets || null;
+        const war = faction.war || data?.war || null;
         if (!war) {
             return `<div style="border:1px solid #343a43;border-radius:8px;padding:12px;color:#aaa;background:rgba(20,20,20,.7);font-size:11px;">No active Ranked War enemy faction.</div>`;
         }
@@ -2641,9 +2653,7 @@
         const targets = sortWarTargets(filterWarTargets(allTargets));
         const onlineCount = targets.filter((target) => /^(online|idle)$/i.test(String(target.lastAction?.status || ""))).length;
         const okayCount = targets.filter((target) => getWarTargetStatus(target).kind === "okay").length;
-        const estimatedCount = targets.filter((target) => !target.noEstimate && target.battleStats > 0).length;
         const refreshed = data?.liveFetchedAt ? new Date(data.liveFetchedAt).toLocaleTimeString() : "Not loaded";
-        const rateLimit = data?.ffLimits ? `${data.ffLimits.remaining}/${data.ffLimits.limit} FFScouter requests remaining` : "FFScouter rate limit unavailable";
         const notices = [data?.error, data?.statsError ? `FFScouter: ${data.statsError}` : "", data?.liveError ? `Live profile batches unavailable; using faction roster status. ${data.liveError}` : ""].filter(Boolean);
         const columnOrder = state.warTargetColumnOrder.filter((key) => WAR_TARGET_COLUMNS[key]);
         const activeSort = WAR_TARGET_COLUMNS[state.warTargetSort?.key] || WAR_TARGET_COLUMNS.status;
@@ -2703,7 +2713,7 @@
                         ${filterPanel}
                         ${ffRangePanel}
                     </div>
-                    <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;">${buildStatCard("Online / Idle", onlineCount, "Live Torn status", "#7fe18d")}${buildStatCard("Healthy", okayCount, "Status: Okay", "#5ba7f7")}${buildStatCard("Estimates", `${estimatedCount} / ${targets.length}`, rateLimit, "#c9a0ff")}</div>
+                    <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;">${buildStatCard("Online / Idle", onlineCount, "Live Torn status", "#7fe18d")}${buildStatCard("Healthy", okayCount, "Status: Okay", "#5ba7f7")}</div>
                     ${notices.map((notice) => `<div style="color:#e0a25e;font-size:10px;line-height:1.4;">⚠ ${escapeHtml(notice)}</div>`).join("")}
                 </div>
                 <div class="ntc-war-target-table-wrap" style="width:100%;min-width:0;min-height:160px;flex:1 1 auto;border:1px solid #343a43;border-radius:8px;overflow:auto;background:rgba(15,15,15,.78);">
@@ -3523,7 +3533,9 @@
                 existingStats: existing.ffResults || [],
                 statsFetchedAt: existing.statsFetchedAt || 0
             });
-            state.caches.faction = { ...faction, warTargets: refreshed };
+            const currentFaction = state.caches.faction || {};
+            if (Number(currentFaction.war?.warId || 0) !== Number(war.warId || 0)) return false;
+            state.caches.faction = { ...currentFaction, warTargets: { ...refreshed, war: { ...war } } };
             void gmSetValue(APP_STORAGE.sections.faction, {
                 data: state.caches.faction,
                 lastRefresh: state.lastRefreshBySection.faction,
@@ -3532,7 +3544,13 @@
             if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") renderTabContent();
             return true;
         } catch (error) {
-            state.caches.faction = { ...faction, warTargets: { ...existing, error: error.message, liveFetchedAt: Date.now() } };
+            const currentFaction = state.caches.faction || {};
+            if (Number(currentFaction.war?.warId || 0) === Number(war.warId || 0)) {
+                state.caches.faction = {
+                    ...currentFaction,
+                    warTargets: { ...existing, war: { ...war }, error: error.message, liveFetchedAt: Date.now() }
+                };
+            }
             if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") renderTabContent();
             return false;
         } finally {
@@ -3571,6 +3589,16 @@
         };
         if (minFFInput) minFFInput.onchange = saveFFRange;
         if (maxFFInput) maxFFInput.onchange = saveFFRange;
+        [minFFInput, maxFFInput].filter(Boolean).forEach((input) => {
+            input.onwheel = (event) => {
+                event.preventDefault();
+                const step = Number(input.step) || 0.01;
+                const current = input.value === "" ? 0 : Number(input.value);
+                const next = Math.max(0, (Number.isFinite(current) ? current : 0) + (event.deltaY < 0 ? step : -step));
+                input.value = next.toFixed(2).replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+                saveFFRange();
+            };
+        });
         if (clearFFRangeButton) clearFFRangeButton.onclick = () => {
             state.warTargetFFRange = { min: "", max: "" };
             setStoredDashboardState({ warTargetFFRange: state.warTargetFFRange });

@@ -2624,7 +2624,7 @@
             case "ff":
                 return `<td style="padding:8px 7px;text-align:center;color:#7fe18d;font-size:13px;font-weight:900;white-space:nowrap;">${display.ff}</td>`;
             case "attack":
-                return `<td style="padding:8px 7px;text-align:center;white-space:nowrap;"><a class="ntc-attack-button" href="https://www.torn.com/loader.php?sid=attack&user2ID=${target.id}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#8f3434;color:#fff;border-radius:5px;padding:5px 8px;font-size:10px;font-weight:800;text-decoration:none;white-space:nowrap;overflow-wrap:normal;word-break:keep-all;">Attack</a></td>`;
+                return `<td style="padding:8px 7px;text-align:center;white-space:nowrap;"><a class="ntc-attack-button" href="https://www.torn.com/page.php?sid=attack&user2ID=${target.id}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#8f3434;color:#fff;border-radius:5px;padding:5px 8px;font-size:10px;font-weight:800;text-decoration:none;white-space:nowrap;overflow-wrap:normal;word-break:keep-all;">Attack</a></td>`;
             default:
                 return "";
         }

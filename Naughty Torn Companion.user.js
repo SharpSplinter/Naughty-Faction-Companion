@@ -34,6 +34,23 @@
         "temporary", "melee", "primary", "secondary", "defensive"
     ]);
 
+    // --- Device / environment detection ---
+    // IS_TORN_PDA: the Torn PDA app injects window.flutter_inappwebview as the bridge
+    // to its native GM/HTTP shims (see GMforPDA.user.js) — its presence is a reliable
+    // PDA signal regardless of viewport size (PDA also runs on tablets).
+    const IS_TORN_PDA = typeof window.flutter_inappwebview !== "undefined";
+    const IS_TOUCH_DEVICE = ("ontouchstart" in window) || (Number(navigator.maxTouchPoints) > 0);
+    const MOBILE_VIEWPORT_BREAKPOINT = 700;
+    function isMobileViewport() {
+        return window.innerWidth <= MOBILE_VIEWPORT_BREAKPOINT;
+    }
+    // Used only to pick sensible FIRST-RUN defaults (minimized + corner snap).
+    // Deliberately narrower than the responsive-layout check below: a desktop user
+    // who just has a narrow browser window shouldn't get treated as "on mobile".
+    function isMobileEnvironment() {
+        return IS_TORN_PDA || (IS_TOUCH_DEVICE && isMobileViewport());
+    }
+
     // Legacy localStorage keys — read once during migration, then never touched again.
     const LEGACY_STORAGE = {
         key: "TORN_V2_USER_KEY",
@@ -485,6 +502,20 @@
         state.windowSizes = dashboardState.windowSizes && typeof dashboardState.windowSizes === "object"
             ? dashboardState.windowSizes
             : {};
+
+        // First-run default for mobile/Torn PDA: start minimized and snapped to the
+        // top-right corner, rather than opening full-size over the page content.
+        // Only applies when nothing has ever been saved before (a genuine first run) —
+        // once a user has moved/resized/expanded the widget, their choice is respected
+        // on every later load regardless of device.
+        const isFirstEverRun = state.widgetPosition === null && dashboardState.isMinimized === undefined;
+        if (isFirstEverRun && isMobileEnvironment()) {
+            state.isMinimized = true;
+            // edge:"right" + y:0 pins the collapsed pill to the top-right corner —
+            // applyWidgetPosition() sets style.right="0" and style.top="0px" for this combo.
+            state.widgetPosition = { edge: "right", x: null, y: 0 };
+        }
+
         const warTargetColumns = ["player", "online", "status", "stats", "ff", "attack"];
         const savedWarTargetOrder = Array.isArray(dashboardState.warTargetColumnOrder)
             ? [...new Set(dashboardState.warTargetColumnOrder.map((key) => key === "health" ? "status" : key).filter((key) => key !== "location"))]
@@ -1110,6 +1141,11 @@
                     .then((data) => ({ data, fetchedAt: overviewRequestedAt }))
                     .catch(() => ({ data: null, fetchedAt: overviewRequestedAt })),
                 fetchJson(withKey(`${BASE_URL}user/travel`, apiKey)).catch(() => null),
+                // KNOWN TORN BUG (confirmed by Torn staff): user/icons is documented as
+                // returning the full icon report to Custom-tier keys as well as Limited/Full,
+                // but Custom keys are actually denied the full report in practice — only
+                // Limited and Full keys currently receive it. Not something we can work
+                // around client-side; flagged here so it isn't mistaken for our own bug.
                 fetchJson(withKey(`${BASE_URL}user/icons`, apiKey)).catch(() => null)
             ]);
 
@@ -1331,6 +1367,9 @@
                 fetchJson(withKey(`${BASE_URL}user/medals`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}torn/honors`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}user/honors`, apiKey)).catch(() => null),
+                // KNOWN TORN BUG (confirmed by Torn staff) — see matching note in
+                // fetchOverviewData: Custom-tier keys are documented to receive the full
+                // user/icons report but don't in practice; only Limited/Full do.
                 fetchJson(withKey(`${BASE_URL}user/icons`, apiKey)).catch(() => null)
             ]);
             const personalstatResponses = await Promise.all(
@@ -1435,7 +1474,16 @@
                 fetchJson(withKey(`${BASE_URL}faction/basic`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}faction/stats`, apiKey)).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}faction/members`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}faction/news`, apiKey)).catch(() => null),
+                // NOTE: `cat` is a REQUIRED param on faction/news (no default) — without it every
+                // request fails with error 21 "Incorrect category" at ALL key tiers, including Full.
+                // We request the 9 categories available at Minimal access (main / armoryDeposit /
+                // armoryAction / territoryWar / rankedWar / territoryGain / chain / crime / membership)
+                // and deliberately omit attack / depositFunds / giveFunds, which Torn gates to
+                // Limited+ keys — including them would break this call for anyone on a Minimal key.
+                // Torn allows up to 10 comma-separated categories per request.
+                fetchJson(withKey(`${BASE_URL}faction/news`, apiKey, {
+                    cat: "main,armoryDeposit,armoryAction,territoryWar,rankedWar,territoryGain,chain,crime,membership"
+                })).catch(() => null),
                 fetchJson(withKey(`${BASE_URL}faction/chain`, apiKey))
                     .then((data) => ({ data, fetchedAt: factionRequestedAt }))
                     .catch(() => ({ data: null, fetchedAt: factionRequestedAt })),
@@ -2593,13 +2641,82 @@
     }
 
     const WAR_TARGET_COLUMNS = {
-        player: { label: "Player", align: "left", minWidth: 88 },
-        online: { label: "Online", align: "left", minWidth: 54 },
-        status: { label: "Status", align: "left", minWidth: 96 },
-        stats: { label: "Est. Stats", align: "right", minWidth: 68 },
-        ff: { label: "FF", align: "center", minWidth: 38 },
-        attack: { label: "Attack", align: "center", minWidth: 58 }
+        player: { label: "Player", align: "left", minWidth: 88, hardFloor: 58 },
+        online: { label: "Online", align: "left", minWidth: 54, hardFloor: 40 },
+        status: { label: "Status", align: "left", minWidth: 96, hardFloor: 62 },
+        stats: { label: "Est. Stats", align: "right", minWidth: 68, hardFloor: 46 },
+        ff: { label: "FF", align: "center", minWidth: 38, hardFloor: 26 },
+        attack: { label: "Attack", align: "center", minWidth: 58, hardFloor: 34 }
     };
+
+    // Fits all visible columns inside `availableWidth` with ZERO horizontal scrolling,
+    // rather than letting the table render at its natural (often wider) width and
+    // relying on overflow-x scroll — that's what was cutting columns off on narrow
+    // mobile/PDA viewports (only Player/Online/Status fit before the cut-off point).
+    //
+    // - availableWidth null/unknown -> fall back to natural/stored widths (desktop, no
+    //   measurement yet available).
+    // - Room to spare -> use natural/stored widths and give any leftover space to the
+    //   last column so the table still fills the container edge-to-edge.
+    // - Not enough room -> shrink every column proportionally down toward its hardFloor
+    //   (never below it) until the total exactly fits availableWidth.
+    function computeResponsiveColumnWidths(columnOrder, availableWidth) {
+        const cols = columnOrder.filter((key) => WAR_TARGET_COLUMNS[key]);
+        const naturalWidths = cols.map((key) =>
+            Math.max(WAR_TARGET_COLUMNS[key].minWidth, Number(state.warTargetColumnWidths[key]) || WAR_TARGET_COLUMNS[key].minWidth)
+        );
+        const naturalTotal = naturalWidths.reduce((sum, w) => sum + w, 0);
+
+        if (!Number.isFinite(availableWidth) || availableWidth <= 0) {
+            return Object.fromEntries(cols.map((key, i) => [key, naturalWidths[i]]));
+        }
+
+        if (naturalTotal <= availableWidth) {
+            // Distribute leftover space proportionally to each column's natural width,
+            // rather than dumping it all into whichever column happens to be last —
+            // that would let e.g. a narrow "FF" or "Attack" column balloon absurdly
+            // wide on large desktop panels.
+            const leftover = availableWidth - naturalTotal;
+            if (leftover <= 0 || !cols.length) {
+                return Object.fromEntries(cols.map((key, i) => [key, naturalWidths[i]]));
+            }
+            const widths = cols.map((key, i) => naturalWidths[i] + Math.floor(leftover * (naturalWidths[i] / naturalTotal)));
+            const distributed = widths.reduce((sum, w) => sum + w, 0);
+            widths[widths.length - 1] += availableWidth - distributed; // fold rounding remainder into the last column
+            return Object.fromEntries(cols.map((key, i) => [key, widths[i]]));
+        }
+
+        const floors = cols.map((key) => Math.min(WAR_TARGET_COLUMNS[key].hardFloor ?? 24, naturalWidths[cols.indexOf(key)]));
+        const floorTotal = floors.reduce((sum, w) => sum + w, 0);
+
+        if (floorTotal >= availableWidth) {
+            // Even hard floors don't fit (extremely narrow viewport) — scale floors down
+            // proportionally as a last resort rather than forcing horizontal scroll.
+            const scale = availableWidth / floorTotal;
+            return Object.fromEntries(cols.map((key, i) => [key, Math.max(18, Math.floor(floors[i] * scale))]));
+        }
+
+        const shrinkable = naturalTotal - floorTotal;
+        const extraToRemove = naturalTotal - availableWidth;
+        const shrinkRatio = extraToRemove / shrinkable;
+        return Object.fromEntries(cols.map((key, i) => {
+            const reducible = naturalWidths[i] - floors[i];
+            const width = Math.round(naturalWidths[i] - reducible * shrinkRatio);
+            return [key, Math.max(floors[i], width)];
+        }));
+    }
+
+    // Estimates the usable pixel width for the war-target table (widget width, minus
+    // widget-body padding and the table-wrap border) so columns can be sized to fit
+    // before the table is even in the DOM (colgroup widths are computed at render time).
+    function getWarTargetTableAvailableWidth() {
+        if (!state.dashboard) return null;
+        const widgetPadding = 20; // #widget-main-body has 10px padding on each side
+        const wrapBorder = 2;     // .ntc-war-target-table-wrap has a 1px border on each side
+        const width = state.dashboard.clientWidth - widgetPadding - wrapBorder;
+        return Number.isFinite(width) && width > 0 ? width : null;
+    }
+
 
     function renderWarTargetSortHeader(key) {
         const column = WAR_TARGET_COLUMNS[key];
@@ -2647,6 +2764,7 @@
         const refreshed = data?.liveFetchedAt ? new Date(data.liveFetchedAt).toLocaleTimeString() : "Not loaded";
         const notices = [data?.error, data?.statsError ? `FFScouter: ${data.statsError}` : "", data?.liveError ? `Live profile batches unavailable; using faction roster status. ${data.liveError}` : ""].filter(Boolean);
         const columnOrder = state.warTargetColumnOrder.filter((key) => WAR_TARGET_COLUMNS[key]);
+        const responsiveColumnWidths = computeResponsiveColumnWidths(columnOrder, getWarTargetTableAvailableWidth());
         const activeSort = WAR_TARGET_COLUMNS[state.warTargetSort?.key] || WAR_TARGET_COLUMNS.status;
         const sortDirection = state.warTargetSort?.direction === "desc" ? "Descending" : "Ascending";
         const filterGroups = [
@@ -2707,9 +2825,9 @@
                     <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;">${buildStatCard("Online / Idle", onlineCount, "Live Torn status", "#7fe18d")}${buildStatCard("Healthy", okayCount, "Status: Okay", "#5ba7f7")}</div>
                     ${notices.map((notice) => `<div style="color:#e0a25e;font-size:10px;line-height:1.4;">⚠ ${escapeHtml(notice)}</div>`).join("")}
                 </div>
-                <div class="ntc-war-target-table-wrap" style="width:100%;min-width:0;min-height:160px;flex:1 1 auto;border:1px solid #343a43;border-radius:8px;overflow:auto;background:rgba(15,15,15,.78);">
-                    <table class="ntc-war-target-table" style="width:max-content;min-width:100%;max-width:none;border-collapse:collapse;font-size:10px;table-layout:fixed;">
-                        <colgroup>${columnOrder.map((key) => `<col data-war-column="${key}" style="width:${Math.max(WAR_TARGET_COLUMNS[key].minWidth, Number(state.warTargetColumnWidths[key]) || WAR_TARGET_COLUMNS[key].minWidth)}px;">`).join("")}</colgroup>
+                <div class="ntc-war-target-table-wrap" style="width:100%;min-width:0;min-height:160px;flex:1 1 auto;border:1px solid #343a43;border-radius:8px;overflow-y:auto;overflow-x:hidden;background:rgba(15,15,15,.78);">
+                    <table class="ntc-war-target-table" style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:10px;">
+                        <colgroup>${columnOrder.map((key) => `<col data-war-column="${key}" style="width:${responsiveColumnWidths[key]}px;">`).join("")}</colgroup>
                         <thead style="position:sticky;top:0;z-index:2;background:#252b33;color:#dce2e9;text-align:left;"><tr>${columnOrder.map(renderWarTargetSortHeader).join("")}</tr></thead>
                         <tbody>${rows || `<tr><td colspan="${columnOrder.length}" style="padding:18px;text-align:center;color:#8f99a5;">${escapeHtml(data?.error || (allTargets.length ? "No targets match the current view filters." : "No targets loaded yet."))}</td></tr>`}</tbody>
                     </table>
@@ -4518,6 +4636,9 @@
             const position = { edge: getNearestWidgetEdge(rect), x: rect.left, y: rect.top };
             setStoredPosition(position);
             applyWidgetPosition(position);
+            // Re-render so width-dependent layouts (e.g. the FFScouter war-target table's
+            // responsive column widths) recalculate against the widget's new size.
+            renderTabContent();
         });
 
         let viewportResizeSaveTimer = null;
@@ -4533,6 +4654,10 @@
                 storeCurrentWidgetSize(rect.width, rect.height);
                 const edge = getWidgetEdge();
                 setStoredPosition({ edge, x: rect.left, y: rect.top });
+                // Same reasoning as the corner-resize handler above — window resizes
+                // (browser resize, mobile orientation change) also change how much
+                // room width-dependent layouts have.
+                renderTabContent();
             }, 150);
         });
 

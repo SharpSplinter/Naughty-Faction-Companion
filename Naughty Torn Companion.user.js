@@ -51,6 +51,20 @@
         return IS_TORN_PDA || (IS_TOUCH_DEVICE && isMobileViewport());
     }
 
+    // Logged on every boot — useful for confirming which environment was detected
+    // when live-testing inside Torn PDA or a mobile browser.
+    // Check the browser/userscript console (or Torn PDA's in-app log) for this line.
+    const _envDebug = () => debugLog("[NTC] Environment detection", {
+        IS_TORN_PDA,
+        IS_TOUCH_DEVICE,
+        viewportWidth: window.innerWidth,
+        isMobileViewport: isMobileViewport(),
+        isMobileEnvironment: isMobileEnvironment(),
+        userAgent: navigator.userAgent
+    });
+    // debugLog is defined further down the script — defer so it's available at call time.
+    setTimeout(_envDebug, 0);
+
     // Legacy localStorage keys — read once during migration, then never touched again.
     const LEGACY_STORAGE = {
         key: "TORN_V2_USER_KEY",

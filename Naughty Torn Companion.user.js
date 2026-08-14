@@ -4491,9 +4491,8 @@
                     max-width: 100% !important;
                 }
                 #torn-v2-inventory-wrapper #torn-companion-content .ntc-war-target-table {
-                    width: max-content !important;
-                    min-width: 100% !important;
-                    max-width: none !important;
+                    width: 100% !important;
+                    table-layout: fixed !important;
                 }
                 #torn-v2-inventory-wrapper #torn-companion-content .ntc-attack-button {
                     min-width: max-content !important;

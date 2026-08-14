@@ -4293,7 +4293,7 @@
             dragHandle.style.height = "36px";
             dragHandle.style.justifyContent = "center";
             dragHandle.style.cursor = "move";
-            title.textContent = "NTC";
+            title.textContent = `NTC v${SCRIPT_VERSION}`;
             title.style.fontSize = "11px";
             title.style.letterSpacing = "0.06em";
             toggleBtn.style.display = "none";
@@ -4310,7 +4310,7 @@
             dragHandle.style.padding = "8px 10px";
             dragHandle.style.height = "auto";
             dragHandle.style.justifyContent = "space-between";
-            title.textContent = "🧭 Naughty Torn Companion";
+            title.textContent = `🧭 Naughty Torn Companion v${SCRIPT_VERSION}`;
             title.style.fontSize = "12px";
             title.style.letterSpacing = "normal";
             toggleBtn.style.display = "block";
@@ -4538,7 +4538,7 @@
                 }
             </style>
             <div id="widget-drag-handle" style="background-color: #2c2c2c; padding: 8px 10px; display: flex; justify-content: space-between; align-items: center; cursor: move; border-bottom: 1px solid #444; user-select: none;">
-                <span id="widget-title" style="color: #fff; font-size: 12px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">🧭 Naughty Torn Companion <span style="color:#8fa6c9;font-weight:400;font-size:10px;">v${SCRIPT_VERSION}</span></span>
+                <span id="widget-title" style="color: #fff; font-size: 12px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">🧭 Naughty Torn Companion v${SCRIPT_VERSION}</span>
                 <button id="widget-toggle-view-btn" type="button" title="Minimize Naughty Torn Companion" aria-label="Minimize Naughty Torn Companion" style="width: 32px; height: 28px; flex: 0 0 32px; display: grid; place-items: center; background-color: #444; color: #fff; border: 1px solid #666; padding: 0; border-radius: 5px; cursor: pointer; font-size: 18px; font-weight: 700; line-height: 1;">−</button>
             </div>
 

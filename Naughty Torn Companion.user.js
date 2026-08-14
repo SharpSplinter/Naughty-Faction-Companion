@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.22.7
+// @version      5.22.8
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -17,6 +17,11 @@
 
 (function() {
     'use strict';
+
+    // Kept in sync with the @version header above on every bump — displayed in the
+    // widget title bar so a screenshot alone can confirm which build is actually
+    // running on a device, without relying on console access.
+    const SCRIPT_VERSION = "5.22.7";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const TORN_V1_BASE_URL = "https://api.torn.com/";
@@ -4533,7 +4538,7 @@
                 }
             </style>
             <div id="widget-drag-handle" style="background-color: #2c2c2c; padding: 8px 10px; display: flex; justify-content: space-between; align-items: center; cursor: move; border-bottom: 1px solid #444; user-select: none;">
-                <span id="widget-title" style="color: #fff; font-size: 12px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">🧭 Naughty Torn Companion</span>
+                <span id="widget-title" style="color: #fff; font-size: 12px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">🧭 Naughty Torn Companion <span style="color:#8fa6c9;font-weight:400;font-size:10px;">v${SCRIPT_VERSION}</span></span>
                 <button id="widget-toggle-view-btn" type="button" title="Minimize Naughty Torn Companion" aria-label="Minimize Naughty Torn Companion" style="width: 32px; height: 28px; flex: 0 0 32px; display: grid; place-items: center; background-color: #444; color: #fff; border: 1px solid #666; padding: 0; border-radius: 5px; cursor: pointer; font-size: 18px; font-weight: 700; line-height: 1;">−</button>
             </div>
 

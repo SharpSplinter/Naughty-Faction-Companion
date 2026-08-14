@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.22.6
+// @version      5.22.7
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -2724,12 +2724,23 @@
     // widget-body padding and the table-wrap border) so columns can be sized to fit
     // before the table is even in the DOM (colgroup widths are computed at render time).
     function getWarTargetTableAvailableWidth() {
-        if (!state.dashboard) return null;
         const widgetPadding = 20; // #widget-main-body has 10px padding on each side
         const wrapBorder = 2;     // .ntc-war-target-table-wrap has a 1px border on each side
-        const width = state.dashboard.clientWidth - widgetPadding - wrapBorder;
+        // state.dashboard is only assigned AFTER the widget element is appended to the page
+        // (see initializeDOMDashboard). But if FFScouter is the tab restored from a previous
+        // session, THIS function can run while the dashboard's very first innerHTML is still
+        // being built — before state.dashboard exists. In that case state.dashboard.clientWidth
+        // was silently returning null, which made computeResponsiveColumnWidths() fall back to
+        // full natural column widths (~514px) instead of fitting the container — and since the
+        // wrap div uses overflow-x:hidden (not the old scrollable overflow:auto), the overflow
+        // columns (FF, Attack) were clipped invisibly rather than reachable via scroll.
+        // Fix: fall back to getCurrentWidgetSize(), which reads the same stored/default width
+        // the widget is about to actually open at — entirely from state, no DOM needed.
+        const rawWidth = state.dashboard ? state.dashboard.clientWidth : getCurrentWidgetSize().width;
+        const width = rawWidth - widgetPadding - wrapBorder;
         return Number.isFinite(width) && width > 0 ? width : null;
     }
+
 
 
     function renderWarTargetSortHeader(key) {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.22.8
+// @version      5.22.13
 // @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "5.22.8";
+    const SCRIPT_VERSION = "5.22.13";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const TORN_V1_BASE_URL = "https://api.torn.com/";
@@ -55,6 +55,12 @@
     function isMobileEnvironment() {
         return IS_TORN_PDA || (IS_TOUCH_DEVICE && isMobileViewport());
     }
+    // Estimated height of Torn's own top icon row (search/scouter/clock/messages/avatar)
+    // plus any browser chrome above it, so the widget doesn't open overlapping it. This is
+    // an estimate, not a measurement — Torn's page doesn't have a script-accessible stable
+    // selector we can measure reliably, so if it doesn't clear the icon row cleanly on a
+    // given device/zoom level, adjust this constant.
+    const MOBILE_TOP_OFFSET_PX = 60;
 
     // Logged on every boot — useful for confirming which environment was detected
     // when live-testing inside Torn PDA or a mobile browser.
@@ -105,14 +111,15 @@
     // Staleness thresholds checked ONLY when restoring a section's cache at dashboard
     // init (i.e. "is this cached data too old to show without refreshing first?").
     // This is separate from the ongoing periodic auto-refresh cadence above.
-    // "company" is intentionally absent — its staleness uses day-boundary logic via
-    // isCompanyUpdateDue() instead of a rolling duration.
+    // Only overview/personal/faction auto-refresh at all now. "company" is
+    // intentionally absent (manual-only, see isSectionStale). "inventory" and
+    // "activity" are also intentionally absent — both are manual-refresh-only tabs
+    // now; a player knows when their own inventory/activity log changes, so neither
+    // needs a background/staleness-triggered fetch.
     const SECTION_STALENESS_MS = {
         overview: QUICK_REFRESH_MS,   // 5 min
         personal: QUICK_REFRESH_MS,   // 5 min
-        faction: QUICK_REFRESH_MS,    // 5 min
-        inventory: QUICK_REFRESH_MS,  // 5 min
-        activity: 30 * 1000           // 30 sec
+        faction: QUICK_REFRESH_MS     // 5 min
     };
 
     const WAR_TARGET_FILTER_DEFAULTS = {
@@ -451,10 +458,11 @@
     const setStoredInventory = (payload) => setSectionCache("inventory", payload);
 
     // Is this section's restored cache too old to trust without a background refresh?
-    // "company" uses day-boundary logic (isCompanyUpdateDue, defined later in this
-    // file — safe to call here due to function-declaration hoisting).
+    // "company" is manual-only now (was day-boundary logic via isCompanyUpdateDue,
+    // kept defined below for reference but no longer wired to any auto-trigger).
+    // "inventory" and "activity" are also manual-only — see SECTION_STALENESS_MS.
     function isSectionStale(name, now = Date.now()) {
-        if (name === "company") return isCompanyUpdateDue(now);
+        if (name === "company") return false;
         const threshold = SECTION_STALENESS_MS[name];
         if (!threshold) return false;
         const last = state.lastRefreshBySection[name] || 0;
@@ -530,9 +538,13 @@
         const isFirstEverRun = state.widgetPosition === null && dashboardState.isMinimized === undefined;
         if (isFirstEverRun && isMobileEnvironment()) {
             state.isMinimized = true;
-            // edge:"right" + y:0 pins the collapsed pill to the top-right corner —
-            // applyWidgetPosition() sets style.right="0" and style.top="0px" for this combo.
-            state.widgetPosition = { edge: "right", x: null, y: 0 };
+            // edge:"right" + y:MOBILE_TOP_OFFSET_PX pins the widget to the top-right,
+            // just below Torn's own top icon row — applyWidgetPosition() sets
+            // style.right="0" and style.top=`${MOBILE_TOP_OFFSET_PX}px` for this combo.
+            // Combined with normalizeWidgetSize()'s mobile-default full width, this also
+            // makes the widget span (near) edge-to-edge once expanded, not just the
+            // collapsed pill.
+            state.widgetPosition = { edge: "right", x: null, y: MOBILE_TOP_OFFSET_PX };
         }
 
         const warTargetColumns = ["player", "online", "status", "stats", "ff", "attack"];
@@ -1568,13 +1580,22 @@
                     attacks.forEach((atk) => {
                         const started = Number(atk.started || atk.timestamp_started || 0);
                         const respectGain = Number(atk.respect_gain || 0);
+                        // Only count SUCCESSFUL "Attacked" results — Torn's own war/chain
+                        // report breaks Attacks out separately from Mugged, Hospitalized,
+                        // Assist, Lost, Escape, Stalemate, etc. (result enum values). We were
+                        // previously counting every log entry in the time window regardless
+                        // of result, which inflated both hit counts and respect totals by
+                        // including mugs, hospitalizations, assists, retaliations, losses,
+                        // and other non-"Attacked" outcomes that Torn doesn't count toward
+                        // this figure.
+                        const isSuccessfulAttack = atk.result === "Attacked";
 
-                        if (atk.is_ranked_war && warStart && started >= warStart) {
+                        if (isSuccessfulAttack && atk.is_ranked_war && warStart && started >= warStart) {
                             personalContribution.warHits += 1;
                             personalContribution.warRespect += respectGain;
                         }
 
-                        if (chainStart && started >= chainStart && started <= chainEnd) {
+                        if (isSuccessfulAttack && chainStart && started >= chainStart && started <= chainEnd) {
                             personalContribution.chainHits += 1;
                             personalContribution.chainRespect += respectGain;
                             personalContribution.bonusScore += getChainBonusRespect(atk);
@@ -2664,8 +2685,13 @@
         online: { label: "Online", align: "left", minWidth: 54, hardFloor: 40 },
         status: { label: "Status", align: "left", minWidth: 96, hardFloor: 62 },
         stats: { label: "Est. Stats", align: "right", minWidth: 68, hardFloor: 46 },
-        ff: { label: "FF", align: "center", minWidth: 38, hardFloor: 26 },
-        attack: { label: "Attack", align: "center", minWidth: 58, hardFloor: 34 }
+        // ff/attack floors raised to match real content minimums (a "1.5x"-style badge and
+        // an "Attack" button both need real room — the earlier 26/34 floors were tighter
+        // than the content itself, which combined with .ntc-attack-button's
+        // min-width:max-content !important could still overflow even once the column-fit
+        // math was correct.
+        ff: { label: "FF", align: "center", minWidth: 38, hardFloor: 32 },
+        attack: { label: "Attack", align: "center", minWidth: 58, hardFloor: 52 }
     };
 
     // Fits all visible columns inside `availableWidth` with ZERO horizontal scrolling,
@@ -2769,9 +2795,9 @@
             case "stats":
                 return `<td style="padding:8px 7px;text-align:right;color:#c9a0ff;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(display.estimate)}<div style="color:#7f8996;font-size:9px;font-weight:500;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(target.estimateSource || "")} ${escapeHtml(display.estimateAge)}</div></td>`;
             case "ff":
-                return `<td style="padding:8px 7px;text-align:center;color:#7fe18d;font-size:13px;font-weight:900;white-space:nowrap;">${display.ff}</td>`;
+                return `<td style="padding:8px 7px;text-align:center;color:#7fe18d;font-size:13px;font-weight:900;white-space:nowrap;overflow:hidden;">${display.ff}</td>`;
             case "attack":
-                return `<td style="padding:8px 7px;text-align:center;white-space:nowrap;"><a class="ntc-attack-button" href="https://www.torn.com/page.php?sid=attack&user2ID=${target.id}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#8f3434;color:#fff;border-radius:5px;padding:5px 8px;font-size:10px;font-weight:800;text-decoration:none;white-space:nowrap;overflow-wrap:normal;word-break:keep-all;">Attack</a></td>`;
+                return `<td style="padding:8px 7px;text-align:center;white-space:nowrap;overflow:hidden;"><a class="ntc-attack-button" href="https://www.torn.com/page.php?sid=attack&user2ID=${target.id}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#8f3434;color:#fff;border-radius:5px;padding:5px 8px;font-size:10px;font-weight:800;text-decoration:none;white-space:nowrap;overflow-wrap:normal;word-break:keep-all;">Attack</a></td>`;
             default:
                 return "";
         }
@@ -3331,6 +3357,11 @@
                         <div style="color: #aaa; font-size: 11px;">Current mode: ${state.theme === "light" ? "Light" : "Dark"}</div>
                         <button id="theme-toggle-btn" style="background: #3b5998; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Switch to ${state.theme === "light" ? "Dark" : "Light"} Mode</button>
                     </div>
+                    <div style="border: 1px solid #3d3d3d; border-radius: 6px; padding: 10px; display: grid; gap: 7px;">
+                        <div style="color: #fff; font-weight: 700; font-size: 12px;">Window</div>
+                        <div style="color: #aaa; font-size: 11px; line-height: 1.4;">Clears every saved size and position for every tab, and re-applies the default layout for this device (full-width below the icon row on mobile/PDA, a floating panel on desktop).</div>
+                        <button id="reset-window-size-btn" style="background: #a13b3b; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Reset Window Size &amp; Position</button>
+                    </div>
                     <div style="color: #fff; font-weight: 700; font-size: 12px;">Naughty Torn Companion · Torn API Key</div>
                     <div style="display: flex; gap: 8px;">
                         <input type="password" id="torn-api-key-input" value="${escapeHtml(getStoredKey())}" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 1; font-size: 11px;" placeholder="Enter Torn API key" />
@@ -3589,7 +3620,11 @@
             fullRefreshButton.onclick = async () => {
                 debugLog("Full section refresh button clicked");
                 if (status) status.innerText = "Refreshing all sections...";
-                await refreshAllSections();
+                // Explicit manual "refresh everything" action — unlike automatic/periodic
+                // refresh (which only ever touches overview/personal/faction), this button
+                // deliberately opts into company/inventory/activity too since the user
+                // asked for genuinely everything.
+                await refreshAllSections({ includeCompany: true, includeInventory: true, includeActivity: true });
             };
         }
 
@@ -3599,6 +3634,27 @@
                 const theme = state.theme === "dark" ? "light" : "dark";
                 setStoredDashboardState({ theme });
                 applyDashboardTheme();
+                renderTabContent();
+            };
+        }
+
+        const resetWindowButton = document.getElementById("reset-window-size-btn");
+        if (resetWindowButton && !resetWindowButton.dataset.bound) {
+            resetWindowButton.dataset.bound = "true";
+            resetWindowButton.onclick = () => {
+                // Clears every saved per-tab size, so normalizeWidgetSize() falls back to
+                // its defaults again (mobile: full width + height below the icon row;
+                // desktop: the standard ~480px floating panel) — same mechanism as a
+                // genuine first run, just re-triggerable on demand instead of only once.
+                state.windowSizes = {};
+                setStoredDashboardState({ windowSizes: state.windowSizes });
+                const defaultPosition = isMobileEnvironment()
+                    ? { edge: "right", x: null, y: MOBILE_TOP_OFFSET_PX }
+                    : { edge: "right", x: null, y: 20 };
+                setStoredPosition(defaultPosition);
+                applyCurrentWidgetSize();
+                applyWidgetPosition();
+                debugLog("Window size & position reset to defaults", { isMobileEnvironment: isMobileEnvironment(), defaultPosition });
                 renderTabContent();
             };
         }
@@ -3886,6 +3942,52 @@
         });
     }
 
+    // Only overview/personal/faction/company/inventory/activity get this bar
+    // (settings has its own dedicated "Refresh all sections" control already).
+    // Auto-refreshable tabs (overview/personal/faction) get a subtler note since
+    // they update themselves; the manual-only ones (company/inventory/activity)
+    // get a slightly more prominent call to action since the button is their only
+    // path to fresh data.
+    const AUTO_REFRESH_TAB_SECTIONS = new Set(["overview", "personal", "faction"]);
+    function renderSectionRefreshHeader(sectionKey, label) {
+        const lastRefreshMs = state.lastRefreshBySection[sectionKey] || 0;
+        const updatedText = lastRefreshMs ? formatRelativeTime(Math.floor(lastRefreshMs / 1000)) : "never";
+        const isAuto = AUTO_REFRESH_TAB_SECTIONS.has(sectionKey);
+        const noteText = isAuto ? "auto-refreshes" : "manual refresh only";
+        return `
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 10px;background:rgba(255,255,255,0.03);border-bottom:1px solid #333;font-size:10px;color:#999;flex-shrink:0;">
+                <span>UPDATED: <span data-section-updated="${sectionKey}" style="color:#ccc;">${escapeHtml(updatedText)}</span> <span style="color:#666;">(${label} ${noteText})</span></span>
+                <button data-section-refresh="${sectionKey}" style="background:${isAuto ? "#2f5b8a" : "#8f5a1f"};color:#fff;border:none;border-radius:4px;padding:4px 10px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;">🔄 Refresh</button>
+            </div>
+        `;
+    }
+
+    function bindSectionRefreshButtons() {
+        const dashboard = state.dashboard;
+        if (!dashboard) return;
+        dashboard.querySelectorAll("[data-section-refresh]").forEach((button) => {
+            if (button.dataset.bound === "true") return;
+            button.dataset.bound = "true";
+            button.onclick = async () => {
+                const sectionKey = button.getAttribute("data-section-refresh");
+                debugLog("Per-tab refresh button clicked", { sectionKey });
+                button.disabled = true;
+                button.textContent = "Refreshing...";
+                await refreshSectionByKey(sectionKey, null);
+                renderTabContent();
+            };
+        });
+    }
+
+    const SECTION_TAB_LABELS = {
+        overview: "Overview",
+        personal: "Personal",
+        faction: "Faction",
+        company: "Company",
+        inventory: "Inventory",
+        activity: "Activity"
+    };
+
     function renderTabContent() {
         const contentEl = document.getElementById("torn-companion-content");
         if (!contentEl) return;
@@ -3917,6 +4019,11 @@
                 break;
         }
 
+        const refreshHeaderLabel = SECTION_TAB_LABELS[state.currentTab];
+        if (refreshHeaderLabel) {
+            innerHtml = renderSectionRefreshHeader(state.currentTab, refreshHeaderLabel) + innerHtml;
+        }
+
         debugLog("Tab render", { previousTab, activeTab: state.currentTab, sectionStatus: state.sectionStatus });
         contentEl.classList.toggle("ntc-ffscouter-active", state.currentTab === "faction" && state.factionSubTab === "ffscouter");
         contentEl.classList.toggle("ntc-inventory-active", state.currentTab === "inventory");
@@ -3926,6 +4033,7 @@
         bindPersonalControls();
         bindFactionControls();
         bindOverviewControls();
+        bindSectionRefreshButtons();
 
         if (state.currentTab === "faction") {
             startChainCountdownTimer();
@@ -4022,9 +4130,15 @@
     }
 
     async function refreshAllSections(options = {}) {
-        const { includeCompany = true, silent = false } = options;
+        // Auto-refreshable core is ONLY overview/personal/faction now — company,
+        // inventory, and activity are all manual-refresh-only tabs and default to
+        // false here. The two callers that want a genuinely complete refresh (the
+        // "Refresh all sections" button and the one-time fresh-install bootstrap)
+        // explicitly pass all three flags true; every automatic/periodic caller uses
+        // the defaults and only ever touches the core three.
+        const { includeCompany = false, includeInventory = false, includeActivity = false, silent = false } = options;
         const apiKey = getStoredKey();
-        debugLog("Full refresh initiated", { includeCompany, silent, apiKeyPresent: !!apiKey });
+        debugLog("Full refresh initiated", { includeCompany, includeInventory, includeActivity, silent, apiKeyPresent: !!apiKey });
         if (!apiKey) {
             const status = document.getElementById("fetch-status-bar");
             if (status && !silent) status.innerText = "⚠️ Enter a Torn API key before refreshing.";
@@ -4034,25 +4148,35 @@
         const status = document.getElementById("fetch-status-bar");
         try {
             state.lastRefresh = Date.now();
-            const [overview, personal, faction, activity] = await Promise.all([
+            const [overview, personal, faction] = await Promise.all([
                 fetchOverviewData(apiKey),
                 fetchPersonalData(apiKey),
-                fetchFactionData(apiKey),
-                fetchActivityData(apiKey)
+                fetchFactionData(apiKey)
             ]);
 
             setSectionCache("overview", overview || state.caches.overview);
             setSectionCache("personal", personal || state.caches.personal);
             setSectionCache("faction", faction || state.caches.faction);
-            setSectionCache("activity", activity || state.caches.activity);
 
             if (includeCompany) {
                 const company = await fetchCompanyData(apiKey);
                 setSectionCache("company", company || state.caches.company);
             }
 
-            const inventoryData = await fetchInventoryData(apiKey, status);
-            setSectionCache("inventory", inventoryData || state.caches.inventory);
+            // Inventory and Activity are intentionally excluded from every
+            // automatic/bulk refresh path (periodic auto-refresh, startup staleness
+            // check, and this "refresh all" action by default) unless explicitly
+            // opted into. Both are manual-refresh-only tabs — see their dedicated
+            // "Refresh" buttons (refreshSectionByKey(...)), which are unaffected by
+            // this and always work on demand.
+            if (includeInventory) {
+                const inventoryData = await fetchInventoryData(apiKey, status);
+                setSectionCache("inventory", inventoryData || state.caches.inventory);
+            }
+            if (includeActivity) {
+                const activity = await fetchActivityData(apiKey);
+                setSectionCache("activity", activity || state.caches.activity);
+            }
             state.lastRefreshBySection.all = Date.now();
             renderTabContent();
 
@@ -4070,6 +4194,9 @@
         }
     }
 
+    // Kept for reference / potential future use, but no longer wired to any
+    // auto-trigger — company is manual-refresh-only now (see performAutoRefreshCycle
+    // and isSectionStale, both of which no longer call this).
     function isCompanyUpdateDue(now = Date.now()) {
         const date = new Date(now);
         const isTargetTime = date.getUTCHours() === 18 && date.getUTCMinutes() === 8;
@@ -4080,6 +4207,9 @@
         return !(lastUpdate && lastDate.getUTCFullYear() === date.getUTCFullYear() && lastDate.getUTCMonth() === date.getUTCMonth() && lastDate.getUTCDate() === date.getUTCDate());
     }
 
+    // Only Overview, Personal, and Faction auto-refresh. Company, Inventory, and
+    // Activity are all manual-refresh-only tabs (each has its own "Refresh" button —
+    // see refreshSectionByKey) and are never touched by this periodic cycle.
     function performAutoRefreshCycle() {
         const apiKey = getStoredKey();
         if (!apiKey) {
@@ -4089,52 +4219,22 @@
         }
 
         const now = Date.now();
-        const quickRefreshDue = ["overview", "personal", "faction", "inventory"].some((section) => {
+        const quickRefreshDue = ["overview", "personal", "faction"].some((section) => {
             const last = state.lastRefreshBySection[section] || 0;
             return now - last >= QUICK_REFRESH_MS;
         });
-        const logRefreshDue = isLogRefreshDue(now);
         const fullRefreshDue = now - (state.lastRefreshBySection.all || 0) >= AUTO_REFRESH_MS;
-        const companyRefreshDue = isCompanyUpdateDue(now);
 
         debugLog("Auto refresh cycle", {
             quickRefreshDue,
-            logRefreshDue,
             fullRefreshDue,
-            companyRefreshDue,
             lastRefreshBySection: state.lastRefreshBySection
         });
 
         const tasks = [];
 
-        if (companyRefreshDue) {
-            tasks.push(
-                fetchCompanyData(apiKey)
-                    .then((company) => {
-                        setSectionCache("company", company || state.caches.company);
-                        renderTabContent();
-                    })
-                    .catch((error) => {
-                        console.warn("Daily company refresh failed:", error);
-                    })
-            );
-        }
-
-        if (logRefreshDue) {
-            tasks.push(
-                fetchActivityData(apiKey)
-                    .then((activity) => {
-                        setSectionCache("activity", activity || state.caches.activity);
-                        renderTabContent();
-                    })
-                    .catch((error) => {
-                        console.warn("Log refresh failed:", error);
-                    })
-            );
-        }
-
         if (fullRefreshDue || quickRefreshDue) {
-            tasks.push(refreshAllSections({ includeCompany: false, silent: true }));
+            tasks.push(refreshAllSections({ silent: true }));
         }
 
         Promise.allSettled(tasks).finally(() => {
@@ -4173,12 +4273,25 @@
 
     function normalizeWidgetSize(size = {}) {
         const limits = getWidgetSizeLimits();
-        const defaultHeight = Math.min(720, Math.round(window.innerHeight * 0.8));
         const width = Number(size.width);
         const height = Number(size.height);
+        const hasStoredWidth = Number.isFinite(width);
+        const hasStoredHeight = Number.isFinite(height);
+        // Desktop default: a modest 480px-ish floating panel, ~80% of viewport height.
+        // Mobile/PDA default (only when nothing has been saved yet for this tab — a real
+        // stored size, including one the user manually shrank, is always respected):
+        // fill the available width and the height remaining below Torn's own top icon
+        // row, since a small floating panel doesn't leave room for tables like the
+        // FFScouter war-target list to show all their columns.
+        let defaultWidth = 480;
+        let defaultHeight = Math.min(720, Math.round(window.innerHeight * 0.8));
+        if (isMobileEnvironment() && (!hasStoredWidth || !hasStoredHeight)) {
+            defaultWidth = limits.maxWidth;
+            defaultHeight = Math.max(limits.minHeight, window.innerHeight - MOBILE_TOP_OFFSET_PX - 12);
+        }
         return {
-            width: Math.min(limits.maxWidth, Math.max(limits.minWidth, Number.isFinite(width) ? width : 480)),
-            height: Math.min(limits.maxHeight, Math.max(limits.minHeight, Number.isFinite(height) ? height : defaultHeight))
+            width: Math.min(limits.maxWidth, Math.max(limits.minWidth, hasStoredWidth ? width : defaultWidth)),
+            height: Math.min(limits.maxHeight, Math.max(limits.minHeight, hasStoredHeight ? height : defaultHeight))
         };
     }
 
@@ -4705,14 +4818,18 @@
             });
         });
 
-        state.sectionStatus.settings = "Auto refresh: 5 min quick / 15 min full";
+        state.sectionStatus.settings = "Auto refresh (Overview/Personal/Faction only): 5 min quick / 15 min full. Company/Inventory/Activity are manual-only.";
         renderTabContent();
 
         if (state.apiKey) {
             const hasAnyCache = Object.values(state.caches).some((cache) => cache !== null);
             if (!hasAnyCache) {
-                // Fresh install / nothing restored from storage — do a full refresh.
-                void refreshAllSections({ includeCompany: true, silent: true });
+                // Fresh install / nothing restored from storage. Only fetches the
+                // auto-refreshable core (overview/personal/faction) — company,
+                // inventory, and activity are manual-refresh-only tabs and stay empty
+                // until the user visits/refreshes them, even on a brand new install,
+                // for consistency with "never auto-fetched" being a strict rule.
+                void refreshAllSections({ silent: true });
             } else {
                 // Returning session — restored data is already showing; only refresh
                 // whichever sections are actually stale per their own threshold.

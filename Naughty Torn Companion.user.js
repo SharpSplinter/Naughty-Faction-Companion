@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.22.13
-// @description  One-stop Torn dashboard for personal, faction, company, inventory, and activity tracking.
+// @version      5.22.14
+// @description  One-stop Torn dashboard for personal, faction, company, and inventory tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
 // @source       https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.user.js
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "5.22.13";
+    const SCRIPT_VERSION = "5.22.14";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const TORN_V1_BASE_URL = "https://api.torn.com/";
@@ -99,23 +99,22 @@
             personal: "TORN_V2_CACHE_PERSONAL",
             faction: "TORN_V2_CACHE_FACTION",
             company: "TORN_V2_CACHE_COMPANY",
-            inventory: "TORN_V2_CACHE_INVENTORY",
-            activity: "TORN_V2_CACHE_ACTIVITY"
+            inventory: "TORN_V2_CACHE_INVENTORY"
         }
     };
 
     const AUTO_REFRESH_MS = 15 * 60 * 1000;
     const QUICK_REFRESH_MS = 5 * 60 * 1000;
-    const LOG_REFRESH_MS = 2 * 60 * 1000;
 
     // Staleness thresholds checked ONLY when restoring a section's cache at dashboard
     // init (i.e. "is this cached data too old to show without refreshing first?").
     // This is separate from the ongoing periodic auto-refresh cadence above.
-    // Only overview/personal/faction auto-refresh at all now. "company" is
-    // intentionally absent (manual-only, see isSectionStale). "inventory" and
-    // "activity" are also intentionally absent — both are manual-refresh-only tabs
-    // now; a player knows when their own inventory/activity log changes, so neither
-    // needs a background/staleness-triggered fetch.
+    // Auto-refreshable tabs are Overview, Personal (Info sub-tab only), and Faction.
+    // "company" is intentionally absent — it updates once daily at a fixed UTC time
+    // instead (see isCompanyUpdateDue), not a rolling staleness duration. "inventory"
+    // is manual-refresh-only; a player knows when their own inventory changes, so it
+    // never needs a background/staleness-triggered fetch. The Activity tab has been
+    // removed entirely (redundant with Torn's own built-in notifications).
     const SECTION_STALENESS_MS = {
         overview: QUICK_REFRESH_MS,   // 5 min
         personal: QUICK_REFRESH_MS,   // 5 min
@@ -159,6 +158,7 @@
         autoRefreshTimer: null,
         chainCountdownTimer: null,
         cooldownCountdownTimer: null,
+        factionLiveRefreshTimer: null,
         warTargetsRefreshTimer: null,
         warTargetsRefreshInFlight: false,
         lastRefreshBySection: {
@@ -167,8 +167,6 @@
             faction: 0,
             company: 0,
             inventory: 0,
-            activity: 0,
-            logs: 0,
             all: 0
         },
         sectionStatus: {
@@ -177,7 +175,6 @@
             faction: "Not loaded",
             company: "Not loaded",
             inventory: "Not loaded",
-            activity: "Not loaded",
             settings: "Ready"
         },
         caches: {
@@ -185,8 +182,7 @@
             personal: null,
             faction: null,
             company: null,
-            inventory: null,
-            activity: null
+            inventory: null
         }
     };
 
@@ -458,9 +454,10 @@
     const setStoredInventory = (payload) => setSectionCache("inventory", payload);
 
     // Is this section's restored cache too old to trust without a background refresh?
-    // "company" is manual-only now (was day-boundary logic via isCompanyUpdateDue,
-    // kept defined below for reference but no longer wired to any auto-trigger).
-    // "inventory" and "activity" are also manual-only — see SECTION_STALENESS_MS.
+    // "company" uses its own day-boundary logic (isCompanyUpdateDue, fires once daily
+    // at 18:10 UTC via the periodic auto-refresh cycle) rather than a rolling
+    // staleness duration, so it's excluded here to avoid double-triggering.
+    // "inventory" is manual-only — see SECTION_STALENESS_MS.
     function isSectionStale(name, now = Date.now()) {
         if (name === "company") return false;
         const threshold = SECTION_STALENESS_MS[name];
@@ -1153,11 +1150,6 @@
         state.lastRefreshBySection[section] = Date.now();
     }
 
-    function isLogRefreshDue(now = Date.now()) {
-        const last = state.lastRefreshBySection.logs || 0;
-        return now - last >= LOG_REFRESH_MS;
-    }
-
     async function fetchOverviewData(apiKey) {
         setSectionStatus("overview", "Refreshing...");
         debugLog("Fetching overview data");
@@ -1676,52 +1668,6 @@
         } catch (error) {
             setSectionStatus("company", `Failed: ${error.message}`);
             debugLog("Company data refresh failed", { error: error.message });
-            return null;
-        }
-    }
-
-    async function fetchActivityData(apiKey) {
-        setSectionStatus("activity", "Refreshing...");
-        debugLog("Fetching activity data");
-        try {
-            const [notificationsResponse, userLogResponse, eventsResponse, tradesResponse, racingCarsResponse, racingTracksResponse, propertiesResponse] = await Promise.all([
-                fetchJson(withKey(`${BASE_URL}user/notifications`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}user/log`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}user/events`, apiKey, { striptags: false })).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}user/trades`, apiKey, { cat: "ongoing" })).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}racing/cars`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}racing/tracks`, apiKey)).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}torn/properties`, apiKey)).catch(() => null)
-            ]);
-            const userLog = userLogResponse?.log || userLogResponse || {};
-            const logEntries = Array.isArray(userLog) ? userLog : (Array.isArray(userLog.log) ? userLog.log : []);
-            const userIds = [...new Set(logEntries.slice(0, 4)
-                .flatMap((entry) => [entry?.data?.user, entry?.params?.user])
-                .map(Number)
-                .filter((id) => Number.isInteger(id) && id > 0))];
-            const userProfiles = await Promise.all(userIds.map(async (id) => {
-                const response = await fetchJson(withKey(`${BASE_URL}user/${id}/profile`, apiKey)).catch(() => null);
-                const profile = response?.profile || response;
-                return [String(id), profile?.name || ""];
-            }));
-            const result = {
-                notifications: notificationsResponse?.notifications || notificationsResponse || {},
-                userLog,
-                events: eventsResponse?.events || eventsResponse || {},
-                trades: tradesResponse?.trades || tradesResponse || [],
-                carNames: buildRacingNameMap(racingCarsResponse, "cars", ["name", "title"]),
-                trackNames: buildRacingNameMap(racingTracksResponse, "tracks", ["title", "name"]),
-                propertyNames: buildRacingNameMap(propertiesResponse, "properties", ["name", "title"]),
-                userNames: Object.fromEntries(userProfiles.filter(([, name]) => name))
-            };
-            setSectionStatus("activity", "Updated");
-            markSectionRefreshed("activity");
-            markSectionRefreshed("logs");
-            debugLog("Activity data refreshed", { keys: Object.keys(result) });
-            return result;
-        } catch (error) {
-            setSectionStatus("activity", `Failed: ${error.message}`);
-            debugLog("Activity data refresh failed", { error: error.message });
             return null;
         }
     }
@@ -3019,194 +2965,6 @@
         `;
     }
 
-    function humanizeActivityKey(key) {
-        return String(key || "")
-            .replace(/([a-z])([A-Z])/g, "$1 $2")
-            .replace(/[_-]+/g, " ")
-            .replace(/\b\w/g, (letter) => letter.toUpperCase());
-    }
-
-    function safeApiEntryUrl(value) {
-        if (!value) return "";
-        try {
-            const url = new URL(String(value), "https://www.torn.com/");
-            return ["http:", "https:"].includes(url.protocol) ? url.href : "";
-        } catch (_) {
-            return "";
-        }
-    }
-
-    function apiEntryPlainText(value) {
-        if (!value) return "";
-        const template = document.createElement("template");
-        template.innerHTML = String(value);
-        return template.content.textContent || "";
-    }
-
-    function renderApiEntryHtml(value) {
-        if (!value) return "";
-        const template = document.createElement("template");
-        template.innerHTML = String(value);
-        const renderNode = (node) => {
-            if (node.nodeType === 3) return escapeHtml(node.textContent || "");
-            if (node.nodeType !== 1) return "";
-            const content = [...node.childNodes].map(renderNode).join("");
-            const tag = node.tagName.toLowerCase();
-            if (tag === "a") {
-                const href = safeApiEntryUrl(node.getAttribute("href"));
-                return href
-                    ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" style="color:#70b7ff;text-decoration:underline;font-weight:700;">${content}</a>`
-                    : content;
-            }
-            if (["b", "strong"].includes(tag)) return `<strong>${content}</strong>`;
-            if (tag === "br") return "<br>";
-            return content;
-        };
-        return [...template.content.childNodes].map(renderNode).join("");
-    }
-
-    function isCurrencyLogField(key, context = {}) {
-        const normalizedKey = String(key || "").toLowerCase().replace(/[^a-z]/g, "");
-        const contextText = [
-            context?.details?.category,
-            context?.details?.title,
-            context?.event,
-            context?.data?.text
-        ].join(" ").toLowerCase();
-        const directCurrencyFields = new Set([
-            "amount", "balance", "deposited", "withdrawn", "deposit", "withdrawal",
-            "money", "cash", "wallet", "vault", "bank", "price", "profit", "fee",
-            "payment", "refund", "winnings", "salary", "income", "interest",
-            "upkeeppaid", "upkeepdue", "outcome"
-        ]);
-        return directCurrencyFields.has(normalizedKey)
-            || /(vault|bank|money|cash|casino|lottery|bazaar|market|stock|property)/.test(contextText)
-                && /(amount|balance|cost|price|value|profit|fee|payment|reward|income|wage|salary)/.test(normalizedKey);
-    }
-
-    function summarizeLogPayload(payload, context, carNames = {}, trackNames = {}, propertyNames = {}, userNames = {}) {
-        if (!payload || typeof payload !== "object") return "";
-        const values = Object.entries(payload)
-            .filter(([, value]) => value !== null && value !== undefined && value !== "" && typeof value !== "object")
-            .slice(0, 3)
-            .map(([key, value]) => {
-                const number = Number(value);
-                const isRacing = /racing/.test(`${context?.details?.category || ""} ${context?.details?.title || ""}`.toLowerCase());
-                const normalizedKey = String(key).toLowerCase();
-                const propertyName = normalizedKey === "property" ? propertyNames[String(value)] : "";
-                const userName = normalizedKey === "user" ? userNames[String(value)] : "";
-                const racingName = isRacing && normalizedKey === "car"
-                    ? carNames[String(value)]
-                    : isRacing && normalizedKey === "track"
-                        ? trackNames[String(value)]
-                        : "";
-                const formattedValue = propertyName
-                    ? propertyName
-                    : userName
-                    ? userName
-                    : racingName
-                    ? racingName
-                    : Number.isFinite(number)
-                    ? (isCurrencyLogField(key, context) ? formatMoney(number) : formatInteger(number))
-                    : value;
-                return `${humanizeActivityKey(key)}: ${formattedValue}`;
-            });
-        return values.join(" · ");
-    }
-
-    function renderActivityPanel() {
-        const activity = state.caches.activity || {};
-        const notifications = activity.notifications || {};
-        const log = activity.userLog || {};
-        const events = activity.events || {};
-        const trades = Array.isArray(activity.trades) ? activity.trades : [];
-        const carNames = activity.carNames || {};
-        const trackNames = activity.trackNames || {};
-        const propertyNames = activity.propertyNames || {};
-        const userNames = activity.userNames || {};
-
-        const notificationLabels = {
-            messages: { icon: "✉", label: "Messages", detail: "Unread messages waiting for you" },
-            events: { icon: "⚡", label: "Events", detail: "New events in your activity feed" },
-            awards: { icon: "★", label: "Awards", detail: "New medals or honors earned" }
-        };
-        const notificationList = Object.entries(notificationLabels)
-            .map(([key, config]) => {
-                const count = Number(notifications[key] || 0);
-                return {
-                    text: `${config.icon} ${formatInteger(count)} ${config.label}${count === 1 ? "" : ""}`,
-                    detail: config.detail
-                };
-            })
-            .filter((item) => !item.text.includes(" 0 "));
-
-        const logList = Array.isArray(log) ? log.slice(0, 4).map((item) => ({
-            text: `${humanizeActivityKey(item?.details?.category || "Activity")} · ${item?.details?.title || item?.data?.text || item?.event || "Log update"}`,
-            url: item?.url || item?.link || item?.href || "",
-            timestamp: item?.timestamp,
-            detail: summarizeLogPayload(item?.data, item, carNames, trackNames, propertyNames, userNames) || summarizeLogPayload(item?.params, item, carNames, trackNames, propertyNames, userNames) || "Recorded in your personal activity log"
-        })) : (Array.isArray(log.log) ? log.log.slice(0, 4).map((item) => ({
-            text: `${humanizeActivityKey(item?.details?.category || "Activity")} · ${item?.details?.title || item?.data?.text || item?.event || "Log update"}`,
-            url: item?.url || item?.link || item?.href || "",
-            timestamp: item?.timestamp,
-            detail: summarizeLogPayload(item?.data, item, carNames, trackNames, propertyNames, userNames) || summarizeLogPayload(item?.params, item, carNames, trackNames, propertyNames, userNames) || "Recorded in your personal activity log"
-        })) : []);
-
-        const eventList = Array.isArray(events) ? events.slice(0, 4).map((item) => ({
-            text: apiEntryPlainText(item?.event || item?.text || item?.title) || "Event update",
-            html: item?.event || item?.text || "",
-            url: item?.url || item?.link || item?.href || "",
-            timestamp: item?.timestamp
-        })) : (Array.isArray(events.events) ? events.events.slice(0, 4).map((item) => ({
-            text: apiEntryPlainText(item?.event || item?.text || item?.title) || "Event update",
-            html: item?.event || item?.text || "",
-            url: item?.url || item?.link || item?.href || "",
-            timestamp: item?.timestamp
-        })) : []);
-        const tradeList = trades.slice(0, 4).map((trade) => ({
-            text: `Trade #${trade.id || "—"} with ${trade.trader?.name || trade.user?.name || "Unknown player"}`,
-            url: trade?.url || trade?.link || trade?.href || "",
-            timestamp: trade.modified_at || trade.expires_at,
-            detail: trade.expires_at ? "" : "Ongoing",
-            expiresAt: Number(trade.expires_at || 0)
-        }));
-
-        const lists = [
-            renderStreamList("Notifications", notificationList),
-            renderStreamList("Recent Log", logList),
-            renderStreamList("Events", eventList),
-            renderStreamList("Ongoing Trades", tradeList)
-        ].join("");
-
-        return `${renderSectionMeta("activity", "Activity")}<div style="display: grid; gap: 8px;">${lists}</div>`;
-    }
-
-    function renderStreamList(title, items) {
-        const safeItems = Array.isArray(items) ? items : [];
-        const rows = safeItems.length ? safeItems.map((item) => {
-            const text = item?.text || item?.message || item?.event || item?.title || item?.details?.title || "Unknown update";
-            const timestamp = formatRelativeTime(item?.timestamp);
-            const expiresAt = Number(item?.expiresAt || 0);
-            const detail = expiresAt
-                ? `<div style="color: #888; font-size: 10px; margin-top: 3px;"><span data-countdown-type="trade" data-until-ms="${expiresAt * 1000}">${escapeHtml(formatTimeUntil(expiresAt))}</span></div>`
-                : (item?.detail ? `<div style="color: #888; font-size: 10px; margin-top: 3px;">${escapeHtml(item.detail)}</div>` : "");
-            const explicitUrl = safeApiEntryUrl(item?.url || item?.link || item?.href);
-            const renderedText = item?.html
-                ? renderApiEntryHtml(item.html)
-                : explicitUrl
-                    ? `<a href="${escapeHtml(explicitUrl)}" target="_blank" rel="noopener noreferrer" style="color:#70b7ff;text-decoration:underline;font-weight:700;">${escapeHtml(text)}</a>`
-                    : escapeHtml(text);
-            return `<div style="padding: 8px 10px; border: 1px solid #2d2d2d; border-radius: 6px; background: rgba(255,255,255,0.02); color: #ddd; font-size: 11px;"><div style="display: flex; justify-content: space-between; gap: 8px;"><span>${renderedText}</span>${timestamp ? `<span style="color: #888; font-size: 10px; white-space: nowrap;">${timestamp}</span>` : ""}</div>${detail}</div>`;
-        }).join("") : `<div style="padding: 8px 10px; border: 1px solid #2d2d2d; border-radius: 6px; background: rgba(255,255,255,0.02); color: #888; font-size: 11px;">No ${title.toLowerCase()} available.</div>`;
-
-        return `
-            <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 8px; background: rgba(20,20,20,0.7);">
-                <div style="color: #fff; font-size: 12px; margin-bottom: 6px; font-weight: 700;">${escapeHtml(title)}</div>
-                <div style="display: grid; gap: 6px;">${rows}</div>
-            </div>
-        `;
-    }
-
     function toCsvString(data) {
         const rows = [];
 
@@ -3302,9 +3060,6 @@
                 case "inventory":
                     setSectionCache("inventory", (await fetchInventoryData(apiKey, statusEl)) || state.caches.inventory);
                     break;
-                case "activity":
-                    setSectionCache("activity", (await fetchActivityData(apiKey)) || state.caches.activity);
-                    break;
                 default:
                     return false;
             }
@@ -3326,8 +3081,7 @@
             { key: "personal", label: "Personal" },
             { key: "faction", label: "Faction" },
             { key: "company", label: "Company" },
-            { key: "inventory", label: "Inventory" },
-            { key: "activity", label: "Activity" }
+            { key: "inventory", label: "Inventory" }
         ];
 
         const currentSubTab = state.settingsSubTab || "controls";
@@ -3622,9 +3376,9 @@
                 if (status) status.innerText = "Refreshing all sections...";
                 // Explicit manual "refresh everything" action — unlike automatic/periodic
                 // refresh (which only ever touches overview/personal/faction), this button
-                // deliberately opts into company/inventory/activity too since the user
-                // asked for genuinely everything.
-                await refreshAllSections({ includeCompany: true, includeInventory: true, includeActivity: true });
+                // deliberately opts into company/inventory too since the user asked for
+                // genuinely everything. Activity tab has been removed entirely.
+                await refreshAllSections({ includeCompany: true, includeInventory: true });
             };
         }
 
@@ -3942,18 +3696,27 @@
         });
     }
 
-    // Only overview/personal/faction/company/inventory/activity get this bar
-    // (settings has its own dedicated "Refresh all sections" control already).
-    // Auto-refreshable tabs (overview/personal/faction) get a subtler note since
-    // they update themselves; the manual-only ones (company/inventory/activity)
-    // get a slightly more prominent call to action since the button is their only
-    // path to fresh data.
+    // Only overview/personal/faction/company/inventory get this bar (settings has
+    // its own dedicated "Refresh all sections" control already). Auto-refreshable
+    // tabs (overview/personal-on-Info/faction) get a subtler note since they update
+    // themselves; the manual-only ones (company/inventory) get a slightly more
+    // prominent call to action since the button is their only path to fresh data.
+    // Activity tab has been removed entirely (redundant with Torn's own built-in
+    // notifications).
     const AUTO_REFRESH_TAB_SECTIONS = new Set(["overview", "personal", "faction"]);
     function renderSectionRefreshHeader(sectionKey, label) {
         const lastRefreshMs = state.lastRefreshBySection[sectionKey] || 0;
         const updatedText = lastRefreshMs ? formatRelativeTime(Math.floor(lastRefreshMs / 1000)) : "never";
-        const isAuto = AUTO_REFRESH_TAB_SECTIONS.has(sectionKey);
-        const noteText = isAuto ? "auto-refreshes" : "manual refresh only";
+        // Personal only actually auto-refreshes while the Info sub-tab is active —
+        // Skills/Education, Perks, and Awards don't trigger the periodic cycle, so
+        // the note needs to reflect that instead of always claiming "auto-refreshes".
+        const isPersonalOnInfo = sectionKey === "personal" && state.personalSubTab === "info";
+        const isAuto = sectionKey === "personal" ? isPersonalOnInfo : AUTO_REFRESH_TAB_SECTIONS.has(sectionKey);
+        const noteText = sectionKey === "personal"
+            ? (isPersonalOnInfo ? "auto-refreshes on Info" : "auto-refreshes only on Info sub-tab")
+            : sectionKey === "faction"
+                ? "live-updates (15s) while viewing"
+                : (isAuto ? "auto-refreshes" : "manual refresh only");
         return `
             <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 10px;background:rgba(255,255,255,0.03);border-bottom:1px solid #333;font-size:10px;color:#999;flex-shrink:0;">
                 <span>UPDATED: <span data-section-updated="${sectionKey}" style="color:#ccc;">${escapeHtml(updatedText)}</span> <span style="color:#666;">(${label} ${noteText})</span></span>
@@ -3984,8 +3747,7 @@
         personal: "Personal",
         faction: "Faction",
         company: "Company",
-        inventory: "Inventory",
-        activity: "Activity"
+        inventory: "Inventory"
     };
 
     function renderTabContent() {
@@ -4006,9 +3768,6 @@
                 break;
             case "inventory":
                 innerHtml = renderInventorySection();
-                break;
-            case "activity":
-                innerHtml = renderActivityPanel();
                 break;
             case "settings":
                 innerHtml = renderSettingsPanel();
@@ -4037,8 +3796,10 @@
 
         if (state.currentTab === "faction") {
             startChainCountdownTimer();
+            startFactionLiveRefreshTimer();
         } else {
             stopChainCountdownTimer();
+            stopFactionLiveRefreshTimer();
         }
         if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") startWarTargetsRefreshTimer();
         else stopWarTargetsRefreshTimer();
@@ -4130,15 +3891,15 @@
     }
 
     async function refreshAllSections(options = {}) {
-        // Auto-refreshable core is ONLY overview/personal/faction now — company,
-        // inventory, and activity are all manual-refresh-only tabs and default to
-        // false here. The two callers that want a genuinely complete refresh (the
-        // "Refresh all sections" button and the one-time fresh-install bootstrap)
-        // explicitly pass all three flags true; every automatic/periodic caller uses
-        // the defaults and only ever touches the core three.
-        const { includeCompany = false, includeInventory = false, includeActivity = false, silent = false } = options;
+        // Auto-refreshable core is ONLY overview/personal/faction now — company and
+        // inventory are manual-refresh-only tabs and default to false here. The two
+        // callers that want a genuinely complete refresh (the "Refresh all sections"
+        // button and the one-time fresh-install bootstrap) explicitly pass both
+        // flags true; every automatic/periodic caller uses the defaults and only
+        // ever touches the core three. Activity tab has been removed entirely.
+        const { includeCompany = false, includeInventory = false, silent = false } = options;
         const apiKey = getStoredKey();
-        debugLog("Full refresh initiated", { includeCompany, includeInventory, includeActivity, silent, apiKeyPresent: !!apiKey });
+        debugLog("Full refresh initiated", { includeCompany, includeInventory, silent, apiKeyPresent: !!apiKey });
         if (!apiKey) {
             const status = document.getElementById("fetch-status-bar");
             if (status && !silent) status.innerText = "⚠️ Enter a Torn API key before refreshing.";
@@ -4163,19 +3924,15 @@
                 setSectionCache("company", company || state.caches.company);
             }
 
-            // Inventory and Activity are intentionally excluded from every
-            // automatic/bulk refresh path (periodic auto-refresh, startup staleness
-            // check, and this "refresh all" action by default) unless explicitly
-            // opted into. Both are manual-refresh-only tabs — see their dedicated
-            // "Refresh" buttons (refreshSectionByKey(...)), which are unaffected by
-            // this and always work on demand.
+            // Inventory is intentionally excluded from every automatic/bulk refresh
+            // path (periodic auto-refresh, startup staleness check, and this
+            // "refresh all" action by default) unless explicitly opted into. It's a
+            // manual-refresh-only tab — see its dedicated "Refresh" button
+            // (refreshSectionByKey(...)), which is unaffected by this and always
+            // works on demand.
             if (includeInventory) {
                 const inventoryData = await fetchInventoryData(apiKey, status);
                 setSectionCache("inventory", inventoryData || state.caches.inventory);
-            }
-            if (includeActivity) {
-                const activity = await fetchActivityData(apiKey);
-                setSectionCache("activity", activity || state.caches.activity);
             }
             state.lastRefreshBySection.all = Date.now();
             renderTabContent();
@@ -4194,12 +3951,12 @@
         }
     }
 
-    // Kept for reference / potential future use, but no longer wired to any
-    // auto-trigger — company is manual-refresh-only now (see performAutoRefreshCycle
-    // and isSectionStale, both of which no longer call this).
+    // Company updates automatically exactly once per day, at 18:10 UTC — checked by
+    // performAutoRefreshCycle's 60-second tick. Manual refresh (the per-tab button,
+    // or Settings > Controls) always works too regardless of this daily trigger.
     function isCompanyUpdateDue(now = Date.now()) {
         const date = new Date(now);
-        const isTargetTime = date.getUTCHours() === 18 && date.getUTCMinutes() === 8;
+        const isTargetTime = date.getUTCHours() === 18 && date.getUTCMinutes() === 10;
         if (!isTargetTime) return false;
 
         const lastUpdate = state.lastRefreshBySection.company || 0;
@@ -4207,9 +3964,13 @@
         return !(lastUpdate && lastDate.getUTCFullYear() === date.getUTCFullYear() && lastDate.getUTCMonth() === date.getUTCMonth() && lastDate.getUTCDate() === date.getUTCDate());
     }
 
-    // Only Overview, Personal, and Faction auto-refresh. Company, Inventory, and
-    // Activity are all manual-refresh-only tabs (each has its own "Refresh" button —
-    // see refreshSectionByKey) and are never touched by this periodic cycle.
+    // Auto-refreshable tabs: Overview, Personal (only while the Info sub-tab is
+    // active — Skills/Education, Perks, and Awards don't force a refresh cycle),
+    // and Faction (which also gets its own much faster dedicated timer — see
+    // startFactionLiveRefreshTimer — while actively being viewed, since Chain/War
+    // progress needs to feel closer to real-time than the general 5-min cadence).
+    // Company updates once daily at a fixed UTC time (see isCompanyUpdateDue).
+    // Inventory is fully manual-only. Activity has been removed entirely.
     function performAutoRefreshCycle() {
         const apiKey = getStoredKey();
         if (!apiKey) {
@@ -4219,19 +3980,40 @@
         }
 
         const now = Date.now();
-        const quickRefreshDue = ["overview", "personal", "faction"].some((section) => {
+        const sectionsToCheck = ["overview", "faction"];
+        if (state.currentTab === "personal" && state.personalSubTab === "info") {
+            sectionsToCheck.push("personal");
+        }
+        const quickRefreshDue = sectionsToCheck.some((section) => {
             const last = state.lastRefreshBySection[section] || 0;
             return now - last >= QUICK_REFRESH_MS;
         });
         const fullRefreshDue = now - (state.lastRefreshBySection.all || 0) >= AUTO_REFRESH_MS;
+        const companyRefreshDue = isCompanyUpdateDue(now);
 
         debugLog("Auto refresh cycle", {
             quickRefreshDue,
             fullRefreshDue,
+            companyRefreshDue,
+            currentTab: state.currentTab,
+            personalSubTab: state.personalSubTab,
             lastRefreshBySection: state.lastRefreshBySection
         });
 
         const tasks = [];
+
+        if (companyRefreshDue) {
+            tasks.push(
+                fetchCompanyData(apiKey)
+                    .then((company) => {
+                        setSectionCache("company", company || state.caches.company);
+                        renderTabContent();
+                    })
+                    .catch((error) => {
+                        console.warn("Daily company refresh failed:", error);
+                    })
+            );
+        }
 
         if (fullRefreshDue || quickRefreshDue) {
             tasks.push(refreshAllSections({ silent: true }));
@@ -4248,6 +4030,33 @@
         }
 
         state.autoRefreshTimer = setTimeout(performAutoRefreshCycle, 60 * 1000);
+    }
+
+    // Near-real-time Faction data refresh while the Faction tab is actually being
+    // viewed — separate from and much faster than the general auto-refresh cadence
+    // above, so Chain/War progress bars stay close to as fresh as the client-side
+    // countdown timers (startChainCountdownTimer) that tick every 250ms. 15s is a
+    // deliberate balance: fast enough to feel live, but not so fast it risks Torn's
+    // rate limits given everything else the widget may also be fetching.
+    const FACTION_LIVE_REFRESH_MS = 15 * 1000;
+
+    function stopFactionLiveRefreshTimer() {
+        if (state.factionLiveRefreshTimer) {
+            clearInterval(state.factionLiveRefreshTimer);
+            state.factionLiveRefreshTimer = null;
+        }
+    }
+
+    function startFactionLiveRefreshTimer() {
+        stopFactionLiveRefreshTimer();
+        state.factionLiveRefreshTimer = setInterval(() => {
+            if (state.currentTab !== "faction") {
+                stopFactionLiveRefreshTimer();
+                return;
+            }
+            if (!getStoredKey()) return;
+            void refreshSectionByKey("faction", null);
+        }, FACTION_LIVE_REFRESH_MS);
     }
 
     function applyDashboardTheme() {
@@ -4463,7 +4272,6 @@
             { id: "faction", label: "Faction" },
             { id: "company", label: "Company" },
             { id: "inventory", label: "Inventory" },
-            { id: "activity", label: "Activity" },
             { id: "settings", label: "Settings" }
         ];
 
@@ -4818,17 +4626,20 @@
             });
         });
 
-        state.sectionStatus.settings = "Auto refresh (Overview/Personal/Faction only): 5 min quick / 15 min full. Company/Inventory/Activity are manual-only.";
+        state.sectionStatus.settings = "Auto refresh: Overview (5 min), Personal-Info (5 min), Faction (live, 15s while viewing). Company updates once daily at 18:10 UTC. Inventory is manual-only. Activity tab removed.";
         renderTabContent();
 
         if (state.apiKey) {
             const hasAnyCache = Object.values(state.caches).some((cache) => cache !== null);
             if (!hasAnyCache) {
                 // Fresh install / nothing restored from storage. Only fetches the
-                // auto-refreshable core (overview/personal/faction) — company,
-                // inventory, and activity are manual-refresh-only tabs and stay empty
-                // until the user visits/refreshes them, even on a brand new install,
-                // for consistency with "never auto-fetched" being a strict rule.
+                // auto-refreshable core (overview/personal/faction) — company and
+                // inventory are manual-refresh-only tabs (company also gets its own
+                // once-daily 18:10 UTC auto-update, unrelated to this bootstrap call)
+                // and stay empty until the user visits/refreshes them, even on a
+                // brand new install, for consistency with "never auto-fetched" being
+                // a strict rule for those two. Activity tab has been removed
+                // entirely.
                 void refreshAllSections({ silent: true });
             } else {
                 // Returning session — restored data is already showing; only refresh

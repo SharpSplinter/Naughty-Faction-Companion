@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.22.17
+// @version      5.22.18
 // @description  One-stop Torn dashboard for personal, faction, company, and inventory tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "5.22.17";
+    const SCRIPT_VERSION = "5.22.18";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const TORN_V1_BASE_URL = "https://api.torn.com/";
@@ -1586,7 +1586,13 @@
             try {
                 if (ownFactionId) {
                     const basicResponse = await fetchJson(withKey(`${BASE_URL}user/basic`, apiKey)).catch(() => null);
-                    const ownPlayerId = Number(basicResponse?.basic?.player_id || basicResponse?.player_id || 0);
+                    // user/basic v2 actually returns {"profile":{"id":...}}, NOT
+                    // {"basic":{"player_id":...}} — confirmed via live API response.
+                    // The old (wrong) field path always resolved to 0, which silently
+                    // failed the ownPlayerId truthy check below and skipped the whole
+                    // War Hits/Respect block entirely — the actual root cause of War
+                    // Hits/Respect showing 0 despite everything else being correct.
+                    const ownPlayerId = Number(basicResponse?.profile?.id || 0);
 
                     // --- Chain Hits / Chain Respect: only while a chain is active ---
                     if (chain.id > 0 && chain.start) {

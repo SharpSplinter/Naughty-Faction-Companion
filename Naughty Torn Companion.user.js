@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.22.16
+// @version      5.22.17
 // @description  One-stop Torn dashboard for personal, faction, company, and inventory tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "5.22.16";
+    const SCRIPT_VERSION = "5.22.17";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const TORN_V1_BASE_URL = "https://api.torn.com/";
@@ -161,6 +161,11 @@
         factionLiveRefreshTimer: null,
         warTargetsRefreshTimer: null,
         warTargetsRefreshInFlight: false,
+        // Caches completed faction/{id}/chainreport lookups for the current war
+        // (keyed by chain id) so repeated Faction refreshes don't refetch a
+        // finished chain's report over and over — see fetchFactionData's
+        // personalContribution block. In-memory only, rebuilt each session.
+        chainReportCache: {},
         lastRefreshBySection: {
             overview: 0,
             personal: 0,
@@ -1519,6 +1524,7 @@
 
             const chainRaw = factionChainResponse?.data?.chain || factionChainResponse?.data || {};
             const chain = {
+                id: Number(chainRaw.id || 0),
                 current: Number(chainRaw.current || 0),
                 max: Number(chainRaw.max || 0),
                 timeout: Number(chainRaw.timeout || 0),
@@ -1553,63 +1559,103 @@
                 };
             }
 
-            // Personal chain/war contribution — sourced from Torn's own
-            // faction/chains + faction/{id}/chainreport endpoints, which give an
-            // authoritative per-member breakdown. This replaces an earlier
-            // client-side approximation built from filtering user/attacks log
-            // entries, which could drift from Torn's own totals (confirmed
-            // mismatched: was showing War Hits=51/Respect=731 vs the real
-            // chainreport figures of War Hits=18/Respect=227.92 for the same
-            // window).
-            //
-            // LIMITATION: chainreport only exists for a chain that has ALREADY
-            // ENDED (broken, completed, or timed out) — Torn does not expose a
-            // live per-member breakdown for a chain still actively in progress.
-            // So these numbers reflect the most recently COMPLETED chain that
-            // started during the current war, not necessarily the literal current
-            // second if a new chain is actively running right now. The dedicated
-            // Faction live-refresh timer (see startFactionLiveRefreshTimer) polls
-            // this on a fast interval specifically so a just-completed chain's
-            // fresh report shows up as quickly as possible once Torn generates it.
-            const personalContribution = { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0, bonusHits: 0, reportId: 0 };
+            // Personal chain/war contribution:
+            // - "Chain Hits"/"Chain Respect" reflect ONLY the CURRENTLY ACTIVE chain
+            //   (chain.id > 0). Torn's chainreport endpoint only exists for chains
+            //   that have already ended — there's no authoritative per-member API
+            //   for one still in progress — so this is approximated live from
+            //   user/attacks (successful "Attacked" results only) within the active
+            //   chain's start window. Once no chain is active, both are 0.
+            // - "War Hits"/"War Respect" are the SUM across every chain (it's
+            //   normal for a war to have several chains, on-and-off, over its
+            //   duration) that occurred within the ranked war's timeframe, but ONLY
+            //   while the war is still active (war.end is falsy/0 — see how `war`
+            //   is built above, Torn returns no end value for an ongoing war).
+            //   Each completed chain's report is fetched once and cached in
+            //   state.chainReportCache (keyed by chain id, in-memory only) since a
+            //   finished chain's report never changes — later refreshes only need
+            //   to check for any NEW chain that's appeared since.
+            // - "Bonus Hits" is the total RESPECT specifically from chain-bonus
+            //   milestone hits (10th, 25th, 50th... hit in a chain) accrued across
+            //   the whole war, NOT a count. chainreport only exposes a per-member
+            //   bonus-hit COUNT, not the respect value of those specific hits, so
+            //   this is computed from user/attacks + the CHAIN_BONUS_RESPECT
+            //   lookup table (matching each hit's chain position), same source the
+            //   original pre-chainreport implementation used for this figure.
+            const personalContribution = { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0, bonusRespect: 0 };
             try {
-                if (war && war.start && ownFactionId) {
+                if (ownFactionId) {
                     const basicResponse = await fetchJson(withKey(`${BASE_URL}user/basic`, apiKey)).catch(() => null);
                     const ownPlayerId = Number(basicResponse?.basic?.player_id || basicResponse?.player_id || 0);
 
-                    const chainsResponse = await fetchJson(withKey(`${BASE_URL}faction/${ownFactionId}/chains`, apiKey)).catch(() => null);
-                    const chainsList = Array.isArray(chainsResponse?.chains) ? chainsResponse.chains : [];
-                    // Chains are returned most-recent-first by default — the first one
-                    // that started at/after the war began is the war's chain report.
-                    const warChainSummary = chainsList.find((c) => Number(c.start || 0) >= war.start) || null;
+                    // --- Chain Hits / Chain Respect: only while a chain is active ---
+                    if (chain.id > 0 && chain.start) {
+                        const liveAttacksResponse = await fetchJson(withKey(`${BASE_URL}user/attacks`, apiKey, { from: chain.start, sort: "ASC" })).catch(() => null);
+                        const liveAttacks = Array.isArray(liveAttacksResponse?.attacks) ? liveAttacksResponse.attacks
+                            : (Array.isArray(liveAttacksResponse) ? liveAttacksResponse : []);
+                        liveAttacks.forEach((atk) => {
+                            if (atk.result !== "Attacked") return;
+                            const started = Number(atk.started || atk.timestamp_started || 0);
+                            if (started < chain.start) return;
+                            personalContribution.chainHits += 1;
+                            personalContribution.chainRespect += Number(atk.respect_gain || 0);
+                        });
+                    }
 
-                    if (warChainSummary && ownPlayerId) {
-                        const reportResponse = await fetchJson(withKey(`${BASE_URL}faction/${warChainSummary.id}/chainreport`, apiKey)).catch(() => null);
-                        const attackers = reportResponse?.chainreport?.attackers || [];
-                        const mine = attackers.find((a) => Number(a.id) === ownPlayerId) || null;
-                        if (mine) {
-                            const atk = mine.attacks || {};
-                            const rsp = mine.respect || {};
-                            const totalAttacks = Number(atk.total || 0);
-                            const warAttacks = Number(atk.war || 0);
-                            const totalRespect = Number(rsp.total || 0);
-                            personalContribution.chainHits = totalAttacks;
-                            personalContribution.chainRespect = totalRespect;
-                            personalContribution.warHits = warAttacks;
-                            personalContribution.bonusHits = Number(atk.bonuses || 0);
-                            // chainreport gives per-type ATTACK COUNTS but not a
-                            // per-type RESPECT breakdown. Since we specifically chose
-                            // the chain that started during the war, totalRespect IS
-                            // already the war-period respect whenever every attack in
-                            // it was war-flagged (warAttacks === totalAttacks — the
-                            // common case). If some attacks predate the war within the
-                            // same report, fall back to a proportional estimate since
-                            // an exact war-only figure isn't exposed by this endpoint.
-                            personalContribution.warRespect = totalAttacks > 0
-                                ? (warAttacks === totalAttacks ? totalRespect : totalRespect * (warAttacks / totalAttacks))
-                                : 0;
-                            personalContribution.reportId = Number(warChainSummary.id || 0);
+                    // --- War Hits / War Respect / Bonus Hits: summed across every
+                    // chain within the war window, only while the war is active ---
+                    if (war && war.start && !war.end && ownPlayerId) {
+                        if (!state.chainReportCache) state.chainReportCache = {};
+                        const warWindowEnd = Math.floor(Date.now() / 1000);
+
+                        const chainsResponse = await fetchJson(withKey(`${BASE_URL}faction/${ownFactionId}/chains`, apiKey)).catch(() => null);
+                        const chainsList = Array.isArray(chainsResponse?.chains) ? chainsResponse.chains : [];
+                        const warChains = chainsList.filter((c) => Number(c.start || 0) >= war.start);
+
+                        for (const chainSummary of warChains) {
+                            const chainId = Number(chainSummary.id || 0);
+                            if (!chainId) continue;
+                            let mine = state.chainReportCache[chainId];
+                            if (mine === undefined) {
+                                const reportResponse = await fetchJson(withKey(`${BASE_URL}faction/${chainId}/chainreport`, apiKey)).catch(() => null);
+                                const attackers = reportResponse?.chainreport?.attackers || [];
+                                mine = attackers.find((a) => Number(a.id) === ownPlayerId) || null;
+                                // Only cache a completed report — a chain still in
+                                // progress won't have one yet (empty attackers list),
+                                // so leave it uncached to retry on the next tick.
+                                if (attackers.length) state.chainReportCache[chainId] = mine;
+                            }
+                            if (mine) {
+                                const atk = mine.attacks || {};
+                                const rsp = mine.respect || {};
+                                const totalAttacks = Number(atk.total || 0);
+                                const warAttacks = Number(atk.war || 0);
+                                const totalRespect = Number(rsp.total || 0);
+                                personalContribution.warHits += warAttacks;
+                                // chainreport gives per-type ATTACK COUNTS but not a
+                                // per-type RESPECT breakdown. totalRespect IS already
+                                // the war-period respect for this chain whenever every
+                                // attack in it was war-flagged (the common case).
+                                personalContribution.warRespect += totalAttacks > 0
+                                    ? (warAttacks === totalAttacks ? totalRespect : totalRespect * (warAttacks / totalAttacks))
+                                    : 0;
+                            }
                         }
+
+                        // Bonus-hit respect: not available from chainreport, so pulled
+                        // from user/attacks directly + the milestone lookup table.
+                        // Known limitation: a single call with no explicit pagination —
+                        // for a very long-running war with a huge attack volume this
+                        // may not capture the entire window if Torn caps page size.
+                        const warAttacksResponse = await fetchJson(withKey(`${BASE_URL}user/attacks`, apiKey, { from: war.start, to: warWindowEnd, sort: "ASC" })).catch(() => null);
+                        const warAttacksLog = Array.isArray(warAttacksResponse?.attacks) ? warAttacksResponse.attacks
+                            : (Array.isArray(warAttacksResponse) ? warAttacksResponse : []);
+                        warAttacksLog.forEach((atk) => {
+                            if (atk.result !== "Attacked") return;
+                            const started = Number(atk.started || atk.timestamp_started || 0);
+                            if (started < war.start || started > warWindowEnd) return;
+                            personalContribution.bonusRespect += getChainBonusRespect(atk);
+                        });
                     }
                 }
             } catch (contributionError) {
@@ -2877,13 +2923,13 @@
 
         const chain = faction.chain || {};
         const war = faction.war || null;
-        const contribution = faction.personalContribution || { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0, bonusHits: 0 };
+        const contribution = faction.personalContribution || { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0, bonusRespect: 0 };
         const contributionCards = [
-            buildStatCard("Chain Hits", contribution.chainHits, "Your successful attacks this chain (attacks.total, from Torn's chain report)", "#9dd8ff"),
-            buildStatCard("Chain Respect", Math.floor(contribution.chainRespect || 0), "Respect earned this chain (respect.total, from Torn's chain report)", "#7fe18d"),
-            buildStatCard("War Hits", contribution.warHits, "Your war-flagged attacks this chain (attacks.war, from Torn's chain report)", "#9dd8ff"),
-            buildStatCard("War Respect", Math.floor(contribution.warRespect || 0), "Respect earned from war-flagged attacks this chain", "#7fe18d"),
-            buildStatCard("Bonus Hits", contribution.bonusHits || 0, "Milestone chain-bonus hits landed (attacks.bonuses, from Torn's chain report)", "#c9a0ff")
+            buildStatCard("Chain Hits", contribution.chainHits, "Your successful attacks in the currently active chain (0 when no chain is active)", "#9dd8ff"),
+            buildStatCard("Chain Respect", Math.floor(contribution.chainRespect || 0), "Respect earned in the currently active chain (0 when no chain is active)", "#7fe18d"),
+            buildStatCard("War Hits", contribution.warHits, "Total war-flagged attacks across every chain this war, while the war is active", "#9dd8ff"),
+            buildStatCard("War Respect", Math.floor(contribution.warRespect || 0), "Total respect from war-flagged attacks across every chain this war", "#7fe18d"),
+            buildStatCard("Bonus Hits", Math.floor(contribution.bonusRespect || 0), "Total respect from chain-bonus milestone hits accrued this war", "#c9a0ff")
         ].join("");
 
         const factionSubTabs = [

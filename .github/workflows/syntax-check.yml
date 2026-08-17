@@ -7,6 +7,8 @@ on:
 jobs:
   check-syntax:
     runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: "--no-deprecation" # Hides the punycode deprecation warning
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

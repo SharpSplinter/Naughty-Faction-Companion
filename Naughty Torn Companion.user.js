@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.22.15
+// @version      5.22.16
 // @description  One-stop Torn dashboard for personal, faction, company, and inventory tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "5.22.15";
+    const SCRIPT_VERSION = "5.22.16";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const TORN_V1_BASE_URL = "https://api.torn.com/";
@@ -1553,46 +1553,64 @@
                 };
             }
 
-            // Personal chain/war contribution has no direct API field — approximated
-            // client-side by pulling own attacks since the earlier of chain/war start
-            // and tallying hits + respect_gain within each window. See project notes.
-            const personalContribution = { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0, bonusScore: 0 };
+            // Personal chain/war contribution — sourced from Torn's own
+            // faction/chains + faction/{id}/chainreport endpoints, which give an
+            // authoritative per-member breakdown. This replaces an earlier
+            // client-side approximation built from filtering user/attacks log
+            // entries, which could drift from Torn's own totals (confirmed
+            // mismatched: was showing War Hits=51/Respect=731 vs the real
+            // chainreport figures of War Hits=18/Respect=227.92 for the same
+            // window).
+            //
+            // LIMITATION: chainreport only exists for a chain that has ALREADY
+            // ENDED (broken, completed, or timed out) — Torn does not expose a
+            // live per-member breakdown for a chain still actively in progress.
+            // So these numbers reflect the most recently COMPLETED chain that
+            // started during the current war, not necessarily the literal current
+            // second if a new chain is actively running right now. The dedicated
+            // Faction live-refresh timer (see startFactionLiveRefreshTimer) polls
+            // this on a fast interval specifically so a just-completed chain's
+            // fresh report shows up as quickly as possible once Torn generates it.
+            const personalContribution = { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0, bonusHits: 0, reportId: 0 };
             try {
-                const chainStart = chain.start;
-                const chainEnd = chain.end || Math.floor(Date.now() / 1000);
-                const warStart = war ? war.start : 0;
-                const candidateStarts = [chainStart, warStart].filter((value) => value > 0);
-                const earliestStart = candidateStarts.length ? Math.min(...candidateStarts) : 0;
+                if (war && war.start && ownFactionId) {
+                    const basicResponse = await fetchJson(withKey(`${BASE_URL}user/basic`, apiKey)).catch(() => null);
+                    const ownPlayerId = Number(basicResponse?.basic?.player_id || basicResponse?.player_id || 0);
 
-                if (earliestStart) {
-                    const attacksResponse = await fetchJson(withKey(`${BASE_URL}user/attacks`, apiKey, { from: earliestStart, sort: "ASC" })).catch(() => null);
-                    const attacks = Array.isArray(attacksResponse?.attacks) ? attacksResponse.attacks
-                        : (Array.isArray(attacksResponse) ? attacksResponse : []);
+                    const chainsResponse = await fetchJson(withKey(`${BASE_URL}faction/${ownFactionId}/chains`, apiKey)).catch(() => null);
+                    const chainsList = Array.isArray(chainsResponse?.chains) ? chainsResponse.chains : [];
+                    // Chains are returned most-recent-first by default — the first one
+                    // that started at/after the war began is the war's chain report.
+                    const warChainSummary = chainsList.find((c) => Number(c.start || 0) >= war.start) || null;
 
-                    attacks.forEach((atk) => {
-                        const started = Number(atk.started || atk.timestamp_started || 0);
-                        const respectGain = Number(atk.respect_gain || 0);
-                        // Only count SUCCESSFUL "Attacked" results — Torn's own war/chain
-                        // report breaks Attacks out separately from Mugged, Hospitalized,
-                        // Assist, Lost, Escape, Stalemate, etc. (result enum values). We were
-                        // previously counting every log entry in the time window regardless
-                        // of result, which inflated both hit counts and respect totals by
-                        // including mugs, hospitalizations, assists, retaliations, losses,
-                        // and other non-"Attacked" outcomes that Torn doesn't count toward
-                        // this figure.
-                        const isSuccessfulAttack = atk.result === "Attacked";
-
-                        if (isSuccessfulAttack && atk.is_ranked_war && warStart && started >= warStart) {
-                            personalContribution.warHits += 1;
-                            personalContribution.warRespect += respectGain;
+                    if (warChainSummary && ownPlayerId) {
+                        const reportResponse = await fetchJson(withKey(`${BASE_URL}faction/${warChainSummary.id}/chainreport`, apiKey)).catch(() => null);
+                        const attackers = reportResponse?.chainreport?.attackers || [];
+                        const mine = attackers.find((a) => Number(a.id) === ownPlayerId) || null;
+                        if (mine) {
+                            const atk = mine.attacks || {};
+                            const rsp = mine.respect || {};
+                            const totalAttacks = Number(atk.total || 0);
+                            const warAttacks = Number(atk.war || 0);
+                            const totalRespect = Number(rsp.total || 0);
+                            personalContribution.chainHits = totalAttacks;
+                            personalContribution.chainRespect = totalRespect;
+                            personalContribution.warHits = warAttacks;
+                            personalContribution.bonusHits = Number(atk.bonuses || 0);
+                            // chainreport gives per-type ATTACK COUNTS but not a
+                            // per-type RESPECT breakdown. Since we specifically chose
+                            // the chain that started during the war, totalRespect IS
+                            // already the war-period respect whenever every attack in
+                            // it was war-flagged (warAttacks === totalAttacks — the
+                            // common case). If some attacks predate the war within the
+                            // same report, fall back to a proportional estimate since
+                            // an exact war-only figure isn't exposed by this endpoint.
+                            personalContribution.warRespect = totalAttacks > 0
+                                ? (warAttacks === totalAttacks ? totalRespect : totalRespect * (warAttacks / totalAttacks))
+                                : 0;
+                            personalContribution.reportId = Number(warChainSummary.id || 0);
                         }
-
-                        if (isSuccessfulAttack && chainStart && started >= chainStart && started <= chainEnd) {
-                            personalContribution.chainHits += 1;
-                            personalContribution.chainRespect += respectGain;
-                            personalContribution.bonusScore += getChainBonusRespect(atk);
-                        }
-                    });
+                    }
                 }
             } catch (contributionError) {
                 console.warn("Personal contribution calculation failed:", contributionError);
@@ -2859,13 +2877,13 @@
 
         const chain = faction.chain || {};
         const war = faction.war || null;
-        const contribution = faction.personalContribution || { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0, bonusScore: 0 };
+        const contribution = faction.personalContribution || { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0, bonusHits: 0 };
         const contributionCards = [
-            buildStatCard("Chain Hits", contribution.chainHits, "Your hits this chain (approx)", "#9dd8ff"),
-            buildStatCard("Chain Respect", contribution.chainRespect, "Respect earned this chain (approx)", "#7fe18d"),
-            buildStatCard("War Hits", contribution.warHits, "Your hits this war (approx)", "#9dd8ff"),
-            buildStatCard("War Respect", contribution.warRespect, "Respect earned this war (approx)", "#7fe18d"),
-            buildStatCard("Bonus Score", (contribution.bonusScore || 0).toFixed(2), "Respect from bonus hits only — excludes chain & war score", "#c9a0ff")
+            buildStatCard("Chain Hits", contribution.chainHits, "Your successful attacks this chain (attacks.total, from Torn's chain report)", "#9dd8ff"),
+            buildStatCard("Chain Respect", Math.floor(contribution.chainRespect || 0), "Respect earned this chain (respect.total, from Torn's chain report)", "#7fe18d"),
+            buildStatCard("War Hits", contribution.warHits, "Your war-flagged attacks this chain (attacks.war, from Torn's chain report)", "#9dd8ff"),
+            buildStatCard("War Respect", Math.floor(contribution.warRespect || 0), "Respect earned from war-flagged attacks this chain", "#7fe18d"),
+            buildStatCard("Bonus Hits", contribution.bonusHits || 0, "Milestone chain-bonus hits landed (attacks.bonuses, from Torn's chain report)", "#c9a0ff")
         ].join("");
 
         const factionSubTabs = [
@@ -3715,7 +3733,7 @@
         const noteText = sectionKey === "personal"
             ? (isPersonalOnInfo ? "auto-refreshes on Info" : "auto-refreshes only on Info sub-tab")
             : sectionKey === "faction"
-                ? "live-updates (5s) while viewing"
+                ? "live-updates (10s) while viewing"
                 : (isAuto ? "auto-refreshes" : "manual refresh only");
         return `
             <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 10px;background:rgba(255,255,255,0.03);border-bottom:1px solid #333;font-size:10px;color:#999;flex-shrink:0;">
@@ -4035,13 +4053,14 @@
     // Near-real-time Faction data refresh while the Faction tab is actually being
     // viewed — separate from and much faster than the general auto-refresh cadence
     // above, so Chain/War progress bars stay close to as fresh as the client-side
-    // countdown timers (startChainCountdownTimer) that tick every 250ms. 5s at a
-    // single fetch/tick = 12 requests/minute while actively watching the tab —
-    // comfortably inside Torn's 100 req/min per-key budget alongside everything
-    // else the widget fetches, but this is the fastest sane floor; going faster
-    // than the API can realistically return fresh data within would just waste
-    // calls without any visible benefit.
-    const FACTION_LIVE_REFRESH_MS = 5 * 1000;
+    // countdown timers (startChainCountdownTimer) that tick every 250ms. 10s is a
+    // deliberate balance: each faction refresh now makes several sequential calls
+    // (user/faction, faction/basic, faction/stats, faction/members, faction/news,
+    // faction/chain, faction/wars, plus — since the chainreport rework — user/basic,
+    // faction/chains, and faction/{id}/chainreport for the personal contribution
+    // card), so a faster interval risks Torn's rate limits given everything else
+    // the widget may also be fetching.
+    const FACTION_LIVE_REFRESH_MS = 10 * 1000;
 
     function stopFactionLiveRefreshTimer() {
         if (state.factionLiveRefreshTimer) {
@@ -4629,7 +4648,7 @@
             });
         });
 
-        state.sectionStatus.settings = "Auto refresh: Overview (5 min), Personal-Info (5 min), Faction (live, 5s while viewing). Company updates once daily at 18:10 UTC. Inventory is manual-only. Activity tab removed.";
+        state.sectionStatus.settings = "Auto refresh: Overview (5 min), Personal-Info (5 min), Faction (live, 10s while viewing). Company updates once daily at 18:10 UTC. Inventory is manual-only. Activity tab removed.";
         renderTabContent();
 
         if (state.apiKey) {

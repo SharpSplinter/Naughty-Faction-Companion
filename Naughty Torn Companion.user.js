@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.22.18
+// @version      5.22.19
 // @description  One-stop Torn dashboard for personal, faction, company, and inventory tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "5.22.18";
+    const SCRIPT_VERSION = "5.22.19";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const TORN_V1_BASE_URL = "https://api.torn.com/";
@@ -105,6 +105,26 @@
 
     const AUTO_REFRESH_MS = 15 * 60 * 1000;
     const QUICK_REFRESH_MS = 5 * 60 * 1000;
+    const AUTO_REFRESH_POLL_MS = 1000;
+
+    // Views that have remote data. Sub-tabs sharing a source are intentionally
+    // deduplicated: one response refreshes every view backed by that source.
+    const AUTO_REFRESH_TARGETS = [
+        { id: "overview:general", label: "Overview › General", section: "overview", defaultEnabled: true, defaultSeconds: 300 },
+        { id: "overview:status", label: "Overview › Status", section: "overview", defaultEnabled: true, defaultSeconds: 300 },
+        { id: "personal:info", label: "Personal › Info", section: "personal", defaultEnabled: true, defaultSeconds: 300 },
+        { id: "personal:skills", label: "Personal › Skills / Education", section: "personal", defaultEnabled: true, defaultSeconds: 300 },
+        { id: "personal:perks", label: "Personal › Perks", section: "personal", defaultEnabled: true, defaultSeconds: 300 },
+        { id: "personal:awards", label: "Personal › Awards", section: "personal", defaultEnabled: true, defaultSeconds: 300 },
+        { id: "faction:general", label: "Faction › General", section: "faction", defaultEnabled: true, defaultSeconds: 10 },
+        { id: "faction:ffscouter", label: "Faction › FFScouter", section: "warTargets", defaultEnabled: true, defaultSeconds: 30 },
+        { id: "company:general", label: "Company", section: "company", defaultEnabled: true, defaultSeconds: 86400 },
+        { id: "inventory:general", label: "Inventory", section: "inventory", defaultEnabled: false, defaultSeconds: 300 }
+    ];
+    const AUTO_REFRESH_DEFAULTS = Object.fromEntries(AUTO_REFRESH_TARGETS.map((target) => [target.id, {
+        enabled: target.defaultEnabled,
+        seconds: target.defaultSeconds
+    }]));
 
     // Staleness thresholds checked ONLY when restoring a section's cache at dashboard
     // init (i.e. "is this cached data too old to show without refreshing first?").
@@ -144,6 +164,7 @@
         factionSubTab: "general",
         settingsSubTab: "controls",
         personalSubTab: "info",
+        autoRefreshSettings: { ...AUTO_REFRESH_DEFAULTS },
         theme: "dark",
         isMinimized: false,
         windowSizes: {},
@@ -172,6 +193,7 @@
             faction: 0,
             company: 0,
             inventory: 0,
+            warTargets: 0,
             all: 0
         },
         sectionStatus: {
@@ -311,7 +333,8 @@
         warTargetColumnLayoutVersion: state.warTargetColumnLayoutVersion,
         warTargetFilters: state.warTargetFilters,
         warTargetFFRange: state.warTargetFFRange,
-        warTargetSort: state.warTargetSort
+        warTargetSort: state.warTargetSort,
+        autoRefreshSettings: state.autoRefreshSettings
     });
     const setStoredDashboardState = (payload) => {
         if (payload && payload.currentTab) state.currentTab = payload.currentTab;
@@ -319,6 +342,15 @@
         if (payload && payload.factionSubTab) state.factionSubTab = payload.factionSubTab;
         if (payload && payload.settingsSubTab) state.settingsSubTab = payload.settingsSubTab;
         if (payload && payload.personalSubTab) state.personalSubTab = payload.personalSubTab;
+        if (payload && payload.autoRefreshSettings && typeof payload.autoRefreshSettings === "object") {
+            state.autoRefreshSettings = Object.fromEntries(AUTO_REFRESH_TARGETS.map((target) => {
+                const saved = payload.autoRefreshSettings[target.id] || {};
+                return [target.id, {
+                    enabled: typeof saved.enabled === "boolean" ? saved.enabled : target.defaultEnabled,
+                    seconds: Math.max(5, Math.min(86400, Number(saved.seconds) || target.defaultSeconds))
+                }];
+            }));
+        }
         if (payload && ["light", "dark"].includes(payload.theme)) state.theme = payload.theme;
         if (payload && typeof payload.isMinimized === "boolean") state.isMinimized = payload.isMinimized;
         if (payload && payload.windowSizes && typeof payload.windowSizes === "object") state.windowSizes = payload.windowSizes;
@@ -526,6 +558,13 @@
         state.factionSubTab = dashboardState.factionSubTab || state.factionSubTab;
         state.settingsSubTab = dashboardState.settingsSubTab || state.settingsSubTab;
         state.personalSubTab = dashboardState.personalSubTab || state.personalSubTab;
+        state.autoRefreshSettings = Object.fromEntries(AUTO_REFRESH_TARGETS.map((target) => {
+            const saved = dashboardState.autoRefreshSettings?.[target.id] || {};
+            return [target.id, {
+                enabled: typeof saved.enabled === "boolean" ? saved.enabled : target.defaultEnabled,
+                seconds: Math.max(5, Math.min(86400, Number(saved.seconds) || target.defaultSeconds))
+            }];
+        }));
         state.theme = ["light", "dark"].includes(dashboardState.theme) ? dashboardState.theme : state.theme;
         state.isMinimized = dashboardState.isMinimized === true;
         state.windowSizes = dashboardState.windowSizes && typeof dashboardState.windowSizes === "object"
@@ -3145,6 +3184,24 @@
         }
     }
 
+    function getAutoRefreshSetting(targetId) {
+        const target = AUTO_REFRESH_TARGETS.find((entry) => entry.id === targetId);
+        const saved = state.autoRefreshSettings?.[targetId] || {};
+        return {
+            enabled: typeof saved.enabled === "boolean" ? saved.enabled : !!target?.defaultEnabled,
+            seconds: Math.max(5, Math.min(86400, Number(saved.seconds) || target?.defaultSeconds || 300))
+        };
+    }
+
+    function getCurrentAutoRefreshTarget() {
+        if (state.currentTab === "overview") return `overview:${state.overviewSubTab}`;
+        if (state.currentTab === "personal") return `personal:${state.personalSubTab}`;
+        if (state.currentTab === "faction") return `faction:${state.factionSubTab}`;
+        if (state.currentTab === "company") return "company:general";
+        if (state.currentTab === "inventory") return "inventory:general";
+        return null;
+    }
+
     function renderSettingsPanel() {
         const snapshotButtons = [
             { key: "overview", label: "Overview" },
@@ -3168,6 +3225,7 @@
 
         const subTabButtons = [
             { id: "controls", label: "Controls" },
+            { id: "refresh", label: "Auto Refresh" },
             { id: "integrations", label: "Integrations" },
             { id: "export", label: "Exports" }
         ].map(({ id, label }) => `
@@ -3219,14 +3277,36 @@
                     </dialog>
                 </div>
             `;
+        const refreshContent = `
+                <div style="display:grid;gap:9px;">
+                    <div style="border:1px solid #3d3d3d;border-radius:8px;padding:11px;display:grid;gap:5px;background:rgba(255,255,255,0.02);">
+                        <div style="color:#fff;font-weight:800;font-size:13px;">Per-View Auto Refresh</div>
+                        <div style="color:#aaa;font-size:11px;line-height:1.45;">Enable a view and set its interval in seconds. Views sharing the same API data refresh together from one request. Settings has no remote data and does not require a timer.</div>
+                    </div>
+                    <div style="display:grid;gap:6px;">
+                        ${AUTO_REFRESH_TARGETS.map((target) => {
+                            const setting = getAutoRefreshSetting(target.id);
+                            return `<label style="display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:9px;border:1px solid #3d3d3d;border-radius:7px;padding:8px 9px;background:rgba(255,255,255,0.02);">
+                                <span style="color:#f1f3f5;font-size:11px;font-weight:700;overflow-wrap:anywhere;">${target.label}</span>
+                                <input type="number" data-auto-refresh-seconds="${target.id}" value="${setting.seconds}" min="5" max="86400" step="1" aria-label="${target.label} refresh interval in seconds" style="width:72px;background:#111;border:1px solid #444;border-radius:5px;color:#fff;padding:6px;font-size:11px;" />
+                                <span style="display:flex;align-items:center;gap:5px;color:#bfc7d1;font-size:10px;white-space:nowrap;"><input type="checkbox" data-auto-refresh-enabled="${target.id}" ${setting.enabled ? "checked" : ""} /> On</span>
+                            </label>`;
+                        }).join("")}
+                    </div>
+                    <div style="display:flex;gap:7px;flex-wrap:wrap;">
+                        <button id="save-auto-refresh-settings-btn" style="background:#3b5998;color:#fff;border:none;border-radius:6px;padding:8px 12px;font-size:11px;cursor:pointer;">Save Auto Refresh Settings</button>
+                        <button id="reset-auto-refresh-settings-btn" style="background:#59616d;color:#fff;border:none;border-radius:6px;padding:8px 12px;font-size:11px;cursor:pointer;">Restore Defaults</button>
+                    </div>
+                </div>
+            `;
         const exportContent = `
                 <div style="display: grid; gap: 6px;">
                     ${exportMarkup}
                 </div>
             `;
-        const content = currentSubTab === "integrations"
-            ? integrationsContent
-            : (currentSubTab === "export" ? exportContent : controlsContent);
+        const content = currentSubTab === "refresh"
+            ? refreshContent
+            : (currentSubTab === "integrations" ? integrationsContent : (currentSubTab === "export" ? exportContent : controlsContent));
 
         return `
             ${renderSectionMeta("settings", "Settings")}
@@ -3331,6 +3411,10 @@
         const exportButtons = contentEl.querySelectorAll("[data-export-section]");
         const refreshSectionButtons = contentEl.querySelectorAll("[data-refresh-section]");
         const subTabButtons = contentEl.querySelectorAll("[data-settings-subtab]");
+        const autoRefreshEnabledInputs = contentEl.querySelectorAll("[data-auto-refresh-enabled]");
+        const autoRefreshSecondsInputs = contentEl.querySelectorAll("[data-auto-refresh-seconds]");
+        const saveAutoRefreshButton = document.getElementById("save-auto-refresh-settings-btn");
+        const resetAutoRefreshButton = document.getElementById("reset-auto-refresh-settings-btn");
 
         const setFFScouterStatus = (message, color = "#bfc7d1") => {
             state.ffscouterStatus = message;
@@ -3483,6 +3567,46 @@
             };
         }
 
+        const saveAutoRefreshSettings = () => {
+            const next = Object.fromEntries(AUTO_REFRESH_TARGETS.map((target) => {
+                const enabled = contentEl.querySelector(`[data-auto-refresh-enabled="${target.id}"]`);
+                const seconds = contentEl.querySelector(`[data-auto-refresh-seconds="${target.id}"]`);
+                return [target.id, {
+                    enabled: !!enabled?.checked,
+                    seconds: Math.max(5, Math.min(86400, Number(seconds?.value) || target.defaultSeconds))
+                }];
+            }));
+            state.autoRefreshSettings = next;
+            setStoredDashboardState({ autoRefreshSettings: next });
+            scheduleAutoRefresh();
+            startFactionLiveRefreshTimer();
+            startWarTargetsRefreshTimer();
+            if (status) status.textContent = "Auto-refresh settings saved.";
+        };
+
+        if (saveAutoRefreshButton && !saveAutoRefreshButton.dataset.bound) {
+            saveAutoRefreshButton.dataset.bound = "true";
+            saveAutoRefreshButton.onclick = saveAutoRefreshSettings;
+        }
+
+        if (resetAutoRefreshButton && !resetAutoRefreshButton.dataset.bound) {
+            resetAutoRefreshButton.dataset.bound = "true";
+            resetAutoRefreshButton.onclick = () => {
+                state.autoRefreshSettings = JSON.parse(JSON.stringify(AUTO_REFRESH_DEFAULTS));
+                setStoredDashboardState({ autoRefreshSettings: state.autoRefreshSettings });
+                scheduleAutoRefresh();
+                startFactionLiveRefreshTimer();
+                startWarTargetsRefreshTimer();
+                renderTabContent();
+            };
+        }
+
+        [...autoRefreshEnabledInputs, ...autoRefreshSecondsInputs].forEach((input) => {
+            if (input.dataset.bound === "true") return;
+            input.dataset.bound = "true";
+            input.onchange = saveAutoRefreshSettings;
+        });
+
         subTabButtons.forEach((button) => {
             if (button.dataset.bound === "true") return;
             button.dataset.bound = "true";
@@ -3555,6 +3679,7 @@
             const currentFaction = state.caches.faction || {};
             if (Number(currentFaction.war?.warId || 0) !== Number(war.warId || 0)) return false;
             state.caches.faction = { ...currentFaction, warTargets: { ...refreshed, war: { ...war } } };
+            state.lastRefreshBySection.warTargets = Date.now();
             void gmSetValue(APP_STORAGE.sections.faction, {
                 data: state.caches.faction,
                 lastRefresh: state.lastRefreshBySection.faction,
@@ -3741,13 +3866,15 @@
     function startWarTargetsRefreshTimer() {
         stopWarTargetsRefreshTimer();
         if (state.currentTab !== "faction" || state.factionSubTab !== "ffscouter") return;
+        const setting = getAutoRefreshSetting("faction:ffscouter");
+        if (!setting.enabled) return;
         state.warTargetsRefreshTimer = setInterval(() => {
             if (state.currentTab !== "faction" || state.factionSubTab !== "ffscouter") {
                 stopWarTargetsRefreshTimer();
                 return;
             }
             void refreshWarTargets(false);
-        }, 30 * 1000);
+        }, setting.seconds * 1000);
     }
 
     function bindOverviewControls() {
@@ -4045,53 +4172,22 @@
         const apiKey = getStoredKey();
         if (!apiKey) {
             debugLog("Auto refresh skipped: no API key");
-            state.autoRefreshTimer = setTimeout(performAutoRefreshCycle, 60 * 1000);
+            state.autoRefreshTimer = setTimeout(performAutoRefreshCycle, AUTO_REFRESH_POLL_MS);
             return;
         }
 
         const now = Date.now();
-        const sectionsToCheck = ["overview", "faction"];
-        if (state.currentTab === "personal" && state.personalSubTab === "info") {
-            sectionsToCheck.push("personal");
+        const targetId = getCurrentAutoRefreshTarget();
+        const target = AUTO_REFRESH_TARGETS.find((entry) => entry.id === targetId);
+        const setting = target ? getAutoRefreshSetting(target.id) : null;
+        const lastRefresh = target ? (state.lastRefreshBySection[target.section] || 0) : 0;
+        const due = !!target && !!setting?.enabled && now - lastRefresh >= setting.seconds * 1000;
+
+        // Faction General and FFScouter use their dedicated view timers below.
+        if (due && target.section !== "warTargets" && target.id !== "faction:general") {
+            void refreshSectionByKey(target.section, null);
         }
-        const quickRefreshDue = sectionsToCheck.some((section) => {
-            const last = state.lastRefreshBySection[section] || 0;
-            return now - last >= QUICK_REFRESH_MS;
-        });
-        const fullRefreshDue = now - (state.lastRefreshBySection.all || 0) >= AUTO_REFRESH_MS;
-        const companyRefreshDue = isCompanyUpdateDue(now);
-
-        debugLog("Auto refresh cycle", {
-            quickRefreshDue,
-            fullRefreshDue,
-            companyRefreshDue,
-            currentTab: state.currentTab,
-            personalSubTab: state.personalSubTab,
-            lastRefreshBySection: state.lastRefreshBySection
-        });
-
-        const tasks = [];
-
-        if (companyRefreshDue) {
-            tasks.push(
-                fetchCompanyData(apiKey)
-                    .then((company) => {
-                        setSectionCache("company", company || state.caches.company);
-                        renderTabContent();
-                    })
-                    .catch((error) => {
-                        console.warn("Daily company refresh failed:", error);
-                    })
-            );
-        }
-
-        if (fullRefreshDue || quickRefreshDue) {
-            tasks.push(refreshAllSections({ silent: true }));
-        }
-
-        Promise.allSettled(tasks).finally(() => {
-            state.autoRefreshTimer = setTimeout(performAutoRefreshCycle, 60 * 1000);
-        });
+        state.autoRefreshTimer = setTimeout(performAutoRefreshCycle, AUTO_REFRESH_POLL_MS);
     }
 
     function scheduleAutoRefresh() {
@@ -4099,7 +4195,7 @@
             clearTimeout(state.autoRefreshTimer);
         }
 
-        state.autoRefreshTimer = setTimeout(performAutoRefreshCycle, 60 * 1000);
+        state.autoRefreshTimer = setTimeout(performAutoRefreshCycle, AUTO_REFRESH_POLL_MS);
     }
 
     // Near-real-time Faction data refresh while the Faction tab is actually being
@@ -4112,8 +4208,6 @@
     // faction/chains, and faction/{id}/chainreport for the personal contribution
     // card), so a faster interval risks Torn's rate limits given everything else
     // the widget may also be fetching.
-    const FACTION_LIVE_REFRESH_MS = 10 * 1000;
-
     function stopFactionLiveRefreshTimer() {
         if (state.factionLiveRefreshTimer) {
             clearInterval(state.factionLiveRefreshTimer);
@@ -4123,14 +4217,17 @@
 
     function startFactionLiveRefreshTimer() {
         stopFactionLiveRefreshTimer();
+        if (state.currentTab !== "faction" || state.factionSubTab !== "general") return;
+        const setting = getAutoRefreshSetting("faction:general");
+        if (!setting.enabled) return;
         state.factionLiveRefreshTimer = setInterval(() => {
-            if (state.currentTab !== "faction") {
+            if (state.currentTab !== "faction" || state.factionSubTab !== "general") {
                 stopFactionLiveRefreshTimer();
                 return;
             }
             if (!getStoredKey()) return;
             void refreshSectionByKey("faction", null);
-        }, FACTION_LIVE_REFRESH_MS);
+        }, setting.seconds * 1000);
     }
 
     function applyDashboardTheme() {

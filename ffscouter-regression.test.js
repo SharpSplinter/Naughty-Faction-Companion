@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const source = fs.readFileSync(path.join(__dirname, "Naughty Torn Companion.js"), "utf8");
+const source = fs.readFileSync(path.join(__dirname, "Naughty Torn Companion.user.js"), "utf8");
 const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 const persistence = section("const getStoredDashboardState", "function updateCompanyStockHistory");
 const restore = section("async function loadPersistedState", "async function secureCustomFetch");
@@ -15,6 +15,13 @@ for (const key of ["warTargetSort", "warTargetFilters", "warTargetFFRange", "war
     assert.match(persistence, new RegExp(key), `${key} must be saved`);
     assert.match(restore, new RegExp(key), `${key} must be restored`);
 }
+
+for (const target of ["overview:general", "overview:status", "personal:info", "personal:skills", "personal:perks", "personal:awards", "faction:general", "faction:ffscouter", "company:general", "inventory:general"]) {
+    assert.match(source, new RegExp(target), `${target} must have an auto-refresh control`);
+}
+assert.match(persistence, /autoRefreshSettings/, "auto-refresh settings must persist");
+assert.match(restore, /autoRefreshSettings/, "auto-refresh settings must restore");
+assert.match(source, /function getCurrentAutoRefreshTarget\(\)/, "auto-refresh must resolve the active view");
 
 assert.doesNotMatch(controls, /state\.caches/, "view controls must never mutate faction data");
 assert.match(renderer, /faction\.war \|\| data\?\.war/, "renderer must retain the target snapshot's war context");

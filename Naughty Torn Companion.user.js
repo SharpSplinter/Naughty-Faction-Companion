@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Torn Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.22.14
+// @version      5.22.15
 // @description  One-stop Torn dashboard for personal, faction, company, and inventory tracking.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "5.22.14";
+    const SCRIPT_VERSION = "5.22.15";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const TORN_V1_BASE_URL = "https://api.torn.com/";
@@ -3715,7 +3715,7 @@
         const noteText = sectionKey === "personal"
             ? (isPersonalOnInfo ? "auto-refreshes on Info" : "auto-refreshes only on Info sub-tab")
             : sectionKey === "faction"
-                ? "live-updates (15s) while viewing"
+                ? "live-updates (5s) while viewing"
                 : (isAuto ? "auto-refreshes" : "manual refresh only");
         return `
             <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 10px;background:rgba(255,255,255,0.03);border-bottom:1px solid #333;font-size:10px;color:#999;flex-shrink:0;">
@@ -4035,10 +4035,13 @@
     // Near-real-time Faction data refresh while the Faction tab is actually being
     // viewed — separate from and much faster than the general auto-refresh cadence
     // above, so Chain/War progress bars stay close to as fresh as the client-side
-    // countdown timers (startChainCountdownTimer) that tick every 250ms. 15s is a
-    // deliberate balance: fast enough to feel live, but not so fast it risks Torn's
-    // rate limits given everything else the widget may also be fetching.
-    const FACTION_LIVE_REFRESH_MS = 15 * 1000;
+    // countdown timers (startChainCountdownTimer) that tick every 250ms. 5s at a
+    // single fetch/tick = 12 requests/minute while actively watching the tab —
+    // comfortably inside Torn's 100 req/min per-key budget alongside everything
+    // else the widget fetches, but this is the fastest sane floor; going faster
+    // than the API can realistically return fresh data within would just waste
+    // calls without any visible benefit.
+    const FACTION_LIVE_REFRESH_MS = 5 * 1000;
 
     function stopFactionLiveRefreshTimer() {
         if (state.factionLiveRefreshTimer) {
@@ -4626,7 +4629,7 @@
             });
         });
 
-        state.sectionStatus.settings = "Auto refresh: Overview (5 min), Personal-Info (5 min), Faction (live, 15s while viewing). Company updates once daily at 18:10 UTC. Inventory is manual-only. Activity tab removed.";
+        state.sectionStatus.settings = "Auto refresh: Overview (5 min), Personal-Info (5 min), Faction (live, 5s while viewing). Company updates once daily at 18:10 UTC. Inventory is manual-only. Activity tab removed.";
         renderTabContent();
 
         if (state.apiKey) {

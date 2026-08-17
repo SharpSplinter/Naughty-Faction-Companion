@@ -1,22 +1,21 @@
 name: Syntax Check
-
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-
 jobs:
   check-syntax:
     runs-on: ubuntu-latest
-
+    env:
+      NODE_OPTIONS: "--no-deprecation" # Hides the punycode deprecation warning
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-
-    - name: Check JavaScript Syntax
-      run: |
-        node --check "Naughty Torn Companion.user.js"
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Check JavaScript Syntax
+        run: |
+          node --check "Naughty Torn Companion.user.js"

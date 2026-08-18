@@ -68,8 +68,14 @@ assert.match(source, /function fitCurrentContentToWidget\(\)/, "non-table panels
 assert.match(source, /requestAnimationFrame\(fitCurrentContentToWidget\)/, "card fitting must run after renders and size changes");
 assert.match(source, /min-height:210px;flex:1 1 auto;border:1px solid #343a43/, "the FFScouter table must retain room for roughly five readable target rows");
 assert.match(source, /ntc-ffscouter-summary/, "the FFScouter summary must have an independently responsive container");
-assert.match(source, /const minReadableScale = 0\.72/, "FFScouter controls must retain a readable minimum scale");
-assert.match(source, /Math\.max\(0\.72, Math\.min\(1, availableHeight/, "non-table cards must retain a readable minimum scale");
+assert.match(source, /const preferredTableHeight = tableHeaderHeight \+ \(tableRowHeight \* 4\) \+ 4/, "FFScouter must reserve four readable player rows before summary scaling");
+assert.match(source, /const minimumTableHeight = tableHeaderHeight \+ \(tableRowHeight \* 3\) \+ 4/, "FFScouter must keep a useful minimum player-table viewport");
+assert.match(source, /const maximumTableHeight = Math\.max\(0, Math\.floor\(layoutHeight - layoutGap\)\)/, "short visual viewports must clamp the table to the available layout height");
+assert.match(source, /tableWrap\.style\.setProperty\("min-height", `\$\{tableHeight\}px`, "important"\)/, "responsive table height must override mobile minimums safely");
+assert.match(source, /nfc-war-target-table--compact/, "narrow FFScouter headers must use explicit compact labels rather than clipped text");
+assert.match(source, /compactLabel: "On"/, "compact FFScouter headers must use short visible names");
+assert.match(source, /nfc-faction-general-layout/, "General must have an independent compact portrait layout");
+assert.doesNotMatch(source, /Math\.max\(0\.72, Math\.min\(1, availableHeight/, "General must fit fully rather than clip at a fixed zoom floor");
 assert.match(source, /ntc-ffscouter-summary-viewport/, "the FFScouter summary must reserve its own non-overlapping layout row");
 assert.match(source, /summaryViewport\.style\.flex = `0 0 \$\{reservedSummaryHeight\}px`/, "the table must begin below the reserved FFScouter summary height");
 assert.doesNotMatch(source, /faction\.factionNews/, "the General tab must not retain News-card data");

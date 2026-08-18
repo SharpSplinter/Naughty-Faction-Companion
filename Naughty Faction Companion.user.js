@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.16
+// @version      1.0.17
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -22,7 +22,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.16";
+    const SCRIPT_VERSION = "1.0.17";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -2810,17 +2810,17 @@
     }
 
     const WAR_TARGET_COLUMNS = {
-        player: { label: "Player", align: "left", minWidth: 88, hardFloor: 58 },
-        online: { label: "Online", align: "left", minWidth: 54, hardFloor: 40 },
-        status: { label: "Status", align: "left", minWidth: 96, hardFloor: 62 },
-        stats: { label: "Est. Stats", align: "right", minWidth: 68, hardFloor: 46 },
+        player: { label: "Player", compactLabel: "Player", align: "left", minWidth: 88, hardFloor: 58 },
+        online: { label: "Online", compactLabel: "On", align: "left", minWidth: 54, hardFloor: 40 },
+        status: { label: "Status", compactLabel: "Status", align: "left", minWidth: 96, hardFloor: 62 },
+        stats: { label: "Est. Stats", compactLabel: "Est", align: "right", minWidth: 68, hardFloor: 46 },
         // ff/attack floors raised to match real content minimums (a "1.5x"-style badge and
         // an "Attack" button both need real room — the earlier 26/34 floors were tighter
         // than the content itself, which combined with .ntc-attack-button's
         // min-width:max-content !important could still overflow even once the column-fit
         // math was correct.
-        ff: { label: "FF", align: "center", minWidth: 38, hardFloor: 32 },
-        attack: { label: "Attack", align: "center", minWidth: 58, hardFloor: 52 }
+        ff: { label: "FF", compactLabel: "FF", align: "center", minWidth: 38, hardFloor: 32 },
+        attack: { label: "Attack", compactLabel: "Atk", align: "center", minWidth: 58, hardFloor: 52 }
     };
 
     // Fits all visible columns inside `availableWidth` with ZERO horizontal scrolling,
@@ -2906,12 +2906,13 @@
 
 
 
-    function renderWarTargetSortHeader(key) {
+    function renderWarTargetSortHeader(key, compact = false) {
         const column = WAR_TARGET_COLUMNS[key];
         const active = state.warTargetSort?.key === key;
-        const indicator = active ? (state.warTargetSort.direction === "asc" ? " ▲" : " ▼") : " ↕";
-        return `<th class="nfc-war-target-sort-header" data-war-target-sort="${key}" data-war-column-key="${key}" style="position:relative;padding:7px 15px 7px 7px;cursor:pointer;user-select:none;white-space:nowrap;text-align:${column.align};overflow:hidden;text-overflow:ellipsis;">
-            <span data-war-column-drag="${key}" draggable="true" title="Drag to reorder" style="display:inline-block;margin-right:4px;color:#697582;cursor:grab;font-size:10px;">⠿</span>${escapeHtml(column.label)}<span style="color:${active ? "#9dd8ff" : "#697582"};font-size:9px;">${indicator}</span>
+        const indicator = active ? (state.warTargetSort.direction === "asc" ? " ▲" : " ▼") : (compact ? "" : " ↕");
+        const label = compact ? (column.compactLabel || column.label) : column.label;
+        return `<th class="nfc-war-target-sort-header${compact ? " nfc-war-target-sort-header--compact" : ""}" data-war-target-sort="${key}" data-war-column-key="${key}" aria-label="Sort by ${escapeHtml(column.label)}" title="${escapeHtml(column.label)} — click to sort" style="position:relative;padding:7px 15px 7px 7px;cursor:pointer;user-select:none;white-space:nowrap;text-align:${column.align};overflow:hidden;text-overflow:ellipsis;">
+            <span class="nfc-war-target-column-grip" data-war-column-drag="${key}" draggable="true" title="Drag to reorder" style="display:inline-block;margin-right:4px;color:#697582;cursor:grab;font-size:10px;">⠿</span><span class="nfc-war-target-header-label">${escapeHtml(label)}</span><span class="nfc-war-target-header-indicator" style="color:${active ? "#9dd8ff" : "#697582"};font-size:9px;">${indicator}</span>
             <span data-war-column-resize="${key}" title="Drag to resize" style="position:absolute;right:0;top:0;width:8px;height:100%;cursor:col-resize;border-right:2px solid #46505d;"></span>
         </th>`;
     }
@@ -2929,7 +2930,7 @@
             case "ff":
                 return `<td class="nfc-war-target-cell nfc-war-target-ff" style="padding:8px 7px;text-align:center;color:#7fe18d;font-size:13px;font-weight:900;white-space:nowrap;overflow:hidden;">${display.ff}</td>`;
             case "attack":
-                return `<td style="padding:8px 7px;text-align:center;white-space:nowrap;overflow:hidden;"><a class="ntc-attack-button" href="https://www.torn.com/page.php?sid=attack&user2ID=${target.id}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#8f3434;color:#fff;border-radius:5px;padding:5px 8px;font-size:10px;font-weight:800;text-decoration:none;white-space:nowrap;overflow-wrap:normal;word-break:keep-all;">Attack</a></td>`;
+                return `<td class="nfc-war-target-cell nfc-war-target-attack" style="padding:8px 7px;text-align:center;white-space:nowrap;overflow:hidden;"><a class="ntc-attack-button" href="https://www.torn.com/page.php?sid=attack&user2ID=${target.id}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#8f3434;color:#fff;border-radius:5px;padding:5px 8px;font-size:10px;font-weight:800;text-decoration:none;white-space:nowrap;overflow-wrap:normal;word-break:keep-all;">Attack</a></td>`;
             default:
                 return "";
         }
@@ -2952,15 +2953,17 @@
         const refreshed = data?.liveFetchedAt ? new Date(data.liveFetchedAt).toLocaleTimeString() : "Not loaded";
         const notices = [data?.error, data?.statsError ? `FFScouter: ${data.statsError}` : "", data?.liveError ? `Live profile batches unavailable; using faction roster status. ${data.liveError}` : ""].filter(Boolean);
         const columnOrder = state.warTargetColumnOrder.filter((key) => WAR_TARGET_COLUMNS[key]);
-        const responsiveColumnWidths = computeResponsiveColumnWidths(columnOrder, getWarTargetTableAvailableWidth());
+        const tableAvailableWidth = getWarTargetTableAvailableWidth();
+        const responsiveColumnWidths = computeResponsiveColumnWidths(columnOrder, tableAvailableWidth);
+        const compactWarTargetTable = Number.isFinite(tableAvailableWidth) && tableAvailableWidth <= 390;
         const activeSort = WAR_TARGET_COLUMNS[state.warTargetSort?.key] || WAR_TARGET_COLUMNS.status;
         const sortDirection = state.warTargetSort?.direction === "desc" ? "Descending" : "Ascending";
         const filterGroups = [
-            { label: "Status", options: [["okay", "Okay"], ["hospitalized", "Hospitalized"], ["traveling", "Abroad / Traveling"]] },
-            { label: "Activity", options: [["online", "Online"], ["idle", "Idle"], ["offline", "Offline"]] }
+            { id: "status", label: "Status", options: [["okay", "Okay"], ["hospitalized", "Hospitalized"], ["traveling", "Abroad / Traveling"]] },
+            { id: "activity", label: "Activity", options: [["online", "Online"], ["idle", "Idle"], ["offline", "Offline"]] }
         ];
         const filterPanel = filterGroups.map((group) => `
-            <div style="display:flex;align-items:center;gap:5px;flex:1 1 230px;min-width:0;flex-wrap:wrap;">
+            <div class="nfc-war-target-filter-group nfc-war-target-filter-group--${group.id}" style="display:flex;align-items:center;gap:5px;flex:1 1 230px;min-width:0;flex-wrap:wrap;">
                 <span class="ntc-war-filter-group-label" style="color:#929eac;font-size:9px;font-weight:850;text-transform:uppercase;letter-spacing:.45px;min-width:48px;">${group.label}</span>
                 ${group.options.map(([key, label]) => `<label class="ntc-war-target-filter-option" style="display:inline-flex;align-items:center;gap:4px;border:1px solid #3a424d;border-radius:999px;padding:3px 6px;background:rgba(255,255,255,.035);color:#d7dde5;font-size:9px;font-weight:700;cursor:pointer;white-space:nowrap;"><input data-war-target-filter="${key}" type="checkbox" ${state.warTargetFilters[key] !== false ? "checked" : ""} style="width:12px;height:12px;margin:0;accent-color:#5ba7f7;cursor:pointer;">${label}</label>`).join("")}
             </div>
@@ -3002,12 +3005,12 @@
             <div class="ntc-ffscouter-layout" style="display:flex;flex-direction:column;gap:9px;min-height:0;height:100%;">
                 <div class="ntc-ffscouter-summary-viewport" style="flex:0 0 auto;min-height:0;overflow:hidden;">
                     <div class="ntc-ffscouter-summary nfc-ffscouter-summary" style="display:grid;gap:8px;">
-                        <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap;">
+                        <div class="nfc-ffscouter-header-row" style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap;">
                             <div class="nfc-ffscouter-heading"><div class="nfc-ffscouter-title">${escapeHtml(war.oppTag)} War Targets</div><div class="nfc-ffscouter-subtitle">${targets.length} shown / ${allTargets.length} members · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div><div class="nfc-ffscouter-guidance">Availability: Okay → Hospital (soonest first) → Traveling/Abroad · click headers to sort within groups</div><div class="nfc-ffscouter-guidance">Drag ⠿ to reorder columns · drag a header's right edge to resize</div></div>
-                            <div style="display:flex;gap:6px;flex-wrap:wrap;"><button id="refresh-war-live-btn" class="nfc-primary-action">Refresh Live Status</button></div>
+                            <div class="nfc-ffscouter-actions" style="display:flex;gap:6px;flex-wrap:wrap;"><button id="refresh-war-live-btn" class="nfc-primary-action">Refresh Live Status</button></div>
                         </div>
                         <div class="ntc-war-target-filter-panel nfc-ffscouter-filter-panel" style="display:flex;align-items:center;gap:7px 12px;flex-wrap:wrap;">
-                            <div style="display:grid;gap:1px;flex:0 0 auto;"><span class="ntc-war-filter-heading" style="color:#fff;font-size:10px;font-weight:900;">Sort &amp; View</span><span style="color:#697582;font-size:8px;white-space:nowrap;">${escapeHtml(activeSort.label)} · ${sortDirection}</span></div>
+                            <div class="nfc-ffscouter-sort-summary" style="display:grid;gap:1px;flex:0 0 auto;"><span class="ntc-war-filter-heading" style="color:#fff;font-size:10px;font-weight:900;">Sort &amp; View</span><span style="color:#697582;font-size:8px;white-space:nowrap;">${escapeHtml(activeSort.label)} · ${sortDirection}</span></div>
                             ${filterPanel}
                             ${ffRangePanel}
                         </div>
@@ -3016,9 +3019,9 @@
                     </div>
                 </div>
                 <div class="ntc-war-target-table-wrap nfc-war-target-table-shell" style="width:100%;min-width:0;min-height:210px;flex:1 1 auto;border:1px solid #343a43;overflow-y:auto;overflow-x:hidden;">
-                    <table class="ntc-war-target-table nfc-ffscouter-table" style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:10px;">
+                    <table class="ntc-war-target-table nfc-ffscouter-table${compactWarTargetTable ? " nfc-war-target-table--compact" : ""}" style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:10px;">
                         <colgroup>${columnOrder.map((key) => `<col data-war-column="${key}" style="width:${responsiveColumnWidths[key]}px;">`).join("")}</colgroup>
-                        <thead class="nfc-war-target-head" style="position:sticky;top:0;z-index:2;text-align:left;"><tr>${columnOrder.map(renderWarTargetSortHeader).join("")}</tr></thead>
+                        <thead class="nfc-war-target-head" style="position:sticky;top:0;z-index:2;text-align:left;"><tr>${columnOrder.map((key) => renderWarTargetSortHeader(key, compactWarTargetTable)).join("")}</tr></thead>
                         <tbody>${rows || `<tr><td colspan="${columnOrder.length}" style="padding:18px;text-align:center;color:#8f99a5;">${escapeHtml(data?.error || (allTargets.length ? "No targets match the current view filters." : "No targets loaded yet."))}</td></tr>`}</tbody>
                     </table>
                 </div>
@@ -3059,10 +3062,12 @@
         const activeSubTab = factionSubTabs.some((tab) => tab.id === state.factionSubTab) ? state.factionSubTab : "general";
         const subTabButtons = factionSubTabs.map((tab) => `<button data-faction-subtab="${tab.id}" class="nfc-subtab${activeSubTab === tab.id ? " is-active" : ""}" aria-current="${activeSubTab === tab.id ? "page" : "false"}">${tab.label}</button>`).join("");
         const generalContent = `
-            <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px;">${cards}</div>
+            <div class="nfc-faction-general-layout">
+            <div class="nfc-faction-summary-grid" style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px;">${cards}</div>
             ${renderChainBar(chain)}
             ${renderWarCard(war)}
-            <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">${contributionCards}</div>
+            <div class="nfc-faction-contribution-grid" style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">${contributionCards}</div>
+            </div>
         `;
         return `
             ${renderSectionMeta("faction", "Faction")}
@@ -4393,25 +4398,39 @@
         if (!widgetBody || !content || state.isMinimized) return;
 
         content.style.zoom = "1";
+        content.classList.toggle("nfc-faction-general-active", state.currentTab === "faction" && state.factionSubTab === "general");
         if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") {
             const layout = content.querySelector(".ntc-ffscouter-layout");
             const summaryViewport = layout?.querySelector(".ntc-ffscouter-summary-viewport");
             const summary = layout?.querySelector(".ntc-ffscouter-summary");
-            if (!layout || !summaryViewport || !summary) return;
+            const tableWrap = layout?.querySelector(".ntc-war-target-table-wrap");
+            if (!layout || !summaryViewport || !summary || !tableWrap) return;
 
             summary.style.zoom = "1";
             summaryViewport.style.height = "auto";
             summaryViewport.style.flex = "0 0 auto";
-            const minReadableScale = 0.72;
-            const requiredSummaryHeight = Math.max(summary.scrollHeight, summary.offsetHeight);
-            const availableSummaryHeight = Math.max(
-                Math.ceil(requiredSummaryHeight * minReadableScale),
-                Math.floor(layout.clientHeight * 0.48)
+            const compact = content.clientWidth <= 430;
+            const tableHeaderHeight = compact ? 25 : 28;
+            const tableRowHeight = compact ? 42 : 48;
+            const preferredTableHeight = tableHeaderHeight + (tableRowHeight * 4) + 4;
+            const minimumTableHeight = tableHeaderHeight + (tableRowHeight * 3) + 4;
+            const minimumSummaryHeight = compact ? 120 : 145;
+            const layoutHeight = Math.max(0, layout.clientHeight);
+            const layoutGap = Math.min(compact ? 6 : 9, layoutHeight);
+            const maximumTableHeight = Math.max(0, Math.floor(layoutHeight - layoutGap));
+            const tableHeight = Math.min(
+                preferredTableHeight,
+                maximumTableHeight,
+                Math.max(minimumTableHeight, Math.floor(layoutHeight - minimumSummaryHeight - layoutGap))
             );
+            const availableSummaryHeight = Math.max(0, Math.floor(layoutHeight - tableHeight - layoutGap));
+            const requiredSummaryHeight = Math.max(summary.scrollHeight, summary.offsetHeight);
             const reservedSummaryHeight = Math.min(requiredSummaryHeight, availableSummaryHeight);
             summary.style.zoom = String(reservedSummaryHeight / Math.max(1, requiredSummaryHeight));
             summaryViewport.style.height = `${reservedSummaryHeight}px`;
             summaryViewport.style.flex = `0 0 ${reservedSummaryHeight}px`;
+            tableWrap.style.setProperty("min-height", `${tableHeight}px`, "important");
+            tableWrap.style.flex = "1 1 0";
             return;
         }
 
@@ -4419,7 +4438,7 @@
         const contentRect = content.getBoundingClientRect();
         const availableHeight = Math.max(1, bodyRect.bottom - contentRect.top);
         const requiredHeight = Math.max(content.scrollHeight, content.offsetHeight);
-        content.style.zoom = String(Math.max(0.72, Math.min(1, availableHeight / Math.max(1, requiredHeight))));
+        content.style.zoom = String(Math.min(1, availableHeight / Math.max(1, requiredHeight)));
     }
 
     function pauseWindowActivity() {
@@ -4963,6 +4982,219 @@
                     #nfc-faction-wrapper #nfc-content .ntc-war-target-table td {
                         padding: 3px 2px !important;
                         font-size: 8px !important;
+                    }
+                }
+                /* Faction General and FFScouter have compact portrait modes.  Their
+                   summaries are deliberately compacted before the player table gives
+                   up its useful viewport, and the only vertical scroller remains the
+                   player list itself. */
+                #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout {
+                    display:grid;
+                    gap:8px;
+                    min-height:0;
+                    width:100%;
+                }
+                #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout > * {
+                    min-height:0;
+                    max-width:100%;
+                }
+                @container (max-width: 430px) {
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout {
+                        gap:6px;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-summary-grid,
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-contribution-grid {
+                        grid-template-columns:repeat(3,minmax(0,1fr)) !important;
+                        gap:6px !important;
+                        margin-bottom:0 !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-summary-grid .nfc-stat-card {
+                        min-height:58px;
+                        padding:6px 7px;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-contribution-grid .nfc-stat-card {
+                        min-height:50px;
+                        padding:6px 7px;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout .nfc-stat-label {
+                        font-size:8px;
+                        letter-spacing:.04em;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout .nfc-stat-value {
+                        margin-top:2px;
+                        font-size:clamp(12px,4.2cqi,17px);
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-summary-grid .nfc-stat-detail {
+                        margin-top:3px;
+                        font-size:7px;
+                        line-height:1.18;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-contribution-grid .nfc-stat-detail {
+                        display:none;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout .nfc-panel-card {
+                        padding:6px 7px;
+                        margin-bottom:0;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout .nfc-chain-track {
+                        height:7px;
+                        margin:5px 0 4px;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout .nfc-chain-total,
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout .nfc-chain-timers {
+                        font-size:8px;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout .nfc-war-title { font-size:11px; }
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout .nfc-war-tags { margin-top:2px; font-size:9px; }
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout .nfc-war-score { margin:3px 0 5px; font-size:16px; }
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout .nfc-war-track { height:9px; }
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout .nfc-war-marker { top:1px; width:5px; height:5px; }
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout .nfc-war-scoreline { margin-top:4px; font-size:7px; }
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout .nfc-war-note { margin-top:3px; font-size:8px; }
+
+                    #nfc-faction-wrapper #nfc-content .ntc-ffscouter-layout { gap:6px !important; }
+                    #nfc-faction-wrapper #nfc-content .nfc-ffscouter-summary {
+                        padding:6px 7px !important;
+                        gap:5px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-ffscouter-header-row {
+                        align-items:center !important;
+                        gap:5px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-ffscouter-title { font-size:12px; }
+                    #nfc-faction-wrapper #nfc-content .nfc-ffscouter-subtitle {
+                        margin-top:1px;
+                        font-size:8px;
+                        line-height:1.2;
+                        white-space:nowrap;
+                        overflow:hidden;
+                        text-overflow:ellipsis;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-ffscouter-guidance { display:none; }
+                    #nfc-faction-wrapper #nfc-content .nfc-primary-action {
+                        padding:5px 6px;
+                        font-size:8px;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-ffscouter-filter-panel {
+                        gap:4px !important;
+                        padding:5px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-ffscouter-sort-summary {
+                        display:flex !important;
+                        align-items:baseline;
+                        gap:5px;
+                        flex:1 1 100% !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-ffscouter-sort-summary > span { font-size:8px !important; }
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-filter-group {
+                        gap:3px !important;
+                        flex:1 1 46% !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-filter-group--status { flex-basis:100% !important; }
+                    #nfc-faction-wrapper #nfc-content .ntc-war-ff-range {
+                        gap:3px !important;
+                        flex:1 1 46% !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .ntc-war-filter-group-label {
+                        min-width:38px !important;
+                        font-size:8px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .ntc-war-target-filter-option {
+                        gap:2px !important;
+                        padding:2px 4px !important;
+                        font-size:8px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .ntc-war-target-filter-option input {
+                        width:11px !important;
+                        height:11px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content #war-ff-min-input,
+                    #nfc-faction-wrapper #nfc-content #war-ff-max-input {
+                        width:46px !important;
+                        min-width:0 !important;
+                        padding:3px 4px !important;
+                        font-size:8px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .ntc-war-ff-range button {
+                        padding:3px 4px !important;
+                        font-size:8px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-ffscouter-stat-grid {
+                        grid-template-columns:repeat(2,minmax(0,1fr)) !important;
+                        gap:4px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-ffscouter-stat-grid .nfc-stat-card {
+                        min-height:50px !important;
+                        padding:5px 6px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-ffscouter-stat-grid .nfc-stat-value {
+                        margin-top:2px;
+                        font-size:15px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-ffscouter-stat-grid .nfc-stat-detail {
+                        margin-top:2px;
+                        font-size:8px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-table--compact {
+                        font-size:8px !important;
+                        line-height:1.15;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-table--compact .nfc-war-target-sort-header {
+                        padding:4px 6px 4px 2px !important;
+                        font-size:8px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-table--compact .nfc-war-target-column-grip {
+                        margin-right:1px !important;
+                        font-size:7px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-table--compact .nfc-war-target-header-indicator {
+                        font-size:7px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-table--compact td {
+                        padding:4px 3px !important;
+                        font-size:8px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-table--compact .nfc-war-target-player a {
+                        font-size:9px;
+                        line-height:1.1;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-table--compact td div {
+                        font-size:7px !important;
+                        line-height:1.1;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-table--compact .nfc-war-target-ff {
+                        font-size:10px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-table--compact .ntc-attack-button {
+                        padding:4px 3px !important;
+                        font-size:8px !important;
+                    }
+                }
+                @container (max-width: 330px) {
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-table--compact .nfc-war-target-sort-header {
+                        padding:3px 4px 3px 1px !important;
+                        font-size:7px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-table--compact .nfc-war-target-column-grip {
+                        display:inline-block !important;
+                        width:5px;
+                        margin-right:0 !important;
+                        font-size:6px !important;
+                        opacity:.7;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-table--compact td {
+                        padding:3px 2px !important;
+                        font-size:7px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-table--compact .nfc-war-target-player a {
+                        font-size:8px;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-table--compact td div {
+                        font-size:6px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-table--compact .ntc-attack-button {
+                        padding:3px 2px !important;
+                        font-size:7px !important;
                     }
                 }
                 /* A slate light theme keeps contrast without the white glare of the prior palette. */

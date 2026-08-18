@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.9
+// @version      1.0.10
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -21,10 +21,9 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.9";
+    const SCRIPT_VERSION = "1.0.10";
 
     const BASE_URL = "https://api.torn.com/v2/";
-    const TORN_V1_BASE_URL = "https://api.torn.com/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
     const INVENTORY_CATEGORIES = [
         "medical", "drug", "booster", "alcohol",
@@ -774,51 +773,15 @@
         return { results: Array.isArray(response.data) ? response.data : [], limits: response.limits };
     }
 
-    function chunkArray(values, size) {
-        const chunks = [];
-        for (let index = 0; index < values.length; index += size) chunks.push(values.slice(index, index + size));
-        return chunks;
+    async function fetchTornWarStatuses(factionId, apiKey) {
+        const response = await fetchJson(withKey(`${BASE_URL}faction/${factionId}/members`, apiKey));
+        const members = Array.isArray(response?.members) ? response.members : (Array.isArray(response) ? response : []);
+        const statuses = new Map(members.map((member) => [Number(member?.id || 0), member]).filter(([id]) => id > 0));
+        if (!statuses.size) throw new Error("Torn faction member status response was empty.");
+        return statuses;
     }
 
-    function normalizeTornBatchProfiles(payload, requestedIds) {
-        const requested = new Set(requestedIds.map(Number));
-        const profiles = new Map();
-        const add = (candidate, fallbackId) => {
-            const profile = candidate?.profile || candidate;
-            const id = Number(profile?.id || profile?.player_id || fallbackId || 0);
-            if (id > 0 && requested.has(id) && profile && typeof profile === "object") profiles.set(id, profile);
-        };
-        if (Array.isArray(payload)) payload.forEach((entry) => add(entry));
-        const collection = payload?.profiles || payload?.users || payload?.players;
-        if (Array.isArray(collection)) collection.forEach((entry) => add(entry));
-        else if (collection && typeof collection === "object") Object.entries(collection).forEach(([id, entry]) => add(entry, id));
-        if (payload && typeof payload === "object") {
-            Object.entries(payload).forEach(([id, entry]) => {
-                if (/^\d+$/.test(id)) add(entry, id);
-            });
-            add(payload);
-        }
-        return profiles;
-    }
-
-    async function fetchTornWarProfiles(playerIds, apiKey) {
-        const ids = [...new Set(playerIds.map(Number).filter((id) => Number.isInteger(id) && id > 0))];
-        const profiles = new Map();
-        for (const batch of chunkArray(ids, 10)) {
-            const url = new URL(`${TORN_V1_BASE_URL}user/${batch.join(",")}`);
-            url.searchParams.set("selections", "profile");
-            url.searchParams.set("key", apiKey);
-            url.searchParams.set("comment", "NaughtyTornCompanion-WarTargets");
-            const response = await secureCustomFetch(url.toString());
-            const parsed = normalizeTornBatchProfiles(response, batch);
-            parsed.forEach((profile, id) => profiles.set(id, profile));
-            if (parsed.size === 0) throw new Error("Torn batch profile response did not contain player profiles.");
-            if (ids.length > 10) await sleep(150);
-        }
-        return profiles;
-    }
-
-    function buildWarTargets(roster, ffResults, liveProfiles, liveSource = "Torn profile batches") {
+    function buildWarTargets(roster, ffResults, liveProfiles, liveSource = "Torn faction members") {
         const ffById = new Map((Array.isArray(ffResults) ? ffResults : []).map((entry) => [Number(entry?.player_id || 0), entry]));
         return roster.map((member) => {
             const id = Number(member?.id || member?.player_id || 0);
@@ -867,15 +830,16 @@
             }
         }
 
-        let liveProfiles;
-        let liveSource = "Torn profile batches";
+        let liveProfiles = new Map(roster.map((member) => [Number(member.id), member]));
+        let liveSource = "Torn faction members";
         let liveError = "";
-        try {
-            liveProfiles = await fetchTornWarProfiles(playerIds, apiKey);
-        } catch (error) {
-            liveProfiles = new Map(roster.map((member) => [Number(member.id), member]));
-            liveSource = "Torn faction members fallback";
-            liveError = error.message;
+        if (!loadStatic) {
+            try {
+                liveProfiles = await fetchTornWarStatuses(war.oppId, apiKey);
+            } catch (error) {
+                liveSource = "Torn faction members cache";
+                liveError = error.message;
+            }
         }
 
         return {

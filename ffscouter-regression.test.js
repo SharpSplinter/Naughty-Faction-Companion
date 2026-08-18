@@ -39,6 +39,9 @@ assert.match(refresh, /if \(!hasRankedWarStarted\(war\)\)/, "target refresh must
 assert.match(refresh, /const loadStatic = !cacheMatchesWar \|\| !Number\(existing\.staticLookupAttemptedAt \|\| 0\)/, "FFScouter data must be loaded once per Ranked War");
 assert.match(factionFetch, /let warTargets = previousWarTargets \|\| null;/, "ordinary faction refreshes must preserve the static FFScouter snapshot");
 assert.doesNotMatch(factionFetch, /fetchWarTargetData\(/, "ordinary faction refreshes must not trigger FFScouter or target-profile lookups");
+assert.match(source, /async function fetchTornWarStatuses\(factionId, apiKey\)/, "live enemy status must use the Torn faction-members response");
+assert.match(source, /faction\/\$\{factionId\}\/members/, "live enemy status must use Torn v2 faction members");
+assert.doesNotMatch(source, /TORN_V1_BASE_URL/, "legacy Torn v1 profile batches must not be used for live status");
 assert.match(source, /function pauseWindowActivity\(\)/, "minimizing must pause all refresh timers");
 assert.match(source, /function resumeWindowActivity\(\)/, "restoring must resume permitted refresh timers");
 assert.match(source, /if \(state\.isMinimized\) return Promise\.reject/, "request wrappers must block API calls while minimized");

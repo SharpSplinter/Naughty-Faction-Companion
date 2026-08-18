@@ -47,6 +47,9 @@ assert.match(source, /overflow-x: hidden !important/, "widget content must not o
 assert.match(source, /min-inline-size: 0 !important/, "cards and fields must be allowed to shrink with the widget");
 assert.match(source, /max-inline-size: 100% !important/, "cards and fields must remain constrained to the widget width");
 assert.match(source, /Math\.max\(1, Math\.floor\(floors\[i\] \* scale\)\)/, "FFScouter columns must scale below fixed floors at extreme widths");
+assert.match(source, /grid-template-rows: auto auto auto minmax\(0, 1fr\)/, "FFScouter must reserve separate rows for refresh header, section title, tabs, and targets");
+assert.match(source, /scrollbar-width: none/, "FFScouter scrollbars must remain hidden without disabling scrolling");
+assert.match(source, /resizeRenderTimer = setTimeout/, "FFScouter columns must recalculate while the window is being resized");
 
 const defaults = { okay: true, hospitalized: true, traveling: true, online: true, idle: true, offline: true };
 const targets = [

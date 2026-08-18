@@ -1,5 +1,7 @@
 name: Syntax Check
+
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
   pull_request:
@@ -7,6 +9,8 @@ on:
 jobs:
   check-syntax:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     env:
       NODE_OPTIONS: "--no-deprecation" # Hides the punycode deprecation warning
     steps:
@@ -15,7 +19,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
-      - name: Check JavaScript Syntax
+          node-version: 22
+      - name: Check userscript syntax
         run: |
-          node --check "Naughty Torn Companion.user.js"
+          node --check "Naughty Faction Companion.user.js"
+      - name: Run FFScouter regression checks
+        run: node "ffscouter-regression.test.js"

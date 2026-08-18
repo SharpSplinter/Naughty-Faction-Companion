@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.1
+// @version      1.0.2
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.1";
+    const SCRIPT_VERSION = "1.0.2";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const TORN_V1_BASE_URL = "https://api.torn.com/";
@@ -4445,7 +4445,7 @@
                 #nfc-faction-wrapper #nfc-content.ntc-ffscouter-active {
                     flex: 1 1 auto;
                     min-height: 0;
-                    grid-template-rows: auto auto minmax(0, 1fr);
+                    grid-template-rows: auto auto auto minmax(0, 1fr);
                 }
                 #nfc-faction-wrapper #nfc-content.ntc-ffscouter-active .ntc-ffscouter-layout {
                     min-height: 0;
@@ -4499,6 +4499,12 @@
                     width: 100% !important;
                     min-width: 0 !important;
                     max-width: 100% !important;
+                    scrollbar-width: none;
+                    -ms-overflow-style: none;
+                }
+                #nfc-faction-wrapper #nfc-content .ntc-war-target-table-wrap::-webkit-scrollbar {
+                    width: 0;
+                    height: 0;
                 }
                 #nfc-faction-wrapper #nfc-content .ntc-war-target-table {
                     width: 100% !important;
@@ -4651,6 +4657,7 @@
         let resizeStartHeight = 0;
         let resizeCorner = "bottom-left";
         let resizeStartRect = null;
+        let resizeRenderTimer = null;
 
         resizeHandles.forEach((handle) => handle.addEventListener("mousedown", (e) => {
             if (state.isMinimized) return;
@@ -4683,11 +4690,21 @@
             dashboard.style.bottom = "auto";
             dashboard.style.left = `${resizeFromLeft ? resizeStartRect.right - width : resizeStartRect.left}px`;
             dashboard.style.top = `${resizeFromTop ? resizeStartRect.bottom - height : resizeStartRect.top}px`;
+            // CSS container rules scale cards and controls immediately. Re-render at
+            // a modest cadence so FFScouter's calculated column widths keep pace too,
+            // without rebuilding a large target list for every pointer event.
+            clearTimeout(resizeRenderTimer);
+            resizeRenderTimer = setTimeout(() => {
+                resizeRenderTimer = null;
+                if (isResizing) renderTabContent();
+            }, 80);
         });
 
         document.addEventListener("mouseup", () => {
             if (!isResizing) return;
             isResizing = false;
+            clearTimeout(resizeRenderTimer);
+            resizeRenderTimer = null;
             document.body.style.userSelect = "";
             const rect = dashboard.getBoundingClientRect();
             storeCurrentWidgetSize(rect.width, rect.height);

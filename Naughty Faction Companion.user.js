@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.15
+// @version      1.0.16
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -9,6 +9,7 @@
 // @updateURL    https://raw.githubusercontent.com/xf4k31tx/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
 // @downloadURL  https://raw.githubusercontent.com/xf4k31tx/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
 // @grant        GM_xmlhttpRequest
+// @grant        GM.info
 // @grant        GM.getValue
 // @grant        GM.setValue
 // @connect      api.torn.com
@@ -21,7 +22,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.15";
+    const SCRIPT_VERSION = "1.0.16";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -39,41 +40,72 @@
     ]);
 
     // --- Device / environment detection ---
-    // IS_TORN_PDA: the Torn PDA app injects window.flutter_inappwebview as the bridge
-    // to its native GM/HTTP shims (see GMforPDA.user.js) — its presence is a reliable
-    // PDA signal regardless of viewport size (PDA also runs on tablets).
-    const IS_TORN_PDA = typeof window.flutter_inappwebview !== "undefined";
-    const IS_TOUCH_DEVICE = ("ontouchstart" in window) || (Number(navigator.maxTouchPoints) > 0);
-    const MOBILE_VIEWPORT_BREAKPOINT = 700;
-    function isMobileViewport() {
-        return window.innerWidth <= MOBILE_VIEWPORT_BREAKPOINT;
-    }
-    // Used only to pick sensible FIRST-RUN defaults (minimized + corner snap).
-    // Deliberately narrower than the responsive-layout check below: a desktop user
-    // who just has a narrow browser window shouldn't get treated as "on mobile".
-    function isMobileEnvironment() {
-        return IS_TORN_PDA || (IS_TOUCH_DEVICE && isMobileViewport());
-    }
-    // Estimated height of Torn's own top icon row (search/scouter/clock/messages/avatar)
-    // plus any browser chrome above it, so the widget doesn't open overlapping it. This is
-    // an estimate, not a measurement — Torn's page doesn't have a script-accessible stable
-    // selector we can measure reliably, so if it doesn't clear the icon row cleanly on a
-    // given device/zoom level, adjust this constant.
-    const MOBILE_TOP_OFFSET_PX = 60;
+    // TornPDA documents two reliable signals: GM.info.scriptHandler and its native
+    // `isTornPDA` bridge handler. The bridge is only called after it is available.
+    // Touch support and a narrow viewport intentionally do NOT identify a browser as PDA.
+    const TORN_PDA_UA_PATTERN = /\bTorn(?:[\s_-])?PDA\b/i;
+    const TORN_PDA_HANDLER_PATTERN = /\btorn\s*pda\b/i;
+    const MOBILE_TOP_OFFSET_PX = 12;
+    const RUNTIME_GLOBAL_KEY = "__NAUGHTY_FACTION_COMPANION_RUNTIME__";
 
-    // Logged on every boot — useful for confirming which environment was detected
-    // when live-testing inside Torn PDA or a mobile browser.
-    // Check the browser/userscript console (or Torn PDA's in-app log) for this line.
-    const _envDebug = () => debugLog("[NTC] Environment detection", {
-        IS_TORN_PDA,
-        IS_TOUCH_DEVICE,
-        viewportWidth: window.innerWidth,
-        isMobileViewport: isMobileViewport(),
-        isMobileEnvironment: isMobileEnvironment(),
-        userAgent: navigator.userAgent
-    });
-    // debugLog is defined further down the script — defer so it's available at call time.
-    setTimeout(_envDebug, 0);
+    function getTornPDABridge() {
+        const bridge = window.flutter_inappwebview;
+        return bridge && typeof bridge.callHandler === "function" ? bridge : null;
+    }
+
+    function getScriptHandlerName() {
+        try {
+            if (typeof GM !== "undefined" && GM?.info?.scriptHandler) return String(GM.info.scriptHandler);
+        } catch (e) { /* The userscript manager may not expose GM.info. */ }
+        try {
+            if (typeof GM_info !== "undefined" && GM_info?.scriptHandler) return String(GM_info.scriptHandler);
+        } catch (e) { /* The legacy helper may not be available. */ }
+        return "";
+    }
+
+    function getViewportMetrics() {
+        const visualViewport = window.visualViewport;
+        const width = Math.max(1, Math.round(visualViewport?.width || window.innerWidth || document.documentElement?.clientWidth || 1));
+        const height = Math.max(1, Math.round(visualViewport?.height || window.innerHeight || document.documentElement?.clientHeight || 1));
+        return {
+            width,
+            height,
+            aspectRatio: Number((width / height).toFixed(3)),
+            orientation: width >= height ? "landscape" : "portrait"
+        };
+    }
+
+    function createRuntimeState() {
+        const userAgent = String(navigator.userAgent || "");
+        const scriptHandler = getScriptHandlerName();
+        const hasPDAUserAgent = TORN_PDA_UA_PATTERN.test(userAgent);
+        const hasPDAScriptHandler = TORN_PDA_HANDLER_PATTERN.test(scriptHandler);
+        const bridgeCandidate = !!getTornPDABridge();
+        const isTornPDA = hasPDAUserAgent || hasPDAScriptHandler;
+        return {
+            platform: isTornPDA ? "tornpda" : (bridgeCandidate ? "pda-pending" : "desktop"),
+            isTornPDA,
+            pdaCandidate: isTornPDA || bridgeCandidate,
+            source: hasPDAUserAgent ? "user-agent" : (hasPDAScriptHandler ? "gm-info" : (bridgeCandidate ? "native-check-pending" : "desktop")),
+            nativeChecked: false,
+            nativeCheckInFlight: false,
+            hasPDAUserAgent,
+            hasPDAScriptHandler,
+            hasPDABridge: bridgeCandidate,
+            scriptHandler,
+            viewport: getViewportMetrics()
+        };
+    }
+
+    const initialRuntime = createRuntimeState();
+
+    function isTornPDAEnvironment() {
+        return state?.runtime?.isTornPDA ?? initialRuntime.isTornPDA;
+    }
+
+    function isTornPDACandidate() {
+        return state?.runtime?.pdaCandidate ?? initialRuntime.pdaCandidate;
+    }
 
     // Legacy localStorage keys — read once during migration, then never touched again.
     const LEGACY_STORAGE = {
@@ -134,6 +166,7 @@
     };
 
     const state = {
+        runtime: { ...initialRuntime },
         sortState: { key: "value", direction: "desc" },
         warTargetSort: { key: "status", direction: "asc" },
         warTargetFilters: { ...WAR_TARGET_FILTER_DEFAULTS },
@@ -253,6 +286,116 @@
             console.log("[Torn Companion]", ...args);
         }
     };
+
+    let safeAreaProbe = null;
+
+    function getSafeAreaInsets() {
+        if (!document.body) return { top: 0, right: 0, bottom: 0, left: 0 };
+        if (!safeAreaProbe || !safeAreaProbe.isConnected) {
+            safeAreaProbe = document.createElement("div");
+            safeAreaProbe.id = "nfc-safe-area-probe";
+            safeAreaProbe.setAttribute("aria-hidden", "true");
+            safeAreaProbe.style.cssText = "position:fixed;inset:0;visibility:hidden;pointer-events:none;padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px);";
+            document.body.appendChild(safeAreaProbe);
+        }
+        const style = window.getComputedStyle(safeAreaProbe);
+        const read = (name) => Math.max(0, Number.parseFloat(style.getPropertyValue(name)) || 0);
+        return {
+            top: read("padding-top"),
+            right: read("padding-right"),
+            bottom: read("padding-bottom"),
+            left: read("padding-left")
+        };
+    }
+
+    function getWidgetViewportBounds() {
+        const viewport = getViewportMetrics();
+        const usePDAInsets = isTornPDACandidate();
+        const safeArea = usePDAInsets ? getSafeAreaInsets() : { top: 0, right: 0, bottom: 0, left: 0 };
+        const margin = usePDAInsets ? 6 : 0;
+        return {
+            ...viewport,
+            safeArea,
+            margin,
+            minLeft: safeArea.left + margin,
+            minTop: safeArea.top + margin,
+            maxRight: Math.max(safeArea.left + margin, viewport.width - safeArea.right - margin),
+            maxBottom: Math.max(safeArea.top + margin, viewport.height - safeArea.bottom - margin)
+        };
+    }
+
+    function publishRuntimeState() {
+        const viewport = getViewportMetrics();
+        state.runtime = { ...state.runtime, viewport };
+        const dashboard = state.dashboard;
+        if (dashboard) {
+            dashboard.dataset.runtime = state.runtime.platform;
+            dashboard.dataset.orientation = viewport.orientation;
+            dashboard.dataset.minimized = String(state.isMinimized);
+            dashboard.style.setProperty("--nfc-runtime-width", `${viewport.width}px`);
+            dashboard.style.setProperty("--nfc-runtime-height", `${viewport.height}px`);
+        }
+        window[RUNTIME_GLOBAL_KEY] = Object.freeze({
+            platform: state.runtime.platform,
+            isTornPDA: state.runtime.isTornPDA,
+            pdaCandidate: state.runtime.pdaCandidate,
+            source: state.runtime.source,
+            nativeChecked: state.runtime.nativeChecked,
+            viewport,
+            scriptHandler: state.runtime.scriptHandler
+        });
+    }
+
+    function setRuntimePlatform(isTornPDA, source, nativeChecked = false) {
+        const confirmed = Boolean(isTornPDA);
+        state.runtime = {
+            ...state.runtime,
+            platform: confirmed ? "tornpda" : "desktop",
+            isTornPDA: confirmed,
+            pdaCandidate: confirmed || (nativeChecked ? false : state.runtime.pdaCandidate),
+            source,
+            nativeChecked,
+            nativeCheckInFlight: false,
+            hasPDABridge: !!getTornPDABridge()
+        };
+        publishRuntimeState();
+        debugLog("[NFC] Runtime detection", window[RUNTIME_GLOBAL_KEY]);
+        if (!state.dashboard) return;
+        applyCurrentWidgetSize();
+        applyWidgetPosition();
+        requestAnimationFrame(() => {
+            fitCurrentContentToWidget();
+            renderTabContent();
+        });
+    }
+
+    function requestTornPDAConfirmation() {
+        const bridge = getTornPDABridge();
+        if (!bridge || state.runtime.nativeCheckInFlight || state.runtime.nativeChecked) return;
+        state.runtime.nativeCheckInFlight = true;
+        Promise.resolve(bridge.callHandler("isTornPDA"))
+            .then((response) => {
+                const confirmed = response === true || response?.isTornPDA === true || response?.is_torn_pda === true;
+                setRuntimePlatform(confirmed || state.runtime.isTornPDA, "native-handler", true);
+            })
+            .catch((error) => {
+                state.runtime.nativeCheckInFlight = false;
+                debugLog("[NFC] TornPDA native check deferred", error);
+            });
+    }
+
+    function registerTornPDARuntimeDetection() {
+        const confirm = () => requestTornPDAConfirmation();
+        window.addEventListener("flutterInAppWebViewPlatformReady", confirm, { once: true });
+        if (getTornPDABridge()) setTimeout(confirm, 0);
+        publishRuntimeState();
+    }
+
+    // Logged on every boot and exposed as window.__NAUGHTY_FACTION_COMPANION_RUNTIME__
+    // so TornPDA/desktop results can be confirmed without guessing from viewport width.
+    const _envDebug = () => debugLog("[NFC] Environment detection", window[RUNTIME_GLOBAL_KEY]);
+    setTimeout(_envDebug, 0);
+
     const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
         '&': '&amp;',
         '<': '&lt;',
@@ -542,20 +685,16 @@
             ? dashboardState.windowSizes
             : {};
 
-        // First-run default for mobile/Torn PDA: start minimized and snapped to the
-        // top-right corner, rather than opening full-size over the page content.
+        // First-run default for confirmed (or native-check-pending) TornPDA: start
+        // minimized and snapped to the top-right rather than covering Torn's page.
         // Only applies when nothing has ever been saved before (a genuine first run) —
         // once a user has moved/resized/expanded the widget, their choice is respected
         // on every later load regardless of device.
         const isFirstEverRun = state.widgetPosition === null && dashboardState.isMinimized === undefined;
-        if (isFirstEverRun && isMobileEnvironment()) {
+        if (isFirstEverRun && isTornPDACandidate()) {
             state.isMinimized = true;
-            // edge:"right" + y:MOBILE_TOP_OFFSET_PX pins the widget to the top-right,
-            // just below Torn's own top icon row — applyWidgetPosition() sets
-            // style.right="0" and style.top=`${MOBILE_TOP_OFFSET_PX}px` for this combo.
-            // Combined with normalizeWidgetSize()'s mobile-default full width, this also
-            // makes the widget span (near) edge-to-edge once expanded, not just the
-            // collapsed pill.
+            // The top offset is deliberately small; safe-area insets are measured at
+            // runtime so phones with a notch or rounded corners keep the badge reachable.
             state.widgetPosition = { edge: "right", x: null, y: MOBILE_TOP_OFFSET_PX };
         }
 
@@ -3132,6 +3271,9 @@
         const dialogBackground = state.theme === "light" ? "#f7f9fc" : "#17191d";
         const dialogText = state.theme === "light" ? "#17202b" : "#f1f3f5";
         const dialogMuted = state.theme === "light" ? "#536170" : "#aeb7c2";
+        const runtimeViewport = state.runtime.viewport || getViewportMetrics();
+        const runtimeLabel = state.runtime.isTornPDA ? "TornPDA" : (state.runtime.pdaCandidate && !state.runtime.nativeChecked ? "Checking TornPDA…" : "Desktop");
+        const runtimeDetail = `${runtimeViewport.orientation} · ${runtimeViewport.width}×${runtimeViewport.height}`;
         const exportMarkup = snapshotButtons.map(({ key, label }) => `
             <button data-export-section="${key}" style="background: #2f5d3d; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Download ${label} to .csv</button>
         `).join("");
@@ -3154,11 +3296,12 @@
                     <div style="border: 1px solid #3d3d3d; border-radius: 6px; padding: 10px; display: grid; gap: 7px;">
                         <div style="color: #fff; font-weight: 700; font-size: 12px;">Appearance</div>
                         <div style="color: #aaa; font-size: 11px;">Current mode: ${state.theme === "light" ? "Light" : "Dark"}</div>
+                        <div class="nfc-runtime-indicator" title="Runtime detection uses TornPDA's GM.info/native bridge signals, not touch or screen width."><span>Runtime</span><strong>${runtimeLabel}</strong><em>${escapeHtml(runtimeDetail)}</em></div>
                         <button id="theme-toggle-btn" style="background: #3b5998; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Switch to ${state.theme === "light" ? "Dark" : "Light"} Mode</button>
                     </div>
                     <div style="border: 1px solid #3d3d3d; border-radius: 6px; padding: 10px; display: grid; gap: 7px;">
                         <div style="color: #fff; font-weight: 700; font-size: 12px;">Window</div>
-                        <div style="color: #aaa; font-size: 11px; line-height: 1.4;">Clears every saved size and position for every tab, and re-applies the default layout for this device (full-width below the icon row on mobile/PDA, a floating panel on desktop).</div>
+                        <div style="color: #aaa; font-size: 11px; line-height: 1.4;">Clears every saved size and position for every tab, then re-applies the default layout for this device (the safe visual viewport in TornPDA, a floating panel on desktop).</div>
                         <button id="reset-window-size-btn" style="background: #a13b3b; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Reset Window Size &amp; Position</button>
                     </div>
                     <div style="color: #fff; font-weight: 700; font-size: 12px;">Naughty Faction Companion · Torn API Key</div>
@@ -3453,18 +3596,18 @@
             resetWindowButton.dataset.bound = "true";
             resetWindowButton.onclick = () => {
                 // Clears every saved per-tab size, so normalizeWidgetSize() falls back to
-                // its defaults again (mobile: full width + height below the icon row;
-                // desktop: the standard ~480px floating panel) — same mechanism as a
+                // its defaults again (TornPDA: safe visual viewport; desktop: standard
+                // ~480px floating panel) — same mechanism as a
                 // genuine first run, just re-triggerable on demand instead of only once.
                 state.windowSizes = {};
                 setStoredDashboardState({ windowSizes: state.windowSizes });
-                const defaultPosition = isMobileEnvironment()
+                const defaultPosition = isTornPDACandidate()
                     ? { edge: "right", x: null, y: MOBILE_TOP_OFFSET_PX }
                     : { edge: "right", x: null, y: 20 };
                 setStoredPosition(defaultPosition);
                 applyCurrentWidgetSize();
                 applyWidgetPosition();
-                debugLog("Window size & position reset to defaults", { isMobileEnvironment: isMobileEnvironment(), defaultPosition });
+                debugLog("Window size & position reset to defaults", { isTornPDA: isTornPDAEnvironment(), defaultPosition });
                 renderTabContent();
             };
         }
@@ -4114,14 +4257,15 @@
         if (!dashboard) return;
         const isLight = state.theme === "light";
         dashboard.dataset.theme = isLight ? "light" : "dark";
-        dashboard.style.backgroundColor = isLight ? "#f7fafc" : "rgba(18, 23, 32, 0.98)";
-        dashboard.style.borderColor = isLight ? "#cbd5e1" : "#34445e";
-        dashboard.style.boxShadow = isLight ? "0 12px 32px rgba(15,23,42,0.16)" : "0 12px 32px rgba(0,0,0,0.5)";
+        dashboard.style.backgroundColor = isLight ? "#c8d1dc" : "rgba(18, 23, 32, 0.98)";
+        dashboard.style.borderColor = isLight ? "#718197" : "#34445e";
+        dashboard.style.boxShadow = isLight ? "0 12px 32px rgba(15,23,42,0.24)" : "0 12px 32px rgba(0,0,0,0.5)";
     }
 
     const getWidgetSizeLimits = () => {
-        const maxWidth = Math.max(120, window.innerWidth - 40);
-        const maxHeight = Math.max(120, window.innerHeight - 20);
+        const bounds = getWidgetViewportBounds();
+        const maxWidth = Math.max(120, bounds.maxRight - bounds.minLeft);
+        const maxHeight = Math.max(120, bounds.maxBottom - bounds.minTop);
         return {
             minWidth: Math.min(380, maxWidth),
             minHeight: Math.min(620, maxHeight),
@@ -4136,17 +4280,14 @@
         const height = Number(size.height);
         const hasStoredWidth = Number.isFinite(width);
         const hasStoredHeight = Number.isFinite(height);
-        // Desktop default: a modest 480px-ish floating panel, ~80% of viewport height.
-        // Mobile/PDA default (only when nothing has been saved yet for this tab — a real
-        // stored size, including one the user manually shrank, is always respected):
-        // fill the available width and the height remaining below Torn's own top icon
-        // row, since a small floating panel doesn't leave room for tables like the
-        // FFScouter war-target list to show all their columns.
+        // Desktop default: a modest 480px floating panel, ~80% of viewport height.
+        // TornPDA's first opening uses the safe visual viewport. A real stored size is
+        // still respected, but is clamped in real time on rotation/keyboard changes.
         let defaultWidth = 480;
-        let defaultHeight = Math.min(720, Math.round(window.innerHeight * 0.8));
-        if (isMobileEnvironment() && (!hasStoredWidth || !hasStoredHeight)) {
+        let defaultHeight = Math.min(720, Math.round(getViewportMetrics().height * 0.8));
+        if (isTornPDACandidate() && (!hasStoredWidth || !hasStoredHeight)) {
             defaultWidth = limits.maxWidth;
-            defaultHeight = Math.max(limits.minHeight, window.innerHeight - MOBILE_TOP_OFFSET_PX - 12);
+            defaultHeight = limits.maxHeight;
         }
         return {
             width: Math.min(limits.maxWidth, Math.max(limits.minWidth, hasStoredWidth ? width : defaultWidth)),
@@ -4187,39 +4328,41 @@
     function applyWidgetPosition(position = getStoredPosition()) {
         const dashboard = state.dashboard;
         if (!dashboard) return;
+        const bounds = getWidgetViewportBounds();
         const rect = dashboard.getBoundingClientRect();
         const edge = ["left", "right", "top", "bottom"].includes(position?.edge) ? position.edge : "right";
         const requestedX = Number(position?.x ?? rect.left);
         const requestedY = Number(position?.y ?? position?.top ?? rect.top);
-        const maxLeft = Math.max(0, window.innerWidth - rect.width);
-        const maxTop = Math.max(0, window.innerHeight - rect.height);
-        const left = Math.min(Math.max(requestedX, 0), maxLeft);
-        const top = Math.min(Math.max(requestedY, 0), maxTop);
+        const maxLeft = Math.max(bounds.minLeft, bounds.maxRight - rect.width);
+        const maxTop = Math.max(bounds.minTop, bounds.maxBottom - rect.height);
+        const left = Math.min(Math.max(requestedX, bounds.minLeft), maxLeft);
+        const top = Math.min(Math.max(requestedY, bounds.minTop), maxTop);
         dashboard.style.left = "auto";
         dashboard.style.right = "auto";
         dashboard.style.top = "auto";
         dashboard.style.bottom = "auto";
         if (edge === "left") {
-            dashboard.style.left = "0";
+            dashboard.style.left = `${bounds.minLeft}px`;
             dashboard.style.top = `${top}px`;
         } else if (edge === "right") {
-            dashboard.style.right = "0";
+            dashboard.style.right = `${bounds.safeArea.right + bounds.margin}px`;
             dashboard.style.top = `${top}px`;
         } else if (edge === "top") {
-            dashboard.style.top = "0";
+            dashboard.style.top = `${bounds.minTop}px`;
             dashboard.style.left = `${left}px`;
         } else {
-            dashboard.style.bottom = "0";
+            dashboard.style.bottom = `${bounds.safeArea.bottom + bounds.margin}px`;
             dashboard.style.left = `${left}px`;
         }
     }
 
     function getNearestWidgetEdge(rect) {
+        const bounds = getWidgetViewportBounds();
         const distances = {
-            left: Math.max(0, rect.left),
-            right: Math.max(0, window.innerWidth - rect.right),
-            top: Math.max(0, rect.top),
-            bottom: Math.max(0, window.innerHeight - rect.bottom)
+            left: Math.max(0, rect.left - bounds.minLeft),
+            right: Math.max(0, bounds.maxRight - rect.right),
+            top: Math.max(0, rect.top - bounds.minTop),
+            bottom: Math.max(0, bounds.maxBottom - rect.bottom)
         };
         return Object.entries(distances).sort((a, b) => a[1] - b[1])[0][0];
     }
@@ -4299,6 +4442,7 @@
     function applyWidgetView() {
         const dashboard = state.dashboard;
         if (!dashboard) return;
+        dashboard.dataset.minimized = String(state.isMinimized);
         const widgetBody = dashboard.querySelector("#nfc-main-body");
         const dragHandle = dashboard.querySelector("#nfc-drag-handle");
         const title = dashboard.querySelector("#nfc-title");
@@ -4821,6 +4965,161 @@
                         font-size: 8px !important;
                     }
                 }
+                /* A slate light theme keeps contrast without the white glare of the prior palette. */
+                #nfc-faction-wrapper[data-theme="light"] #nfc-drag-handle {
+                    background: linear-gradient(90deg, #b8c4d1, #d5dde6) !important;
+                    border-bottom-color: #718197 !important;
+                }
+                #nfc-faction-wrapper[data-theme="light"] #nfc-main-body {
+                    background: linear-gradient(180deg, #c8d1dc, #b8c3d0) !important;
+                }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-primary-nav,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-section-meta,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-stat-card,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-panel-card,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-ffscouter-summary,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-settings-layout [style*="#3d3d3d"],
+                #nfc-faction-wrapper[data-theme="light"] .ntc-perk-section,
+                #nfc-faction-wrapper[data-theme="light"] .ntc-perk-item {
+                    background: linear-gradient(145deg, #e0e6ed, #cfd8e2) !important;
+                    border-color: #8191a4 !important;
+                    box-shadow: inset 0 1px rgba(255,255,255,.32), 0 1px 2px rgba(15,23,42,.10) !important;
+                }
+                #nfc-faction-wrapper[data-theme="light"] [style*="rgba(20,20,20"],
+                #nfc-faction-wrapper[data-theme="light"] [style*="rgba(255,255,255,0.02)"],
+                #nfc-faction-wrapper[data-theme="light"] [style*="linear-gradient(180deg"],
+                #nfc-faction-wrapper[data-theme="light"] [style*="background-color: #151515"],
+                #nfc-faction-wrapper[data-theme="light"] [style*="background: #111"] {
+                    background: #dbe2ea !important;
+                    border-color: #8191a4 !important;
+                }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-tab,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-subtab,
+                #nfc-faction-wrapper[data-theme="light"] .ntc-war-ff-range button {
+                    background: #c5d0dc !important;
+                    border-color: #75869a !important;
+                    color: #142033 !important;
+                }
+                #nfc-faction-wrapper[data-theme="light"] input,
+                #nfc-faction-wrapper[data-theme="light"] .ntc-war-target-filter-panel,
+                #nfc-faction-wrapper[data-theme="light"] .ntc-war-target-filter-option {
+                    background: #e7ecf1 !important;
+                    border-color: #75869a !important;
+                    color: #142033 !important;
+                }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-table-shell { background:#d9e1e9 !important; border-color:#75869a !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-head { background:#b7c5d4 !important; color:#142033 !important; border-color:#718197 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-row,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-row:nth-child(even) { background:#e2e8ee !important; border-color:#b0bdca !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-row:nth-child(even) { background:#d7e0e9 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-row:hover { background:#c8d7e6 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-chain-track { background:#bfcbd7 !important; border-color:#75869a !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-track { background:linear-gradient(90deg,rgba(47,125,76,.28),#bfcbd7 50%,rgba(47,125,76,.28)) !important; border-color:#75869a !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-notice-card { background:#eadab6 !important; border-color:#a27e32 !important; color:#513c11 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-card-title,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-title,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-ffscouter-title,
+                #nfc-faction-wrapper[data-theme="light"] .ntc-war-filter-heading { color:#142033 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-stat-label,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-stat-detail,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-info-label,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-chain-timers,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-note,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-ffscouter-subtitle,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-ffscouter-guidance,
+                #nfc-faction-wrapper[data-theme="light"] .ntc-war-filter-group-label { color:#34465d !important; }
+                #nfc-faction-wrapper .nfc-runtime-indicator {
+                    display:flex;
+                    align-items:center;
+                    flex-wrap:wrap;
+                    gap:5px;
+                    width:max-content;
+                    max-width:100%;
+                    padding:5px 7px;
+                    border:1px solid #466381;
+                    border-radius:999px;
+                    background:rgba(39,72,108,.22);
+                    color:#bdd8f7;
+                    font-size:10px;
+                    line-height:1.2;
+                }
+                #nfc-faction-wrapper .nfc-runtime-indicator span { font-weight:700; opacity:.82; }
+                #nfc-faction-wrapper .nfc-runtime-indicator strong { color:#8fdaaa; font-weight:850; }
+                #nfc-faction-wrapper .nfc-runtime-indicator em { color:#b8c8d9; font-style:normal; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-runtime-indicator { background:#c4d0dc; border-color:#718197; color:#283a50; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-runtime-indicator strong { color:#1f6a40; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-runtime-indicator em { color:#43566d; }
+
+                /* TornPDA and a native-check-pending WebView use the safe visual viewport,
+                   enlarged touch targets, and a single vertical-scroll region (the target table). */
+                #nfc-faction-wrapper[data-runtime="tornpda"],
+                #nfc-faction-wrapper[data-runtime="pda-pending"] {
+                    box-sizing:border-box;
+                    border-radius:14px;
+                    overscroll-behavior:contain;
+                    -webkit-tap-highlight-color:transparent;
+                    touch-action:manipulation;
+                }
+                #nfc-faction-wrapper[data-runtime="tornpda"][data-minimized="false"] #nfc-drag-handle,
+                #nfc-faction-wrapper[data-runtime="pda-pending"][data-minimized="false"] #nfc-drag-handle {
+                    min-height:44px;
+                    padding:9px 10px;
+                    touch-action:none;
+                }
+                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-title,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-title { font-size:clamp(12px,3.2vw,14px); }
+                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-toggle-view-btn,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-toggle-view-btn {
+                    width:44px;
+                    height:36px;
+                    flex:0 0 44px;
+                    font-size:21px;
+                }
+                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-main-body,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-main-body { padding:8px !important; overscroll-behavior:contain; }
+                #nfc-faction-wrapper[data-runtime="tornpda"] .nfc-primary-nav,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] .nfc-primary-nav { gap:6px; padding:6px; margin-bottom:8px; }
+                #nfc-faction-wrapper[data-runtime="tornpda"] .nfc-tab,
+                #nfc-faction-wrapper[data-runtime="tornpda"] .nfc-subtab,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] .nfc-tab,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] .nfc-subtab {
+                    min-height:36px;
+                    padding:7px 10px;
+                    flex:1 1 auto;
+                    text-align:center;
+                }
+                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-content button,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-content button { min-height:34px; }
+                #nfc-faction-wrapper[data-runtime="tornpda"] .ntc-war-target-filter-option,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] .ntc-war-target-filter-option { min-height:28px; padding:4px 7px !important; }
+                #nfc-faction-wrapper[data-runtime="tornpda"] .ntc-war-target-filter-option input,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] .ntc-war-target-filter-option input { width:15px !important; height:15px !important; }
+                #nfc-faction-wrapper[data-runtime="tornpda"] #war-ff-min-input,
+                #nfc-faction-wrapper[data-runtime="tornpda"] #war-ff-max-input,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] #war-ff-min-input,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] #war-ff-max-input { min-height:30px; }
+                #nfc-faction-wrapper[data-runtime="tornpda"] .nfc-resize-handle,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] .nfc-resize-handle { width:30px !important; height:30px !important; }
+                #nfc-faction-wrapper[data-runtime="tornpda"] .ntc-war-target-table-wrap,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] .ntc-war-target-table-wrap {
+                    min-height:170px !important;
+                    overflow-y:auto !important;
+                    overflow-x:hidden !important;
+                    overscroll-behavior:contain;
+                    -webkit-overflow-scrolling:touch;
+                }
+                #nfc-faction-wrapper[data-runtime="tornpda"] .ntc-attack-button,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] .ntc-attack-button { min-height:30px; padding:5px 6px !important; }
+                @container (max-width: 390px) {
+                    #nfc-faction-wrapper[data-runtime="tornpda"] .nfc-section-meta,
+                    #nfc-faction-wrapper[data-runtime="pda-pending"] .nfc-section-meta { align-items:flex-start; flex-direction:column; gap:3px; }
+                    #nfc-faction-wrapper[data-runtime="tornpda"] .nfc-section-status,
+                    #nfc-faction-wrapper[data-runtime="pda-pending"] .nfc-section-status { width:100%; text-align:left; }
+                    #nfc-faction-wrapper[data-runtime="tornpda"] .ntc-war-target-table th,
+                    #nfc-faction-wrapper[data-runtime="tornpda"] .ntc-war-target-table td,
+                    #nfc-faction-wrapper[data-runtime="pda-pending"] .ntc-war-target-table th,
+                    #nfc-faction-wrapper[data-runtime="pda-pending"] .ntc-war-target-table td { padding:4px 2px !important; }
+                }
                 .nfc-resize-handle::after {
                     content: "";
                     position: absolute;
@@ -4862,6 +5161,7 @@
 
         document.body.appendChild(dashboard);
         state.dashboard = dashboard;
+        publishRuntimeState();
         applyDashboardTheme();
         applyWidgetView();
 
@@ -4877,15 +5177,25 @@
         });
 
         const dragHandle = document.getElementById("nfc-drag-handle");
+        const interactionEvents = typeof window.PointerEvent === "function"
+            ? { down: "pointerdown", move: "pointermove", up: "pointerup", cancel: "pointercancel" }
+            : { down: "mousedown", move: "mousemove", up: "mouseup", cancel: null };
+        const isPrimaryInteraction = (event) => event.isPrimary !== false && !(event.pointerType === "mouse" && event.button !== 0);
+        const eventMatchesPointer = (event, pointerId) => pointerId === null || typeof event.pointerId !== "number" || event.pointerId === pointerId;
         let isDragging = false;
         let didDrag = false;
         let offsetX;
         let offsetY;
+        let dragPointerId = null;
 
-        dragHandle.addEventListener("mousedown", (e) => {
+        dragHandle.addEventListener(interactionEvents.down, (e) => {
+            if (!isPrimaryInteraction(e)) return;
             if (e.target.closest("#nfc-toggle-view-btn")) return;
+            e.preventDefault();
             isDragging = true;
             didDrag = false;
+            dragPointerId = typeof e.pointerId === "number" ? e.pointerId : null;
+            if (dragPointerId !== null && dashboard.setPointerCapture) dashboard.setPointerCapture(dragPointerId);
             const rect = dashboard.getBoundingClientRect();
             offsetX = e.clientX - rect.left;
             offsetY = e.clientY - rect.top;
@@ -4895,18 +5205,21 @@
             dashboard.style.top = `${rect.top}px`;
         });
 
-        document.addEventListener("mousemove", (e) => {
-            if (!isDragging) return;
+        document.addEventListener(interactionEvents.move, (e) => {
+            if (!isDragging || !eventMatchesPointer(e, dragPointerId)) return;
+            e.preventDefault();
             didDrag = true;
-            const maxLeft = Math.max(0, window.innerWidth - dashboard.offsetWidth);
-            const maxTop = Math.max(0, window.innerHeight - dashboard.offsetHeight);
-            const left = Math.min(Math.max(e.clientX - offsetX, 0), maxLeft);
-            const top = Math.min(Math.max(e.clientY - offsetY, 0), maxTop);
+            const bounds = getWidgetViewportBounds();
+            const maxLeft = Math.max(bounds.minLeft, bounds.maxRight - dashboard.offsetWidth);
+            const maxTop = Math.max(bounds.minTop, bounds.maxBottom - dashboard.offsetHeight);
+            const left = Math.min(Math.max(e.clientX - offsetX, bounds.minLeft), maxLeft);
+            const top = Math.min(Math.max(e.clientY - offsetY, bounds.minTop), maxTop);
             dashboard.style.left = `${left}px`;
             dashboard.style.top = `${top}px`;
-        });
+        }, { passive: false });
 
-        document.addEventListener("mouseup", () => {
+        const finishDrag = (e) => {
+            if (!isDragging || !eventMatchesPointer(e, dragPointerId)) return;
             if (isDragging) {
                 const rect = dashboard.getBoundingClientRect();
                 const edge = getNearestWidgetEdge(rect);
@@ -4915,7 +5228,10 @@
                 applyWidgetPosition(position);
             }
             isDragging = false;
-        });
+            dragPointerId = null;
+        };
+        document.addEventListener(interactionEvents.up, finishDrag);
+        if (interactionEvents.cancel) document.addEventListener(interactionEvents.cancel, finishDrag);
 
         dashboard.addEventListener("click", (e) => {
             if (!state.isMinimized || didDrag) return;
@@ -4933,13 +5249,17 @@
         let resizeCorner = "bottom-left";
         let resizeStartRect = null;
         let resizeRenderTimer = null;
+        let resizePointerId = null;
 
-        resizeHandles.forEach((handle) => handle.addEventListener("mousedown", (e) => {
+        resizeHandles.forEach((handle) => handle.addEventListener(interactionEvents.down, (e) => {
             if (state.isMinimized) return;
+            if (!isPrimaryInteraction(e)) return;
             e.preventDefault();
             e.stopPropagation();
             resizeStartRect = dashboard.getBoundingClientRect();
             isResizing = true;
+            resizePointerId = typeof e.pointerId === "number" ? e.pointerId : null;
+            if (resizePointerId !== null && dashboard.setPointerCapture) dashboard.setPointerCapture(resizePointerId);
             resizeStartX = e.clientX;
             resizeStartY = e.clientY;
             resizeStartWidth = resizeStartRect.width;
@@ -4948,23 +5268,25 @@
             document.body.style.userSelect = "none";
         }));
 
-        document.addEventListener("mousemove", (e) => {
-            if (!isResizing) return;
+        document.addEventListener(interactionEvents.move, (e) => {
+            if (!isResizing || !eventMatchesPointer(e, resizePointerId)) return;
+            e.preventDefault();
             const limits = getWidgetSizeLimits();
+            const bounds = getWidgetViewportBounds();
             const resizeFromLeft = resizeCorner.endsWith("left");
             const resizeFromTop = resizeCorner.startsWith("top");
             const widthDelta = resizeFromLeft ? resizeStartX - e.clientX : e.clientX - resizeStartX;
             const heightDelta = resizeFromTop ? resizeStartY - e.clientY : e.clientY - resizeStartY;
-            const maxWidth = Math.min(limits.maxWidth, resizeFromLeft ? resizeStartRect.right : window.innerWidth - resizeStartRect.left);
-            const maxHeight = Math.min(limits.maxHeight, resizeFromTop ? resizeStartRect.bottom : window.innerHeight - resizeStartRect.top);
+            const maxWidth = Math.min(limits.maxWidth, resizeFromLeft ? resizeStartRect.right - bounds.minLeft : bounds.maxRight - resizeStartRect.left);
+            const maxHeight = Math.min(limits.maxHeight, resizeFromTop ? resizeStartRect.bottom - bounds.minTop : bounds.maxBottom - resizeStartRect.top);
             const width = Math.min(maxWidth, Math.max(limits.minWidth, resizeStartWidth + widthDelta));
             const height = Math.min(maxHeight, Math.max(limits.minHeight, resizeStartHeight + heightDelta));
             dashboard.style.width = `${width}px`;
             dashboard.style.height = `${height}px`;
             dashboard.style.right = "auto";
             dashboard.style.bottom = "auto";
-            dashboard.style.left = `${resizeFromLeft ? resizeStartRect.right - width : resizeStartRect.left}px`;
-            dashboard.style.top = `${resizeFromTop ? resizeStartRect.bottom - height : resizeStartRect.top}px`;
+            dashboard.style.left = `${Math.min(Math.max(resizeFromLeft ? resizeStartRect.right - width : resizeStartRect.left, bounds.minLeft), Math.max(bounds.minLeft, bounds.maxRight - width))}px`;
+            dashboard.style.top = `${Math.min(Math.max(resizeFromTop ? resizeStartRect.bottom - height : resizeStartRect.top, bounds.minTop), Math.max(bounds.minTop, bounds.maxBottom - height))}px`;
             fitCurrentContentToWidget();
             // CSS container rules scale cards and controls immediately. Re-render at
             // a modest cadence so FFScouter's calculated column widths keep pace too,
@@ -4974,11 +5296,12 @@
                 resizeRenderTimer = null;
                 if (isResizing) renderTabContent();
             }, 80);
-        });
+        }, { passive: false });
 
-        document.addEventListener("mouseup", () => {
-            if (!isResizing) return;
+        const finishResize = (e) => {
+            if (!isResizing || !eventMatchesPointer(e, resizePointerId)) return;
             isResizing = false;
+            resizePointerId = null;
             clearTimeout(resizeRenderTimer);
             resizeRenderTimer = null;
             document.body.style.userSelect = "";
@@ -4990,27 +5313,40 @@
             // Re-render so width-dependent layouts (e.g. the FFScouter war-target table's
             // responsive column widths) recalculate against the widget's new size.
             renderTabContent();
-        });
+        };
+        document.addEventListener(interactionEvents.up, finishResize);
+        if (interactionEvents.cancel) document.addEventListener(interactionEvents.cancel, finishResize);
 
-        let viewportResizeSaveTimer = null;
-        window.addEventListener("resize", () => {
+        let viewportLayoutTimer = null;
+        let viewportRenderTimer = null;
+        let lastViewport = getViewportMetrics();
+        const syncViewportLayout = () => {
+            const nextViewport = getViewportMetrics();
+            const orientationChanged = nextViewport.orientation !== lastViewport.orientation;
+            const widthChanged = Math.abs(nextViewport.width - lastViewport.width) > 24;
+            lastViewport = nextViewport;
+            publishRuntimeState();
             if (state.isMinimized) {
                 clampWidgetTop();
                 return;
             }
             applyCurrentWidgetSize();
-            clearTimeout(viewportResizeSaveTimer);
-            viewportResizeSaveTimer = setTimeout(() => {
-                const rect = dashboard.getBoundingClientRect();
-                storeCurrentWidgetSize(rect.width, rect.height);
-                const edge = getWidgetEdge();
-                setStoredPosition({ edge, x: rect.left, y: rect.top });
-                // Same reasoning as the corner-resize handler above — window resizes
-                // (browser resize, mobile orientation change) also change how much
-                // room width-dependent layouts have.
-                renderTabContent();
-            }, 150);
-        });
+            clearTimeout(viewportRenderTimer);
+            viewportRenderTimer = setTimeout(() => {
+                fitCurrentContentToWidget();
+                // A keyboard changes visual height but should not destroy a focused field.
+                // Rotations and substantive width changes do need a responsive re-render.
+                if (orientationChanged || widthChanged) renderTabContent();
+            }, 90);
+        };
+        const scheduleViewportLayout = () => {
+            clearTimeout(viewportLayoutTimer);
+            viewportLayoutTimer = setTimeout(syncViewportLayout, 40);
+        };
+        window.addEventListener("resize", scheduleViewportLayout);
+        window.addEventListener("orientationchange", scheduleViewportLayout);
+        window.visualViewport?.addEventListener("resize", scheduleViewportLayout);
+        window.visualViewport?.addEventListener("scroll", scheduleViewportLayout);
 
         dashboard.querySelectorAll(".nfc-tab").forEach((button) => {
             button.addEventListener("click", () => {
@@ -5052,6 +5388,7 @@
     async function bootstrap() {
         await loadPersistedState();
         initializeDOMDashboard();
+        registerTornPDARuntimeDetection();
     }
 
     if (document.readyState === "complete" || document.readyState === "interactive") {

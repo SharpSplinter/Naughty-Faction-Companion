@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.7
+// @version      1.0.9
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.7";
+    const SCRIPT_VERSION = "1.0.9";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const TORN_V1_BASE_URL = "https://api.torn.com/";
@@ -2893,20 +2893,22 @@
 
         return `
             <div class="ntc-ffscouter-layout" style="display:flex;flex-direction:column;gap:9px;min-height:0;height:100%;">
-                <div class="ntc-ffscouter-summary" style="border:1px solid #343a43;border-radius:8px;padding:10px;background:rgba(20,20,20,.72);display:grid;gap:8px;">
-                    <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap;">
-                        <div><div style="color:#fff;font-size:13px;font-weight:850;">${escapeHtml(war.oppTag)} War Targets</div><div style="color:#929eac;font-size:10px;margin-top:2px;">${targets.length} shown / ${allTargets.length} members · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div><div style="color:#697582;font-size:9px;margin-top:3px;">Availability: Okay → Hospital (soonest first) → Traveling/Abroad · click headers to sort within groups</div><div style="color:#697582;font-size:9px;margin-top:2px;">Drag ⠿ to reorder columns · drag a header's right edge to resize</div></div>
-                        <div style="display:flex;gap:6px;flex-wrap:wrap;"><button id="refresh-war-live-btn" style="background:#3b5998;color:#fff;border:0;border-radius:5px;padding:6px 9px;font-size:10px;cursor:pointer;">Refresh Live Status</button></div>
+                <div class="ntc-ffscouter-summary-viewport" style="flex:0 0 auto;min-height:0;overflow:hidden;">
+                    <div class="ntc-ffscouter-summary" style="border:1px solid #343a43;border-radius:8px;padding:10px;background:rgba(20,20,20,.72);display:grid;gap:8px;">
+                        <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap;">
+                            <div><div style="color:#fff;font-size:13px;font-weight:850;">${escapeHtml(war.oppTag)} War Targets</div><div style="color:#929eac;font-size:10px;margin-top:2px;">${targets.length} shown / ${allTargets.length} members · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div><div style="color:#697582;font-size:9px;margin-top:3px;">Availability: Okay → Hospital (soonest first) → Traveling/Abroad · click headers to sort within groups</div><div style="color:#697582;font-size:9px;margin-top:2px;">Drag ⠿ to reorder columns · drag a header's right edge to resize</div></div>
+                            <div style="display:flex;gap:6px;flex-wrap:wrap;"><button id="refresh-war-live-btn" style="background:#3b5998;color:#fff;border:0;border-radius:5px;padding:6px 9px;font-size:10px;cursor:pointer;">Refresh Live Status</button></div>
+                        </div>
+                        <div class="ntc-war-target-filter-panel" style="display:flex;align-items:center;gap:7px 12px;flex-wrap:wrap;border:1px solid #343d48;border-radius:7px;padding:6px 8px;background:rgba(11,15,20,.72);">
+                            <div style="display:grid;gap:1px;flex:0 0 auto;"><span class="ntc-war-filter-heading" style="color:#fff;font-size:10px;font-weight:900;">Sort &amp; View</span><span style="color:#697582;font-size:8px;white-space:nowrap;">${escapeHtml(activeSort.label)} · ${sortDirection}</span></div>
+                            ${filterPanel}
+                            ${ffRangePanel}
+                        </div>
+                        <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;">${buildStatCard("Online / Idle", onlineCount, "Live Torn status", "#7fe18d")}${buildStatCard("Healthy", okayCount, "Status: Okay", "#5ba7f7")}</div>
+                        ${notices.map((notice) => `<div style="color:#e0a25e;font-size:10px;line-height:1.4;">⚠ ${escapeHtml(notice)}</div>`).join("")}
                     </div>
-                    <div class="ntc-war-target-filter-panel" style="display:flex;align-items:center;gap:7px 12px;flex-wrap:wrap;border:1px solid #343d48;border-radius:7px;padding:6px 8px;background:rgba(11,15,20,.72);">
-                        <div style="display:grid;gap:1px;flex:0 0 auto;"><span class="ntc-war-filter-heading" style="color:#fff;font-size:10px;font-weight:900;">Sort &amp; View</span><span style="color:#697582;font-size:8px;white-space:nowrap;">${escapeHtml(activeSort.label)} · ${sortDirection}</span></div>
-                        ${filterPanel}
-                        ${ffRangePanel}
-                    </div>
-                    <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;">${buildStatCard("Online / Idle", onlineCount, "Live Torn status", "#7fe18d")}${buildStatCard("Healthy", okayCount, "Status: Okay", "#5ba7f7")}</div>
-                    ${notices.map((notice) => `<div style="color:#e0a25e;font-size:10px;line-height:1.4;">⚠ ${escapeHtml(notice)}</div>`).join("")}
                 </div>
-                <div class="ntc-war-target-table-wrap" style="width:100%;min-width:0;min-height:0;flex:1 1 auto;border:1px solid #343a43;border-radius:8px;overflow-y:auto;overflow-x:hidden;background:rgba(15,15,15,.78);">
+                <div class="ntc-war-target-table-wrap" style="width:100%;min-width:0;min-height:210px;flex:1 1 auto;border:1px solid #343a43;border-radius:8px;overflow-y:auto;overflow-x:hidden;background:rgba(15,15,15,.78);">
                     <table class="ntc-war-target-table" style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:10px;">
                         <colgroup>${columnOrder.map((key) => `<col data-war-column="${key}" style="width:${responsiveColumnWidths[key]}px;">`).join("")}</colgroup>
                         <thead style="position:sticky;top:0;z-index:2;background:#252b33;color:#dce2e9;text-align:left;"><tr>${columnOrder.map(renderWarTargetSortHeader).join("")}</tr></thead>
@@ -4162,8 +4164,8 @@
         const maxWidth = Math.max(120, window.innerWidth - 40);
         const maxHeight = Math.max(120, window.innerHeight - 20);
         return {
-            minWidth: Math.min(340, maxWidth),
-            minHeight: Math.min(280, maxHeight),
+            minWidth: Math.min(380, maxWidth),
+            minHeight: Math.min(620, maxHeight),
             maxWidth,
             maxHeight
         };
@@ -4291,13 +4293,23 @@
         content.style.zoom = "1";
         if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") {
             const layout = content.querySelector(".ntc-ffscouter-layout");
+            const summaryViewport = layout?.querySelector(".ntc-ffscouter-summary-viewport");
             const summary = layout?.querySelector(".ntc-ffscouter-summary");
-            if (!layout || !summary) return;
+            if (!layout || !summaryViewport || !summary) return;
 
             summary.style.zoom = "1";
-            const availableSummaryHeight = Math.max(58, Math.floor(layout.clientHeight * 0.48));
+            summaryViewport.style.height = "auto";
+            summaryViewport.style.flex = "0 0 auto";
+            const minReadableScale = 0.72;
             const requiredSummaryHeight = Math.max(summary.scrollHeight, summary.offsetHeight);
-            summary.style.zoom = String(Math.min(1, availableSummaryHeight / Math.max(1, requiredSummaryHeight)));
+            const availableSummaryHeight = Math.max(
+                Math.ceil(requiredSummaryHeight * minReadableScale),
+                Math.floor(layout.clientHeight * 0.48)
+            );
+            const reservedSummaryHeight = Math.min(requiredSummaryHeight, availableSummaryHeight);
+            summary.style.zoom = String(reservedSummaryHeight / Math.max(1, requiredSummaryHeight));
+            summaryViewport.style.height = `${reservedSummaryHeight}px`;
+            summaryViewport.style.flex = `0 0 ${reservedSummaryHeight}px`;
             return;
         }
 
@@ -4305,7 +4317,7 @@
         const contentRect = content.getBoundingClientRect();
         const availableHeight = Math.max(1, bodyRect.bottom - contentRect.top);
         const requiredHeight = Math.max(content.scrollHeight, content.offsetHeight);
-        content.style.zoom = String(Math.min(1, availableHeight / Math.max(1, requiredHeight)));
+        content.style.zoom = String(Math.max(0.72, Math.min(1, availableHeight / Math.max(1, requiredHeight))));
     }
 
     function pauseWindowActivity() {
@@ -4517,6 +4529,11 @@
                     min-height: 0;
                     transform-origin: top left;
                 }
+                #nfc-faction-wrapper #nfc-content.ntc-ffscouter-active .ntc-ffscouter-summary-viewport {
+                    flex: 0 0 auto;
+                    min-height: 0;
+                    overflow: hidden;
+                }
                 #nfc-faction-wrapper #nfc-content.ntc-inventory-active {
                     flex: 1 1 auto;
                     min-height: 0;
@@ -4609,7 +4626,7 @@
                     #nfc-faction-wrapper #nfc-content .ntc-war-target-table th,
                     #nfc-faction-wrapper #nfc-content .ntc-war-target-table td {
                         padding: 3px 2px !important;
-                        font-size: 7px !important;
+                        font-size: 8px !important;
                     }
                 }
                 .nfc-resize-handle::after {

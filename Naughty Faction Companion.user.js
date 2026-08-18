@@ -2524,8 +2524,8 @@
                     <div class="nfc-chain-fill" style="width:${pct}%;background:${barColor};"></div>
                 </div>
                 <div class="nfc-chain-timers">
-                    <span>Breaks in <span id="faction-chain-countdown" data-chain-seconds="${Number(chain.timeout || 0)}" data-fetched-at="${fetchedAt}" data-expired-text="0s" data-active-color="#ccc" data-expired-color="#e05959" style="color:${timeoutRemaining > 0 ? "#ccc" : "#e05959"};">${formatDuration(Math.ceil(timeoutRemaining))}</span></span>
-                    <span>Cooldown <span id="faction-chain-cooldown" data-chain-seconds="${Number(chain.cooldown || 0)}" data-fetched-at="${fetchedAt}" data-expired-text="Ready" data-active-color="#ccc" data-expired-color="#7fe18d" style="color:${cooldownRemaining > 0 ? "#ccc" : "#7fe18d"};">${cooldownRemaining > 0 ? formatDuration(Math.ceil(cooldownRemaining)) : "Ready"}</span></span>
+                    <span>Breaks in <span id="faction-chain-countdown" class="nfc-chain-countdown${timeoutRemaining > 0 ? " is-active" : ""}" data-chain-seconds="${Number(chain.timeout || 0)}" data-fetched-at="${fetchedAt}" data-expired-text="0s" data-active-color="#ccc" data-expired-color="#e05959" style="color:${timeoutRemaining > 0 ? "#ccc" : "#e05959"};">${formatDuration(Math.ceil(timeoutRemaining))}</span></span>
+                    <span>Cooldown <span id="faction-chain-cooldown" class="nfc-chain-countdown${cooldownRemaining > 0 ? " is-active" : ""}" data-chain-seconds="${Number(chain.cooldown || 0)}" data-fetched-at="${fetchedAt}" data-expired-text="Ready" data-active-color="#ccc" data-expired-color="#7fe18d" style="color:${cooldownRemaining > 0 ? "#ccc" : "#7fe18d"};">${cooldownRemaining > 0 ? formatDuration(Math.ceil(cooldownRemaining)) : "Ready"}</span></span>
                 </div>
             </section>
         `;
@@ -3925,6 +3925,7 @@
                 const fetchedAt = Number(el.dataset.fetchedAt || Date.now());
                 const remaining = getCountdownRemaining(seconds, fetchedAt, 0);
                 el.textContent = remaining > 0 ? formatDuration(Math.ceil(remaining)) : (el.dataset.expiredText || "0s");
+                el.classList.toggle("is-active", remaining > 0);
                 el.style.color = remaining > 0 ? (el.dataset.activeColor || "#ccc") : (el.dataset.expiredColor || "#e05959");
             });
         };
@@ -4671,7 +4672,7 @@
                 #nfc-faction-wrapper[data-theme="light"] .nfc-war-scoreline { color:#334155 !important; }
                 #nfc-faction-wrapper[data-theme="light"] .nfc-war-score { color:#172033 !important; }
                 #nfc-faction-wrapper[data-theme="light"] .nfc-chain-track { background:#edf3fb !important; border-color:#cbd5e1 !important; }
-                #nfc-faction-wrapper[data-theme="light"] .nfc-chain-timers [id] { color:#334155 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-chain-timers .nfc-chain-countdown.is-active { color:#334155 !important; }
                 #nfc-faction-wrapper[data-theme="light"] .nfc-war-track { background:linear-gradient(90deg,rgba(79,184,106,.16),#edf3fb 50%,rgba(79,184,106,.16)) !important; border-color:#94a3b8 !important; }
                 #nfc-faction-wrapper[data-theme="light"] .nfc-ffscouter-filter-panel { background:#f8fafc !important; border-color:#cbd5e1 !important; }
                 #nfc-faction-wrapper[data-theme="light"] .nfc-settings-layout [style*="#3d3d3d"] { background:#ffffff !important; border-color:#cbd5e1 !important; box-shadow:0 1px 3px rgba(15,23,42,.05) !important; }

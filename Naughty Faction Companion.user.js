@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.2
+// @version      1.0.3
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.2";
+    const SCRIPT_VERSION = "1.0.3";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const TORN_V1_BASE_URL = "https://api.torn.com/";
@@ -2911,7 +2911,7 @@
                     <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;">${buildStatCard("Online / Idle", onlineCount, "Live Torn status", "#7fe18d")}${buildStatCard("Healthy", okayCount, "Status: Okay", "#5ba7f7")}</div>
                     ${notices.map((notice) => `<div style="color:#e0a25e;font-size:10px;line-height:1.4;">⚠ ${escapeHtml(notice)}</div>`).join("")}
                 </div>
-                <div class="ntc-war-target-table-wrap" style="width:100%;min-width:0;min-height:160px;flex:1 1 auto;border:1px solid #343a43;border-radius:8px;overflow-y:auto;overflow-x:hidden;background:rgba(15,15,15,.78);">
+                <div class="ntc-war-target-table-wrap" style="width:100%;min-width:0;min-height:0;flex:1 1 auto;border:1px solid #343a43;border-radius:8px;overflow-y:auto;overflow-x:hidden;background:rgba(15,15,15,.78);">
                     <table class="ntc-war-target-table" style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:10px;">
                         <colgroup>${columnOrder.map((key) => `<col data-war-column="${key}" style="width:${responsiveColumnWidths[key]}px;">`).join("")}</colgroup>
                         <thead style="position:sticky;top:0;z-index:2;background:#252b33;color:#dce2e9;text-align:left;"><tr>${columnOrder.map(renderWarTargetSortHeader).join("")}</tr></thead>
@@ -3928,6 +3928,7 @@
         bindSettingsControls();
         bindFactionControls();
         bindSectionRefreshButtons();
+        requestAnimationFrame(fitCurrentContentToWidget);
 
         if (state.currentTab === "faction") {
             startChainCountdownTimer();
@@ -4269,6 +4270,23 @@
         dashboard.style.width = `${size.width}px`;
         dashboard.style.height = `${size.height}px`;
         applyWidgetPosition();
+        requestAnimationFrame(fitCurrentContentToWidget);
+    }
+
+    function fitCurrentContentToWidget() {
+        const dashboard = state.dashboard;
+        const widgetBody = dashboard?.querySelector("#nfc-main-body");
+        const content = dashboard?.querySelector("#nfc-content");
+        if (!widgetBody || !content || state.isMinimized) return;
+
+        content.style.zoom = "1";
+        if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") return;
+
+        const bodyRect = widgetBody.getBoundingClientRect();
+        const contentRect = content.getBoundingClientRect();
+        const availableHeight = Math.max(1, bodyRect.bottom - contentRect.top);
+        const requiredHeight = Math.max(content.scrollHeight, content.offsetHeight);
+        content.style.zoom = String(Math.min(1, availableHeight / Math.max(1, requiredHeight)));
     }
 
     function applyWidgetView() {
@@ -4306,7 +4324,7 @@
             widgetBody.style.flex = "1 1 auto";
             widgetBody.style.minHeight = "0";
             widgetBody.style.maxHeight = "none";
-            widgetBody.style.overflowY = "auto";
+            widgetBody.style.overflowY = "hidden";
             resizeHandles.forEach((handle) => { handle.style.display = "block"; });
             dragHandle.style.padding = "8px 10px";
             dragHandle.style.height = "auto";
@@ -4433,14 +4451,19 @@
                 }
                 #nfc-faction-wrapper #nfc-content {
                     container-type: inline-size;
+                    flex: 1 1 auto;
+                    min-height: 0;
+                    max-height: 100%;
                     min-width: 0;
                     max-width: 100%;
-                    overflow-x: hidden;
+                    overflow: hidden;
                     font-size: clamp(9px, 2.4cqi, 12px) !important;
                 }
                 #nfc-faction-wrapper #nfc-main-body {
+                    display: flex !important;
+                    flex-direction: column;
                     min-width: 0;
-                    overflow-x: hidden !important;
+                    overflow: hidden !important;
                 }
                 #nfc-faction-wrapper #nfc-content.ntc-ffscouter-active {
                     flex: 1 1 auto;
@@ -4690,6 +4713,7 @@
             dashboard.style.bottom = "auto";
             dashboard.style.left = `${resizeFromLeft ? resizeStartRect.right - width : resizeStartRect.left}px`;
             dashboard.style.top = `${resizeFromTop ? resizeStartRect.bottom - height : resizeStartRect.top}px`;
+            fitCurrentContentToWidget();
             // CSS container rules scale cards and controls immediately. Re-render at
             // a modest cadence so FFScouter's calculated column widths keep pace too,
             // without rebuilding a large target list for every pointer event.

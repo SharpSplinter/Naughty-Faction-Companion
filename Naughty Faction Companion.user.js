@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.14
+// @version      1.0.15
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.14";
+    const SCRIPT_VERSION = "1.0.15";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -1719,11 +1719,11 @@
     function buildStatCard(title, value, subtext, color = "#8ec7ff") {
         const displayValue = typeof value === "number" ? formatInteger(value) : String(value ?? "0");
         return `
-            <div style="background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border: 1px solid #333; border-radius: 8px; padding: 10px; min-height: 90px; box-sizing: border-box;">
-                <div style="color: #d4d4d4; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px;">${escapeHtml(title)}</div>
-                <div style="color: ${color}; font-size: 22px; font-weight: 700; line-height: 1.1;">${escapeHtml(displayValue)}</div>
-                <div style="color: #d0d0d0; font-size: 12px; font-weight: 600; line-height: 1.35; margin-top: 7px;">${escapeHtml(subtext)}</div>
-            </div>
+            <article class="nfc-stat-card">
+                <div class="nfc-stat-label">${escapeHtml(title)}</div>
+                <div class="nfc-stat-value" style="color:${color};">${escapeHtml(displayValue)}</div>
+                <div class="nfc-stat-detail">${escapeHtml(subtext)}</div>
+            </article>
         `;
     }
 
@@ -2051,19 +2051,19 @@
 
     function renderInfoBox(title, rows) {
         if (!rows.length) {
-            return `<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; color: #888; font-size: 11px;">No ${escapeHtml(title.toLowerCase())} data.</div>`;
+            return `<div class="nfc-panel-card nfc-empty-card">No ${escapeHtml(title.toLowerCase())} data.</div>`;
         }
         const rowsHtml = rows.map((row) => `
-            <div style="display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #222;">
-                <span style="color: #d0d0d0; font-size: 12px; font-weight: 600;">${escapeHtml(row.label)}</span>
-                <span style="color: ${row.color || "#fff"}; font-size: 12px; font-weight: 700;">${escapeHtml(String(row.value))}</span>
+            <div class="nfc-info-row">
+                <span class="nfc-info-label">${escapeHtml(row.label)}</span>
+                <span class="nfc-info-value" style="color:${row.color || "#fff"};">${escapeHtml(String(row.value))}</span>
             </div>
         `).join("");
         return `
-            <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">
-                <div style="color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 6px;">${escapeHtml(title)}</div>
+            <section class="nfc-panel-card nfc-info-card">
+                <div class="nfc-card-title">${escapeHtml(title)}</div>
                 ${rowsHtml}
-            </div>
+            </section>
         `;
     }
 
@@ -2511,29 +2511,29 @@
         const barColor = pct >= 90 ? "#e05959" : pct >= 60 ? "#e0a25e" : "#7fe18d";
 
         if (!max && !current && !chain.timeout && !chain.cooldown) {
-            return `<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; color: #888; font-size: 11px;">No active chain.</div>`;
+            return `<div class="nfc-panel-card nfc-empty-card">No active chain.</div>`;
         }
 
         return `
-            <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                    <span style="color: #fff; font-size: 12px; font-weight: 700;">Chain</span>
-                    <span style="color: #9dd8ff; font-size: 11px;">${formatInteger(current)} / ${formatInteger(max)} hits</span>
+            <section class="nfc-panel-card nfc-chain-card">
+                <div class="nfc-chain-heading">
+                    <span class="nfc-card-title">Chain</span>
+                    <span class="nfc-chain-total">${formatInteger(current)} / ${formatInteger(max)} hits</span>
                 </div>
-                <div style="width: 100%; height: 10px; background: #222; border-radius: 5px; overflow: hidden; margin-bottom: 6px;">
-                    <div style="width: ${pct}%; height: 100%; background: ${barColor}; transition: width 0.3s;"></div>
+                <div class="nfc-chain-track">
+                    <div class="nfc-chain-fill" style="width:${pct}%;background:${barColor};"></div>
                 </div>
-                <div style="display: flex; justify-content: space-between; color: #888; font-size: 10px;">
-                    <span>Breaks in <span id="faction-chain-countdown" data-chain-seconds="${Number(chain.timeout || 0)}" data-fetched-at="${fetchedAt}" data-expired-text="0s" data-active-color="#ccc" data-expired-color="#e05959" style="color: ${timeoutRemaining > 0 ? "#ccc" : "#e05959"}; font-weight: 700;">${formatDuration(Math.ceil(timeoutRemaining))}</span></span>
-                    <span>Cooldown: <span id="faction-chain-cooldown" data-chain-seconds="${Number(chain.cooldown || 0)}" data-fetched-at="${fetchedAt}" data-expired-text="Ready" data-active-color="#ccc" data-expired-color="#7fe18d" style="color: ${cooldownRemaining > 0 ? "#ccc" : "#7fe18d"}; font-weight: 700;">${cooldownRemaining > 0 ? formatDuration(Math.ceil(cooldownRemaining)) : "Ready"}</span></span>
+                <div class="nfc-chain-timers">
+                    <span>Breaks in <span id="faction-chain-countdown" data-chain-seconds="${Number(chain.timeout || 0)}" data-fetched-at="${fetchedAt}" data-expired-text="0s" data-active-color="#ccc" data-expired-color="#e05959" style="color:${timeoutRemaining > 0 ? "#ccc" : "#e05959"};">${formatDuration(Math.ceil(timeoutRemaining))}</span></span>
+                    <span>Cooldown <span id="faction-chain-cooldown" data-chain-seconds="${Number(chain.cooldown || 0)}" data-fetched-at="${fetchedAt}" data-expired-text="Ready" data-active-color="#ccc" data-expired-color="#7fe18d" style="color:${cooldownRemaining > 0 ? "#ccc" : "#7fe18d"};">${cooldownRemaining > 0 ? formatDuration(Math.ceil(cooldownRemaining)) : "Ready"}</span></span>
                 </div>
-            </div>
+            </section>
         `;
     }
 
     function renderWarCard(war) {
         if (!war) {
-            return `<div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; color: #888; font-size: 11px;">No active ranked war.</div>`;
+            return `<div class="nfc-panel-card nfc-empty-card">No active ranked war.</div>`;
         }
 
         const scoreLimit = Math.max(1, Number(war.target || 0), Math.abs(war.ownScore - war.oppScore));
@@ -2543,20 +2543,20 @@
         const targetText = war.target > 0 ? `Lead target: ${formatInteger(war.target)}` : "Live score";
 
         return `
-            <div style="border: 1px solid #3a3a3a; border-radius: 8px; padding: 12px; background: rgba(20,20,20,0.82); margin-bottom: 10px; text-align: center;">
-                <div style="color: #fff; font-size: 14px; font-weight: 700; margin-bottom: 4px;">Ranked War</div>
-                <div style="color: #d8d8d8; font-size: 12px; font-weight: 700; margin-bottom: 5px;">${escapeHtml(war.ownTag)} <span style="color: #888; padding: 0 5px;">vs</span> ${escapeHtml(war.oppTag)}</div>
-                <div style="color: #fff; font-size: 22px; font-weight: 800; margin-bottom: 9px;">${formatInteger(war.ownScore)} - ${formatInteger(war.oppScore)}</div>
-                <div style="position: relative; width: 100%; height: 14px; border-radius: 7px; overflow: hidden; background: linear-gradient(90deg, rgba(79,184,106,0.14), #252525 50%, rgba(79,184,106,0.14)); border: 1px solid #454545;">
-                    <div style="position: absolute; left: calc(50% - 1px); top: 0; width: 2px; height: 100%; background: #fff; opacity: 0.65;"></div>
-                    <div style="position: absolute; left: calc(${markerPosition}% - 6px); top: 1px; width: 10px; height: 10px; border-radius: 50%; background: ${markerColor}; border: 1px solid #fff; box-shadow: 0 0 7px ${markerColor}; transition: left 0.3s, background 0.3s;"></div>
+            <section class="nfc-panel-card nfc-war-card">
+                <div class="nfc-war-title">Ranked War</div>
+                <div class="nfc-war-tags">${escapeHtml(war.ownTag)} <span>vs</span> ${escapeHtml(war.oppTag)}</div>
+                <div class="nfc-war-score">${formatInteger(war.ownScore)} <span>—</span> ${formatInteger(war.oppScore)}</div>
+                <div class="nfc-war-track">
+                    <div class="nfc-war-centerline"></div>
+                    <div class="nfc-war-marker" style="left:calc(${markerPosition}% - 6px);background:${markerColor};box-shadow:0 0 7px ${markerColor};"></div>
                 </div>
-                <div style="display: flex; justify-content: space-between; color: #cfcfcf; font-size: 11px; font-weight: 700; margin-top: 5px;">
+                <div class="nfc-war-scoreline">
                     <span>${escapeHtml(war.ownTag)}: ${formatInteger(war.ownScore)}</span>
                     <span>${escapeHtml(war.oppTag)}: ${formatInteger(war.oppScore)}</span>
                 </div>
-                <div style="color: #aaa; font-size: 11px; margin-top: 5px;">${targetText} · Center = tied</div>
-            </div>
+                <div class="nfc-war-note">${targetText} · Center = tied</div>
+            </section>
         `;
     }
 
@@ -2771,7 +2771,7 @@
         const column = WAR_TARGET_COLUMNS[key];
         const active = state.warTargetSort?.key === key;
         const indicator = active ? (state.warTargetSort.direction === "asc" ? " ▲" : " ▼") : " ↕";
-        return `<th data-war-target-sort="${key}" data-war-column-key="${key}" style="position:relative;padding:7px 15px 7px 7px;cursor:pointer;user-select:none;white-space:nowrap;text-align:${column.align};overflow:hidden;text-overflow:ellipsis;">
+        return `<th class="nfc-war-target-sort-header" data-war-target-sort="${key}" data-war-column-key="${key}" style="position:relative;padding:7px 15px 7px 7px;cursor:pointer;user-select:none;white-space:nowrap;text-align:${column.align};overflow:hidden;text-overflow:ellipsis;">
             <span data-war-column-drag="${key}" draggable="true" title="Drag to reorder" style="display:inline-block;margin-right:4px;color:#697582;cursor:grab;font-size:10px;">⠿</span>${escapeHtml(column.label)}<span style="color:${active ? "#9dd8ff" : "#697582"};font-size:9px;">${indicator}</span>
             <span data-war-column-resize="${key}" title="Drag to resize" style="position:absolute;right:0;top:0;width:8px;height:100%;cursor:col-resize;border-right:2px solid #46505d;"></span>
         </th>`;
@@ -2780,15 +2780,15 @@
     function renderWarTargetCell(key, target, display) {
         switch (key) {
             case "player":
-                return `<td style="padding:8px 7px;overflow:hidden;"><a href="https://www.torn.com/profiles.php?XID=${target.id}" target="_blank" rel="noopener noreferrer" style="color:#9dd8ff;font-weight:800;text-decoration:none;overflow-wrap:anywhere;">${escapeHtml(target.name)}</a><div style="color:#7f8996;font-size:9px;white-space:nowrap;">ID ${target.id} · Level ${formatInteger(target.level)}</div></td>`;
+                return `<td class="nfc-war-target-cell nfc-war-target-player" style="padding:8px 7px;overflow:hidden;"><a href="https://www.torn.com/profiles.php?XID=${target.id}" target="_blank" rel="noopener noreferrer" style="color:#9dd8ff;font-weight:800;text-decoration:none;overflow-wrap:anywhere;">${escapeHtml(target.name)}</a><div style="color:#7f8996;font-size:9px;white-space:nowrap;">ID ${target.id} · Level ${formatInteger(target.level)}</div></td>`;
             case "online":
-                return `<td style="padding:8px 7px;color:${display.onlineColor};font-weight:800;overflow:hidden;">${escapeHtml(display.online)}<div style="color:#7f8996;font-size:9px;font-weight:500;overflow-wrap:anywhere;">${escapeHtml(target.lastAction?.relative || "")}</div></td>`;
+                return `<td class="nfc-war-target-cell nfc-war-target-online nfc-online-${escapeHtml(String(display.online || "unknown").toLowerCase())}" style="padding:8px 7px;color:${display.onlineColor};font-weight:800;overflow:hidden;">${escapeHtml(display.online)}<div style="color:#7f8996;font-size:9px;font-weight:500;overflow-wrap:anywhere;">${escapeHtml(target.lastAction?.relative || "")}</div></td>`;
             case "status":
-                return `<td style="padding:8px 7px;color:${display.statusColor};font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${display.statusDisplay}</td>`;
+                return `<td class="nfc-war-target-cell nfc-war-target-status nfc-status-${getWarTargetStatus(target).kind}" style="padding:8px 7px;color:${display.statusColor};font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${display.statusDisplay}</td>`;
             case "stats":
-                return `<td style="padding:8px 7px;text-align:right;color:#c9a0ff;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(display.estimate)}<div style="color:#7f8996;font-size:9px;font-weight:500;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(target.estimateSource || "")} ${escapeHtml(display.estimateAge)}</div></td>`;
+                return `<td class="nfc-war-target-cell nfc-war-target-stats" style="padding:8px 7px;text-align:right;color:#c9a0ff;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(display.estimate)}<div style="color:#7f8996;font-size:9px;font-weight:500;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(target.estimateSource || "")} ${escapeHtml(display.estimateAge)}</div></td>`;
             case "ff":
-                return `<td style="padding:8px 7px;text-align:center;color:#7fe18d;font-size:13px;font-weight:900;white-space:nowrap;overflow:hidden;">${display.ff}</td>`;
+                return `<td class="nfc-war-target-cell nfc-war-target-ff" style="padding:8px 7px;text-align:center;color:#7fe18d;font-size:13px;font-weight:900;white-space:nowrap;overflow:hidden;">${display.ff}</td>`;
             case "attack":
                 return `<td style="padding:8px 7px;text-align:center;white-space:nowrap;overflow:hidden;"><a class="ntc-attack-button" href="https://www.torn.com/page.php?sid=attack&user2ID=${target.id}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#8f3434;color:#fff;border-radius:5px;padding:5px 8px;font-size:10px;font-weight:800;text-decoration:none;white-space:nowrap;overflow-wrap:normal;word-break:keep-all;">Attack</a></td>`;
             default:
@@ -2800,10 +2800,10 @@
         const data = faction.warTargets || null;
         const war = faction.war || data?.war || null;
         if (!war) {
-            return `<div style="border:1px solid #343a43;border-radius:8px;padding:12px;color:#aaa;background:rgba(20,20,20,.7);font-size:11px;">No active Ranked War enemy faction.</div>`;
+            return `<div class="nfc-panel-card nfc-empty-card">No active Ranked War enemy faction.</div>`;
         }
         if (!getStoredFFScouterKey()) {
-            return `<div style="border:1px solid #654d2d;border-radius:8px;padding:12px;color:#e0a25e;background:rgba(55,38,18,.55);font-size:11px;line-height:1.5;">Add and verify your separate FFScouter-linked Torn API key under <strong>Settings → Integrations</strong> to load projected stats and Fair Fight values.</div>`;
+            return `<div class="nfc-panel-card nfc-notice-card">Add and verify your separate FFScouter-linked Torn API key under <strong>Settings → Integrations</strong> to load projected stats and Fair Fight values.</div>`;
         }
 
         const allTargets = Array.isArray(data?.targets) ? data.targets : [];
@@ -2853,7 +2853,7 @@
             const estimateAge = target.estimateUpdatedAt ? formatRelativeTime(target.estimateUpdatedAt) : "—";
             const display = { online, onlineColor, statusColor, statusDisplay, estimate, ff, estimateAge };
             return `
-                <tr style="border-bottom:1px solid #2c333c;">
+                <tr class="nfc-war-target-row">
                     ${columnOrder.map((key) => renderWarTargetCell(key, target, display)).join("")}
                 </tr>
             `;
@@ -2862,24 +2862,24 @@
         return `
             <div class="ntc-ffscouter-layout" style="display:flex;flex-direction:column;gap:9px;min-height:0;height:100%;">
                 <div class="ntc-ffscouter-summary-viewport" style="flex:0 0 auto;min-height:0;overflow:hidden;">
-                    <div class="ntc-ffscouter-summary" style="border:1px solid #343a43;border-radius:8px;padding:10px;background:rgba(20,20,20,.72);display:grid;gap:8px;">
+                    <div class="ntc-ffscouter-summary nfc-ffscouter-summary" style="display:grid;gap:8px;">
                         <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap;">
-                            <div><div style="color:#fff;font-size:13px;font-weight:850;">${escapeHtml(war.oppTag)} War Targets</div><div style="color:#929eac;font-size:10px;margin-top:2px;">${targets.length} shown / ${allTargets.length} members · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div><div style="color:#697582;font-size:9px;margin-top:3px;">Availability: Okay → Hospital (soonest first) → Traveling/Abroad · click headers to sort within groups</div><div style="color:#697582;font-size:9px;margin-top:2px;">Drag ⠿ to reorder columns · drag a header's right edge to resize</div></div>
-                            <div style="display:flex;gap:6px;flex-wrap:wrap;"><button id="refresh-war-live-btn" style="background:#3b5998;color:#fff;border:0;border-radius:5px;padding:6px 9px;font-size:10px;cursor:pointer;">Refresh Live Status</button></div>
+                            <div class="nfc-ffscouter-heading"><div class="nfc-ffscouter-title">${escapeHtml(war.oppTag)} War Targets</div><div class="nfc-ffscouter-subtitle">${targets.length} shown / ${allTargets.length} members · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div><div class="nfc-ffscouter-guidance">Availability: Okay → Hospital (soonest first) → Traveling/Abroad · click headers to sort within groups</div><div class="nfc-ffscouter-guidance">Drag ⠿ to reorder columns · drag a header's right edge to resize</div></div>
+                            <div style="display:flex;gap:6px;flex-wrap:wrap;"><button id="refresh-war-live-btn" class="nfc-primary-action">Refresh Live Status</button></div>
                         </div>
-                        <div class="ntc-war-target-filter-panel" style="display:flex;align-items:center;gap:7px 12px;flex-wrap:wrap;border:1px solid #343d48;border-radius:7px;padding:6px 8px;background:rgba(11,15,20,.72);">
+                        <div class="ntc-war-target-filter-panel nfc-ffscouter-filter-panel" style="display:flex;align-items:center;gap:7px 12px;flex-wrap:wrap;">
                             <div style="display:grid;gap:1px;flex:0 0 auto;"><span class="ntc-war-filter-heading" style="color:#fff;font-size:10px;font-weight:900;">Sort &amp; View</span><span style="color:#697582;font-size:8px;white-space:nowrap;">${escapeHtml(activeSort.label)} · ${sortDirection}</span></div>
                             ${filterPanel}
                             ${ffRangePanel}
                         </div>
-                        <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;">${buildStatCard("Online / Idle", onlineCount, "Live Torn status", "#7fe18d")}${buildStatCard("Healthy", okayCount, "Status: Okay", "#5ba7f7")}</div>
+                        <div class="nfc-ffscouter-stat-grid" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;">${buildStatCard("Online / Idle", onlineCount, "Live Torn status", "#7fe18d")}${buildStatCard("Healthy", okayCount, "Status: Okay", "#5ba7f7")}</div>
                         ${notices.map((notice) => `<div style="color:#e0a25e;font-size:10px;line-height:1.4;">⚠ ${escapeHtml(notice)}</div>`).join("")}
                     </div>
                 </div>
-                <div class="ntc-war-target-table-wrap" style="width:100%;min-width:0;min-height:210px;flex:1 1 auto;border:1px solid #343a43;border-radius:8px;overflow-y:auto;overflow-x:hidden;background:rgba(15,15,15,.78);">
-                    <table class="ntc-war-target-table" style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:10px;">
+                <div class="ntc-war-target-table-wrap nfc-war-target-table-shell" style="width:100%;min-width:0;min-height:210px;flex:1 1 auto;border:1px solid #343a43;overflow-y:auto;overflow-x:hidden;">
+                    <table class="ntc-war-target-table nfc-ffscouter-table" style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:10px;">
                         <colgroup>${columnOrder.map((key) => `<col data-war-column="${key}" style="width:${responsiveColumnWidths[key]}px;">`).join("")}</colgroup>
-                        <thead style="position:sticky;top:0;z-index:2;background:#252b33;color:#dce2e9;text-align:left;"><tr>${columnOrder.map(renderWarTargetSortHeader).join("")}</tr></thead>
+                        <thead class="nfc-war-target-head" style="position:sticky;top:0;z-index:2;text-align:left;"><tr>${columnOrder.map(renderWarTargetSortHeader).join("")}</tr></thead>
                         <tbody>${rows || `<tr><td colspan="${columnOrder.length}" style="padding:18px;text-align:center;color:#8f99a5;">${escapeHtml(data?.error || (allTargets.length ? "No targets match the current view filters." : "No targets loaded yet."))}</td></tr>`}</tbody>
                     </table>
                 </div>
@@ -2918,7 +2918,7 @@
             { id: "ffscouter", label: "FFScouter" }
         ];
         const activeSubTab = factionSubTabs.some((tab) => tab.id === state.factionSubTab) ? state.factionSubTab : "general";
-        const subTabButtons = factionSubTabs.map((tab) => `<button data-faction-subtab="${tab.id}" style="background:${activeSubTab === tab.id ? "#3b5998" : "#2a2a2a"};border:1px solid #3d3d3d;color:#fff;border-radius:4px;padding:6px 8px;font-size:11px;cursor:pointer;${activeSubTab === tab.id ? "font-weight:700;" : ""}">${tab.label}</button>`).join("");
+        const subTabButtons = factionSubTabs.map((tab) => `<button data-faction-subtab="${tab.id}" class="nfc-subtab${activeSubTab === tab.id ? " is-active" : ""}" aria-current="${activeSubTab === tab.id ? "page" : "false"}">${tab.label}</button>`).join("");
         const generalContent = `
             <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px;">${cards}</div>
             ${renderChainBar(chain)}
@@ -2927,7 +2927,7 @@
         `;
         return `
             ${renderSectionMeta("faction", "Faction")}
-            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">${subTabButtons}</div>
+            <div class="nfc-subtabs">${subTabButtons}</div>
             ${activeSubTab === "ffscouter" ? renderFFScouterWarTargets(faction) : generalContent}
         `;
     }
@@ -3146,7 +3146,7 @@
             { id: "integrations", label: "Integrations" },
             { id: "export", label: "Exports" }
         ].map(({ id, label }) => `
-            <button data-settings-subtab="${id}" style="background: ${currentSubTab === id ? '#3b5998' : '#2a2a2a'}; border: 1px solid #3d3d3d; color: #fff; border-radius: 4px; padding: 6px 8px; font-size: 10px; cursor: pointer;">${label}</button>
+            <button data-settings-subtab="${id}" class="nfc-subtab${currentSubTab === id ? " is-active" : ""}" aria-current="${currentSubTab === id ? "page" : "false"}">${label}</button>
         `).join("");
 
         const controlsContent = `
@@ -3226,8 +3226,8 @@
 
         return `
             ${renderSectionMeta("settings", "Settings")}
-            <div style="display: grid; gap: 10px;">
-                <div style="display: flex; gap: 6px; flex-wrap: wrap;">${subTabButtons}</div>
+            <div class="nfc-settings-layout" style="display: grid; gap: 10px;">
+                <div class="nfc-subtabs">${subTabButtons}</div>
                 ${content}
                 <div id="fetch-status-bar" style="color: #aaa; font-size: 11px; min-height: 30px; line-height: 1.4;">${escapeHtml(state.sectionStatus.settings || "Ready.")}</div>
             </div>
@@ -3269,9 +3269,9 @@
     function renderSectionMeta(section, label) {
         const status = state.sectionStatus[section] || "Not loaded";
         return `
-            <div style="border: 1px solid #2c2c2c; border-radius: 6px; background: rgba(255,255,255,0.02); padding: 7px 9px; margin-bottom: 8px; color: #d7d7d7; font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;">
-                <span style="color: #9dd8ff; font-weight: 700;">${escapeHtml(label)}</span>
-                <span style="color: #bdbdbd; margin-left: 8px;">${escapeHtml(status)}</span>
+            <div class="nfc-section-meta">
+                <span class="nfc-section-label">${escapeHtml(label)}</span>
+                <span class="nfc-section-status">${escapeHtml(status)}</span>
             </div>
         `;
     }
@@ -4113,9 +4113,9 @@
         if (!dashboard) return;
         const isLight = state.theme === "light";
         dashboard.dataset.theme = isLight ? "light" : "dark";
-        dashboard.style.backgroundColor = isLight ? "#f8fafc" : "rgba(24, 24, 24, 0.97)";
-        dashboard.style.borderColor = isLight ? "#cbd5e1" : "#3b3b3b";
-        dashboard.style.boxShadow = isLight ? "0 6px 22px rgba(15,23,42,0.18)" : "0 6px 22px rgba(0,0,0,0.6)";
+        dashboard.style.backgroundColor = isLight ? "#f7fafc" : "rgba(18, 23, 32, 0.98)";
+        dashboard.style.borderColor = isLight ? "#cbd5e1" : "#34445e";
+        dashboard.style.boxShadow = isLight ? "0 12px 32px rgba(15,23,42,0.16)" : "0 12px 32px rgba(0,0,0,0.5)";
     }
 
     const getWidgetSizeLimits = () => {
@@ -4335,14 +4335,14 @@
             widgetBody.style.maxHeight = "none";
             widgetBody.style.overflowY = "hidden";
             resizeHandles.forEach((handle) => { handle.style.display = "block"; });
-            dragHandle.style.padding = "8px 10px";
+            dragHandle.style.padding = "9px 11px";
             dragHandle.style.height = "auto";
             dragHandle.style.width = "auto";
             dragHandle.style.justifyContent = "space-between";
             title.textContent = `🧭 Naughty Faction Companion v${SCRIPT_VERSION}`;
-            title.style.fontSize = "12px";
+            title.style.fontSize = "13px";
             title.style.letterSpacing = "normal";
-            toggleBtn.style.display = "block";
+            toggleBtn.style.display = "grid";
             toggleBtn.innerText = "_";
             dashboard.style.cursor = "";
             dashboard.title = "";
@@ -4365,12 +4365,12 @@
         dashboard.style.right = "20px";
         dashboard.style.width = "480px";
         dashboard.style.height = `${Math.min(720, Math.round(window.innerHeight * 0.8))}px`;
-        dashboard.style.backgroundColor = "rgba(24, 24, 24, 0.97)";
-        dashboard.style.border = "1px solid #3b3b3b";
-        dashboard.style.borderRadius = "8px";
+        dashboard.style.backgroundColor = "rgba(18, 23, 32, 0.98)";
+        dashboard.style.border = "1px solid #34445e";
+        dashboard.style.borderRadius = "10px";
         dashboard.style.zIndex = "999999";
-        dashboard.style.boxShadow = "0 6px 22px rgba(0,0,0,0.6)";
-        dashboard.style.fontFamily = "Arial, sans-serif";
+        dashboard.style.boxShadow = "0 12px 32px rgba(0,0,0,0.5)";
+        dashboard.style.fontFamily = "Inter, Segoe UI, Arial, sans-serif";
         dashboard.style.overflow = "hidden";
         dashboard.style.display = "flex";
         dashboard.style.flexDirection = "column";
@@ -4381,15 +4381,189 @@
         ];
 
         const navHtml = tabs.map((tab) => `
-            <button data-tab="${tab.id}" class="nfc-tab" style="padding: 6px 8px; font-size: 10px; background: ${state.currentTab === tab.id ? '#3b5998' : '#2a2a2a'}; border: 1px solid #3d3d3d; color: #fff; border-radius: 4px; cursor: pointer; ${state.currentTab === tab.id ? 'font-weight: 700;' : ''};">${tab.label}</button>
+            <button data-tab="${tab.id}" class="nfc-tab${state.currentTab === tab.id ? " is-active" : ""}" aria-current="${state.currentTab === tab.id ? "page" : "false"}">${tab.label}</button>
         `).join("");
 
         dashboard.innerHTML = `
             <style>
+                #nfc-faction-wrapper {
+                    color: #edf4ff;
+                    background: rgba(18,23,32,.98);
+                    border-color: #34445e;
+                }
+                #nfc-faction-wrapper #nfc-drag-handle {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 8px;
+                    padding: 9px 11px;
+                    background: linear-gradient(90deg, #182337, #223653);
+                    border-bottom: 1px solid #435671;
+                    cursor: move;
+                    user-select: none;
+                }
+                #nfc-faction-wrapper #nfc-title {
+                    color: #f4f8ff;
+                    font-size: 13px;
+                    font-weight: 850;
+                    letter-spacing: .01em;
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                }
+                #nfc-faction-wrapper #nfc-toggle-view-btn {
+                    width: 36px;
+                    height: 30px;
+                    flex: 0 0 36px;
+                    display: grid;
+                    place-items: center;
+                    border: 1px solid #6980a0;
+                    border-radius: 6px;
+                    background: #263b59;
+                    color: #fff;
+                    padding: 0;
+                    font-size: 19px;
+                    font-weight: 800;
+                    line-height: 1;
+                    cursor: pointer;
+                    transition: filter .15s ease, transform .15s ease;
+                }
+                #nfc-faction-wrapper #nfc-toggle-view-btn:hover { filter: brightness(1.18); transform: translateY(-1px); }
+                #nfc-faction-wrapper #nfc-main-body {
+                    background: linear-gradient(180deg, rgba(14,20,30,.44), rgba(11,16,25,.18));
+                    scrollbar-width: none;
+                    -ms-overflow-style: none;
+                }
+                #nfc-faction-wrapper #nfc-main-body::-webkit-scrollbar { width: 0; height: 0; }
+                #nfc-faction-wrapper .nfc-primary-nav {
+                    display: flex;
+                    align-items: center;
+                    gap: 5px;
+                    width: 100%;
+                    padding: 5px;
+                    margin-bottom: 10px;
+                    border: 1px solid #34445e;
+                    border-radius: 8px;
+                    background: rgba(10,15,24,.62);
+                }
+                #nfc-faction-wrapper .nfc-tab,
+                #nfc-faction-wrapper .nfc-subtab {
+                    border: 1px solid #455a78;
+                    border-radius: 6px;
+                    background: #202f45;
+                    color: #cbd9eb;
+                    padding: 6px 9px;
+                    font-size: 10px;
+                    font-weight: 750;
+                    line-height: 1.2;
+                    cursor: pointer;
+                    transition: background .15s ease, border-color .15s ease, color .15s ease, transform .15s ease;
+                }
+                #nfc-faction-wrapper .nfc-tab:hover,
+                #nfc-faction-wrapper .nfc-subtab:hover { background: #2b4261; border-color: #6c8bb1; color: #fff; }
+                #nfc-faction-wrapper .nfc-tab.is-active,
+                #nfc-faction-wrapper .nfc-subtab.is-active {
+                    border-color: #5c96dc;
+                    background: linear-gradient(135deg, #3d6fac, #315987);
+                    color: #fff;
+                    box-shadow: inset 0 1px rgba(255,255,255,.18), 0 2px 7px rgba(42,94,154,.28);
+                }
+                #nfc-faction-wrapper .nfc-subtabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }
+                #nfc-faction-wrapper .nfc-section-meta {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 8px;
+                    width: 100%;
+                    padding: 7px 9px;
+                    margin-bottom: 8px;
+                    border: 1px solid #34445e;
+                    border-radius: 7px;
+                    background: rgba(32,47,69,.5);
+                    font-size: 10px;
+                    line-height: 1.3;
+                }
+                #nfc-faction-wrapper .nfc-section-label { color:#9dd8ff; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }
+                #nfc-faction-wrapper .nfc-section-status { color:#b9c7d8; overflow:hidden; text-align:right; text-overflow:ellipsis; white-space:nowrap; }
+                #nfc-faction-wrapper .nfc-stat-card,
+                #nfc-faction-wrapper .nfc-panel-card {
+                    position: relative;
+                    width: 100%;
+                    min-height: 90px;
+                    overflow: hidden;
+                    border: 1px solid #34445e;
+                    border-radius: 9px;
+                    background: linear-gradient(145deg, rgba(34,50,76,.82), rgba(17,24,36,.78));
+                    box-shadow: inset 0 1px rgba(255,255,255,.025);
+                }
+                #nfc-faction-wrapper .nfc-stat-card { padding:10px 11px; }
+                #nfc-faction-wrapper .nfc-stat-card::before {
+                    content:"";
+                    position:absolute;
+                    inset:0 auto 0 0;
+                    width:3px;
+                    background:#5b9fe9;
+                    opacity:.8;
+                }
+                #nfc-faction-wrapper .nfc-stat-label { color:#aebed3; font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; }
+                #nfc-faction-wrapper .nfc-stat-value { margin-top:5px; font-size:21px; font-weight:850; line-height:1.08; overflow-wrap:anywhere; }
+                #nfc-faction-wrapper .nfc-stat-detail { margin-top:7px; color:#c5d1df; font-size:11px; font-weight:600; line-height:1.35; }
+                #nfc-faction-wrapper .nfc-panel-card { padding:10px 11px; margin-bottom:10px; }
+                #nfc-faction-wrapper .nfc-empty-card { min-height:0; color:#aebed3; font-size:11px; line-height:1.45; }
+                #nfc-faction-wrapper .nfc-notice-card { min-height:0; border-color:#8a6e36; background:rgba(151,111,36,.18); color:#f1cb82; font-size:11px; line-height:1.5; }
+                #nfc-faction-wrapper .nfc-card-title { color:#f4f8ff; font-size:12px; font-weight:850; line-height:1.25; }
+                #nfc-faction-wrapper .nfc-info-card { min-height:0; }
+                #nfc-faction-wrapper .nfc-info-row { display:flex; justify-content:space-between; gap:12px; padding:5px 0; border-bottom:1px solid rgba(116,140,171,.2); }
+                #nfc-faction-wrapper .nfc-info-row:last-child { border-bottom:0; padding-bottom:0; }
+                #nfc-faction-wrapper .nfc-info-label { color:#c5d1df; font-size:11px; font-weight:650; }
+                #nfc-faction-wrapper .nfc-info-value { flex:0 1 auto; font-size:11px; font-weight:800; text-align:right; overflow-wrap:anywhere; }
+                #nfc-faction-wrapper .nfc-chain-card { min-height:0; }
+                #nfc-faction-wrapper .nfc-chain-heading,
+                #nfc-faction-wrapper .nfc-war-scoreline { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+                #nfc-faction-wrapper .nfc-chain-total { color:#9dd8ff; font-size:11px; font-weight:800; white-space:nowrap; }
+                #nfc-faction-wrapper .nfc-chain-track { width:100%; height:10px; margin:9px 0 7px; overflow:hidden; border:1px solid #34445e; border-radius:999px; background:#101824; }
+                #nfc-faction-wrapper .nfc-chain-fill { height:100%; border-radius:inherit; transition:width .3s ease, background .3s ease; }
+                #nfc-faction-wrapper .nfc-chain-timers { display:flex; justify-content:space-between; gap:10px; color:#aebed3; font-size:10px; font-weight:650; }
+                #nfc-faction-wrapper .nfc-chain-timers [id] { font-weight:850; }
+                #nfc-faction-wrapper .nfc-war-card { min-height:0; text-align:center; }
+                #nfc-faction-wrapper .nfc-war-title { color:#f4f8ff; font-size:14px; font-weight:900; }
+                #nfc-faction-wrapper .nfc-war-tags { margin-top:3px; color:#dbe8f8; font-size:12px; font-weight:800; }
+                #nfc-faction-wrapper .nfc-war-tags span { color:#72839a; padding:0 5px; }
+                #nfc-faction-wrapper .nfc-war-score { margin:5px 0 9px; color:#fff; font-size:23px; font-weight:900; letter-spacing:.02em; }
+                #nfc-faction-wrapper .nfc-war-score span { color:#7e91aa; padding:0 2px; }
+                #nfc-faction-wrapper .nfc-war-track { position:relative; width:100%; height:14px; overflow:hidden; border:1px solid #455a78; border-radius:999px; background:linear-gradient(90deg,rgba(79,184,106,.18),#162130 50%,rgba(79,184,106,.18)); }
+                #nfc-faction-wrapper .nfc-war-centerline { position:absolute; left:calc(50% - 1px); top:0; width:2px; height:100%; background:#dfe9f6; opacity:.75; }
+                #nfc-faction-wrapper .nfc-war-marker { position:absolute; top:1px; width:10px; height:10px; border:1px solid #fff; border-radius:50%; transition:left .3s ease, background .3s ease; }
+                #nfc-faction-wrapper .nfc-war-scoreline { margin-top:6px; color:#dbe8f8; font-size:10px; font-weight:800; }
+                #nfc-faction-wrapper .nfc-war-note { margin-top:5px; color:#aebed3; font-size:10px; }
+                #nfc-faction-wrapper .nfc-ffscouter-summary { padding:10px 11px; border:1px solid #34445e; border-radius:9px; background:linear-gradient(145deg,rgba(34,50,76,.88),rgba(17,24,36,.82)); box-shadow:inset 0 1px rgba(255,255,255,.025); }
+                #nfc-faction-wrapper .nfc-ffscouter-heading { min-width:0; }
+                #nfc-faction-wrapper .nfc-ffscouter-title { color:#f4f8ff; font-size:13px; font-weight:900; }
+                #nfc-faction-wrapper .nfc-ffscouter-subtitle { margin-top:3px; color:#b9c7d8; font-size:10px; line-height:1.35; }
+                #nfc-faction-wrapper .nfc-ffscouter-guidance { margin-top:3px; color:#8fa2ba; font-size:9px; line-height:1.35; }
+                #nfc-faction-wrapper .nfc-primary-action { border:1px solid #4a92d6; border-radius:6px; background:#356da5; color:#fff; padding:6px 9px; font-size:10px; font-weight:800; cursor:pointer; white-space:nowrap; }
+                #nfc-faction-wrapper .nfc-primary-action:hover { background:#4081c2; }
+                #nfc-faction-wrapper .nfc-ffscouter-filter-panel { border:1px solid #3c4d65; border-radius:8px; padding:7px 8px; background:rgba(10,15,24,.68); }
+                #nfc-faction-wrapper .nfc-settings-layout [style*="#3d3d3d"] { border-color:#34445e !important; border-radius:9px !important; background:linear-gradient(145deg,rgba(34,50,76,.72),rgba(17,24,36,.7)) !important; box-shadow:inset 0 1px rgba(255,255,255,.025); }
+                #nfc-faction-wrapper .nfc-ffscouter-stat-grid .nfc-stat-card { min-height:76px; padding:8px 9px; }
+                #nfc-faction-wrapper .nfc-ffscouter-stat-grid .nfc-stat-value { font-size:18px; }
+                #nfc-faction-wrapper .nfc-ffscouter-stat-grid .nfc-stat-detail { margin-top:5px; font-size:10px; }
+                #nfc-faction-wrapper .nfc-war-target-table-shell { border:1px solid #34445e; border-radius:9px; background:rgba(10,15,24,.78); box-shadow:inset 0 1px rgba(255,255,255,.02); }
+                #nfc-faction-wrapper .nfc-war-target-head { background:#25364f; color:#e8f1fc; border-bottom:1px solid #4a5e7c; }
+                #nfc-faction-wrapper .nfc-war-target-sort-header { font-size:10px; font-weight:850; }
+                #nfc-faction-wrapper .nfc-war-target-row { border-bottom:1px solid #273449; background:rgba(18,28,42,.36); transition:background .12s ease; }
+                #nfc-faction-wrapper .nfc-war-target-row:nth-child(even) { background:rgba(32,47,69,.34); }
+                #nfc-faction-wrapper .nfc-war-target-row:hover { background:rgba(52,80,116,.42); }
+                #nfc-faction-wrapper .nfc-war-target-row:last-child { border-bottom:0; }
+                #nfc-faction-wrapper .ntc-attack-button { border:1px solid #c5535b !important; border-radius:6px !important; background:#a63f48 !important; box-shadow:inset 0 1px rgba(255,255,255,.13); transition:filter .15s ease, transform .15s ease; }
+                #nfc-faction-wrapper .ntc-attack-button:hover { filter:brightness(1.15); transform:translateY(-1px); }
+                #nfc-faction-wrapper #nfc-content button:not(.ntc-attack-button) { transition:filter .15s ease, transform .15s ease; }
+                #nfc-faction-wrapper #nfc-content button:not(.ntc-attack-button):hover:not(:disabled) { filter:brightness(1.12); }
                 #nfc-faction-wrapper[data-theme="light"] #nfc-drag-handle {
-                    background-color: #e2e8f0 !important;
+                    background: #e8f0fa !important;
                     border-bottom-color: #cbd5e1 !important;
                 }
+                #nfc-faction-wrapper[data-theme="light"] #nfc-title { color:#172033 !important; }
                 #nfc-faction-wrapper[data-theme="light"] #nfc-main-body,
                 #nfc-faction-wrapper[data-theme="light"] #nfc-content {
                     color: #172033 !important;
@@ -4411,13 +4585,16 @@
                     background-color: #e2e8f0 !important;
                     border-color: #cbd5e1 !important;
                 }
-                #nfc-faction-wrapper[data-theme="light"] .nfc-tab {
+                #nfc-faction-wrapper[data-theme="light"] .nfc-tab,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-subtab {
                     background: #e2e8f0 !important;
                     border-color: #cbd5e1 !important;
                     color: #172033 !important;
                 }
-                #nfc-faction-wrapper[data-theme="light"] .nfc-tab[style*="#3b5998"] {
-                    background: #3b5998 !important;
+                #nfc-faction-wrapper[data-theme="light"] .nfc-tab.is-active,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-subtab.is-active {
+                    background: linear-gradient(135deg, #3d6fac, #315987) !important;
+                    border-color: #315987 !important;
                     color: #ffffff !important;
                 }
                 #nfc-faction-wrapper[data-theme="light"] :not(button)[style*="color: #fff"],
@@ -4461,6 +4638,58 @@
                 #nfc-faction-wrapper[data-theme="light"] .ntc-war-filter-group-label {
                     color: #475569 !important;
                 }
+                #nfc-faction-wrapper[data-theme="light"] #nfc-main-body {
+                    background: linear-gradient(180deg, #f8fafc, #edf3fb) !important;
+                }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-primary-nav,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-section-meta {
+                    background: #ffffff !important;
+                    border-color: #cbd5e1 !important;
+                }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-section-label { color:#315987 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-section-status { color:#475569 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-stat-card,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-panel-card,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-ffscouter-summary {
+                    background: #ffffff !important;
+                    border-color: #cbd5e1 !important;
+                    box-shadow: 0 1px 3px rgba(15,23,42,.05) !important;
+                }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-empty-card { color:#475569 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-notice-card { background:#fff8e8 !important; border-color:#d7b96d !important; color:#795b17 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-card-title,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-title,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-ffscouter-title { color:#172033 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-stat-label,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-stat-detail,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-info-label,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-chain-timers,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-note,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-ffscouter-subtitle,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-ffscouter-guidance { color:#475569 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-tags,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-scoreline { color:#334155 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-score { color:#172033 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-chain-track { background:#edf3fb !important; border-color:#cbd5e1 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-chain-timers [id] { color:#334155 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-track { background:linear-gradient(90deg,rgba(79,184,106,.16),#edf3fb 50%,rgba(79,184,106,.16)) !important; border-color:#94a3b8 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-ffscouter-filter-panel { background:#f8fafc !important; border-color:#cbd5e1 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-settings-layout [style*="#3d3d3d"] { background:#ffffff !important; border-color:#cbd5e1 !important; box-shadow:0 1px 3px rgba(15,23,42,.05) !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-table-shell { background:#fff !important; border-color:#cbd5e1 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-head { background:#e8f0fa !important; color:#172033 !important; border-color:#cbd5e1 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-row,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-row:nth-child(even) { background:#fff !important; border-color:#e2e8f0 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-row:hover { background:#eef5ff !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-player a { color:#2369a8 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-online.nfc-online-online,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-status.nfc-status-okay,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-ff { color:#247342 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-online.nfc-online-idle,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-status.nfc-status-travel { color:#9a5c0a !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-online.nfc-online-offline,
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-online.nfc-online-unknown { color:#64748b !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-status.nfc-status-hospital { color:#b23a48 !important; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-war-target-stats { color:#7950b2 !important; }
                 #nfc-faction-wrapper #nfc-content {
                     container-type: inline-size;
                     flex: 1 1 auto;
@@ -4616,13 +4845,13 @@
                     border-top: 2px solid #777;
                 }
             </style>
-            <div id="nfc-drag-handle" style="background-color: #2c2c2c; padding: 8px 10px; display: flex; justify-content: space-between; align-items: center; cursor: move; border-bottom: 1px solid #444; user-select: none;">
-                <span id="nfc-title" style="color: #fff; font-size: 12px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">🧭 Naughty Faction Companion v${SCRIPT_VERSION}</span>
-                <button id="nfc-toggle-view-btn" type="button" title="Minimize Naughty Faction Companion" aria-label="Minimize Naughty Faction Companion" style="width: 32px; height: 28px; flex: 0 0 32px; display: grid; place-items: center; background-color: #444; color: #fff; border: 1px solid #666; padding: 0; border-radius: 5px; cursor: pointer; font-size: 18px; font-weight: 700; line-height: 1;">−</button>
-            </div>
+            <header id="nfc-drag-handle">
+                <span id="nfc-title">🧭 Naughty Faction Companion v${SCRIPT_VERSION}</span>
+                <button id="nfc-toggle-view-btn" type="button" title="Minimize Naughty Faction Companion" aria-label="Minimize Naughty Faction Companion">−</button>
+            </header>
 
             <div id="nfc-main-body" style="padding: 10px; box-sizing: border-box; flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;">
-                <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px;">${navHtml}</div>
+                <nav class="nfc-primary-nav" aria-label="Naughty Faction Companion sections">${navHtml}</nav>
                 <div id="nfc-content" style="display: grid; gap: 8px; color: #fff; font-size: 11px;"></div>
             </div>
             <div class="nfc-resize-handle" data-corner="top-left" title="Resize this tab" style="position:absolute;left:0;top:0;width:20px;height:20px;cursor:nwse-resize;z-index:4;touch-action:none;"></div>
@@ -4791,8 +5020,8 @@
                 renderTabContent();
                 dashboard.querySelectorAll(".nfc-tab").forEach((tabButton) => {
                     const selected = tabButton.getAttribute("data-tab") === state.currentTab;
-                    tabButton.style.background = selected ? '#3b5998' : '#2a2a2a';
-                    tabButton.style.fontWeight = selected ? '700' : '400';
+                    tabButton.classList.toggle("is-active", selected);
+                    tabButton.setAttribute("aria-current", selected ? "page" : "false");
                 });
             });
         });

@@ -34,6 +34,15 @@ assert.match(renderer, /faction\.war \|\| data\?\.war/, "renderer must retain th
 assert.match(factionFetch, /warsRequestFailed \? \(previousFaction\.war \|\| null\) : null/, "failed wars requests must retain the last valid war");
 assert.match(refresh, /currentFaction\.war\?\.warId/, "target refresh must validate the current war before committing");
 assert.match(refresh, /warTargets: \{ \.\.\.refreshed, war: \{ \.\.\.war \} \}/, "target cache must carry its war snapshot");
+assert.match(source, /function hasRankedWarStarted\(war\)/, "static target lookup must wait for the Ranked War start time");
+assert.match(refresh, /if \(!hasRankedWarStarted\(war\)\)/, "target refresh must wait for the Ranked War start time");
+assert.match(refresh, /const loadStatic = !cacheMatchesWar \|\| !Number\(existing\.staticLookupAttemptedAt \|\| 0\)/, "FFScouter data must be loaded once per Ranked War");
+assert.match(factionFetch, /let warTargets = previousWarTargets \|\| null;/, "ordinary faction refreshes must preserve the static FFScouter snapshot");
+assert.doesNotMatch(factionFetch, /fetchWarTargetData\(/, "ordinary faction refreshes must not trigger FFScouter or target-profile lookups");
+assert.match(source, /function pauseWindowActivity\(\)/, "minimizing must pause all refresh timers");
+assert.match(source, /function resumeWindowActivity\(\)/, "restoring must resume permitted refresh timers");
+assert.match(source, /if \(state\.isMinimized\) return Promise\.reject/, "request wrappers must block API calls while minimized");
+assert.match(source, /if \(state\.isMinimized\) return false;/, "refresh entry points must pause while minimized");
 assert.doesNotMatch(renderer, /buildStatCard\("Estimates"/, "backend Estimates card must remain hidden");
 assert.match(controls, /input\.onwheel/, "FF range fields must support wheel stepping");
 assert.match(controls, /event\.preventDefault\(\)/, "FF wheel stepping must not scroll the page");
@@ -54,6 +63,9 @@ assert.match(source, /widgetBody\.style\.overflowY = "hidden"/, "the script wind
 assert.match(source, /function fitCurrentContentToWidget\(\)/, "non-table panels must scale to fit the available window height");
 assert.match(source, /requestAnimationFrame\(fitCurrentContentToWidget\)/, "card fitting must run after renders and size changes");
 assert.match(source, /min-height:0;flex:1 1 auto;border:1px solid #343a43/, "only the FFScouter player table may consume remaining height and scroll");
+assert.match(source, /ntc-ffscouter-summary/, "the FFScouter summary must have an independently responsive container");
+assert.match(source, /availableSummaryHeight = Math\.max\(58, Math\.floor\(layout\.clientHeight \* 0\.48\)\)/, "the FFScouter summary must shrink to leave room for the target table");
+assert.doesNotMatch(source, /faction\.factionNews/, "the General tab must not retain News-card data");
 
 const defaults = { okay: true, hospitalized: true, traveling: true, online: true, idle: true, offline: true };
 const targets = [

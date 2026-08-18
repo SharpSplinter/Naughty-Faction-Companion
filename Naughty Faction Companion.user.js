@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.3
+// @version      1.0.7
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.3";
+    const SCRIPT_VERSION = "1.0.7";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const TORN_V1_BASE_URL = "https://api.torn.com/";
@@ -604,6 +604,7 @@
     }
 
     function secureCustomFetch(url) {
+        if (state.isMinimized) return Promise.reject(new Error("Naughty Faction Companion is minimized; API requests are paused."));
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: "GET",
@@ -671,6 +672,7 @@
     }
 
     function requestFFScouter(endpoint, params = {}) {
+        if (state.isMinimized) return Promise.reject(new Error("Naughty Faction Companion is minimized; API requests are paused."));
         const url = new URL(`${FFSCOUTER_BASE_URL}/${endpoint}`);
         Object.entries(params).forEach(([name, value]) => {
             if (value !== undefined && value !== null && value !== "") url.searchParams.set(name, String(value));
@@ -840,18 +842,22 @@
         });
     }
 
-    async function fetchWarTargetData(apiKey, war, fallbackRoster = [], options = {}) {
-        const { includeStats = true, existingStats = [] } = options;
+    async function fetchWarTargetData(apiKey, war, options = {}) {
+        const { loadStatic = false, existing = {} } = options;
         if (!war?.oppId) throw new Error("No active enemy faction was found.");
-        const rosterResponse = await fetchJson(withKey(`${BASE_URL}faction/${war.oppId}/members`, apiKey));
-        const roster = Array.isArray(rosterResponse?.members) ? rosterResponse.members : (Array.isArray(rosterResponse) ? rosterResponse : fallbackRoster);
+        let roster = Array.isArray(existing.targets) ? existing.targets : [];
+        let ffResults = Array.isArray(existing.ffResults) ? existing.ffResults : [];
+        let ffLimits = existing.ffLimits || null;
+        let statsError = existing.statsError || "";
+
+        if (loadStatic) {
+            const rosterResponse = await fetchJson(withKey(`${BASE_URL}faction/${war.oppId}/members`, apiKey));
+            roster = Array.isArray(rosterResponse?.members) ? rosterResponse.members : (Array.isArray(rosterResponse) ? rosterResponse : []);
+        }
         const playerIds = roster.map((member) => Number(member?.id || 0)).filter(Boolean);
         if (!playerIds.length) throw new Error("Enemy faction roster is empty.");
 
-        let ffResults = existingStats;
-        let ffLimits = null;
-        let statsError = "";
-        if (includeStats) {
+        if (loadStatic) {
             try {
                 const ffResponse = await queryFFScouterStats(playerIds);
                 ffResults = ffResponse.results;
@@ -881,7 +887,9 @@
             statsError,
             liveError,
             liveSource,
-            statsFetchedAt: includeStats ? Date.now() : Number(options.statsFetchedAt || 0),
+            staticLookupAttemptedAt: loadStatic ? Date.now() : Number(existing.staticLookupAttemptedAt || 0),
+            staticFetchedAt: loadStatic ? Date.now() : Number(existing.staticFetchedAt || 0),
+            statsFetchedAt: loadStatic ? Date.now() : Number(existing.statsFetchedAt || 0),
             liveFetchedAt: Date.now()
         };
     }
@@ -1683,19 +1691,6 @@
                 ? previousFaction.warTargets
                 : null;
             let warTargets = previousWarTargets || null;
-            if (war && getStoredFFScouterKey()) {
-                try {
-                    warTargets = await fetchWarTargetData(apiKey, war);
-                } catch (targetError) {
-                    warTargets = {
-                        ...(previousWarTargets || {}),
-                        enemyFactionId: war.oppId,
-                        enemyFactionName: war.oppName,
-                        targets: Array.isArray(previousWarTargets?.targets) ? previousWarTargets.targets : [],
-                        error: targetError.message
-                    };
-                }
-            }
             if (warTargets && war) warTargets = { ...warTargets, war: { ...war } };
 
             const result = {
@@ -2898,10 +2893,10 @@
 
         return `
             <div class="ntc-ffscouter-layout" style="display:flex;flex-direction:column;gap:9px;min-height:0;height:100%;">
-                <div style="border:1px solid #343a43;border-radius:8px;padding:10px;background:rgba(20,20,20,.72);display:grid;gap:8px;">
+                <div class="ntc-ffscouter-summary" style="border:1px solid #343a43;border-radius:8px;padding:10px;background:rgba(20,20,20,.72);display:grid;gap:8px;">
                     <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap;">
                         <div><div style="color:#fff;font-size:13px;font-weight:850;">${escapeHtml(war.oppTag)} War Targets</div><div style="color:#929eac;font-size:10px;margin-top:2px;">${targets.length} shown / ${allTargets.length} members · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div><div style="color:#697582;font-size:9px;margin-top:3px;">Availability: Okay → Hospital (soonest first) → Traveling/Abroad · click headers to sort within groups</div><div style="color:#697582;font-size:9px;margin-top:2px;">Drag ⠿ to reorder columns · drag a header's right edge to resize</div></div>
-                        <div style="display:flex;gap:6px;flex-wrap:wrap;"><button id="refresh-war-live-btn" style="background:#3b5998;color:#fff;border:0;border-radius:5px;padding:6px 9px;font-size:10px;cursor:pointer;">Refresh Live Status</button><button id="refresh-war-all-btn" style="background:#2f6f50;color:#fff;border:0;border-radius:5px;padding:6px 9px;font-size:10px;cursor:pointer;">Refresh All Data</button></div>
+                        <div style="display:flex;gap:6px;flex-wrap:wrap;"><button id="refresh-war-live-btn" style="background:#3b5998;color:#fff;border:0;border-radius:5px;padding:6px 9px;font-size:10px;cursor:pointer;">Refresh Live Status</button></div>
                     </div>
                     <div class="ntc-war-target-filter-panel" style="display:flex;align-items:center;gap:7px 12px;flex-wrap:wrap;border:1px solid #343d48;border-radius:7px;padding:6px 8px;background:rgba(11,15,20,.72);">
                         <div style="display:grid;gap:1px;flex:0 0 auto;"><span class="ntc-war-filter-heading" style="color:#fff;font-size:10px;font-weight:900;">Sort &amp; View</span><span style="color:#697582;font-size:8px;white-space:nowrap;">${escapeHtml(activeSort.label)} · ${sortDirection}</span></div>
@@ -2928,17 +2923,12 @@
         const factionBasic = faction.factionBasic || {};
         const factionStats = Array.isArray(faction.factionStats) ? faction.factionStats : [];
         const members = Array.isArray(faction.factionMembers) ? faction.factionMembers : [];
-        const rawNews = Array.isArray(faction.factionNews) ? faction.factionNews : (
-            faction.factionNews && Array.isArray(faction.factionNews.news) ? faction.factionNews.news : []
-        );
-
         const membersCount = Number(factionBasic.members ?? members.length ?? 0);
         const respect = Number(factionBasic.respect ?? getStatValue(factionStats, "respect") ?? 0);
         const cards = [
             buildStatCard("Faction", factionBasic.name || userFaction.name || userFaction.faction_name || "Unknown", `ID ${factionBasic.id || userFaction.id || userFaction.faction_id || "-"}`),
             buildStatCard("Members", membersCount, "Current member count"),
-            buildStatCard("Respect", respect, "Faction respect"),
-            buildStatCard("News", rawNews.length, "Recent news entries")
+            buildStatCard("Respect", respect, "Faction respect")
         ].join("");
 
         const chain = faction.chain || {};
@@ -3118,6 +3108,7 @@
     }
 
     async function refreshSectionByKey(sectionKey, statusEl) {
+        if (state.isMinimized) return false;
         const apiKey = getStoredKey();
         debugLog("Manual section refresh requested", { sectionKey, apiKeyPresent: !!apiKey });
         if (!apiKey) {
@@ -3613,20 +3604,32 @@
         });
     }
 
-    async function refreshWarTargets(includeStats = false) {
+    function hasRankedWarStarted(war) {
+        const start = Number(war?.start || 0);
+        return start > 0 && Date.now() >= start * 1000;
+    }
+
+    async function refreshWarTargets() {
+        if (state.isMinimized) return false;
         if (state.warTargetsRefreshInFlight) return false;
         const faction = state.caches.faction || {};
         const war = faction.war || null;
         const apiKey = getStoredKey();
         if (!apiKey || !war || !getStoredFFScouterKey()) return false;
         const existing = faction.warTargets || {};
+        if (!hasRankedWarStarted(war)) {
+            state.caches.faction = {
+                ...faction,
+                warTargets: { ...existing, war: { ...war }, targets: [], error: "FFScouter targets load after the Ranked War begins." }
+            };
+            if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") renderTabContent();
+            return false;
+        }
+        const cacheMatchesWar = Number(existing.war?.warId || 0) === Number(war.warId || 0);
+        const loadStatic = !cacheMatchesWar || !Number(existing.staticLookupAttemptedAt || 0);
         state.warTargetsRefreshInFlight = true;
         try {
-            const refreshed = await fetchWarTargetData(apiKey, war, [], {
-                includeStats: includeStats || !Array.isArray(existing.ffResults) || existing.ffResults.length === 0,
-                existingStats: existing.ffResults || [],
-                statsFetchedAt: existing.statsFetchedAt || 0
-            });
+            const refreshed = await fetchWarTargetData(apiKey, war, { loadStatic, existing });
             const currentFaction = state.caches.faction || {};
             if (Number(currentFaction.war?.warId || 0) !== Number(war.warId || 0)) return false;
             state.caches.faction = { ...currentFaction, warTargets: { ...refreshed, war: { ...war } } };
@@ -3643,7 +3646,13 @@
             if (Number(currentFaction.war?.warId || 0) === Number(war.warId || 0)) {
                 state.caches.faction = {
                     ...currentFaction,
-                    warTargets: { ...existing, war: { ...war }, error: error.message, liveFetchedAt: Date.now() }
+                    warTargets: {
+                        ...existing,
+                        war: { ...war },
+                        error: error.message,
+                        staticLookupAttemptedAt: loadStatic ? Date.now() : Number(existing.staticLookupAttemptedAt || 0),
+                        liveFetchedAt: Date.now()
+                    }
                 };
             }
             if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") renderTabContent();
@@ -3790,20 +3799,14 @@
                 setStoredDashboardState({ factionSubTab: subTab, windowSizes: state.windowSizes });
                 applyCurrentWidgetSize();
                 renderTabContent();
-                if (subTab === "ffscouter") void refreshWarTargets(false);
+                if (subTab === "ffscouter") void refreshWarTargets();
             };
         });
         const liveButton = document.getElementById("refresh-war-live-btn");
-        const allButton = document.getElementById("refresh-war-all-btn");
         if (liveButton) liveButton.onclick = async () => {
             liveButton.disabled = true;
             liveButton.textContent = "Refreshing...";
-            await refreshWarTargets(false);
-        };
-        if (allButton) allButton.onclick = async () => {
-            allButton.disabled = true;
-            allButton.textContent = "Refreshing...";
-            await refreshWarTargets(true);
+            await refreshWarTargets();
         };
     }
 
@@ -3816,15 +3819,15 @@
 
     function startWarTargetsRefreshTimer() {
         stopWarTargetsRefreshTimer();
-        if (state.currentTab !== "faction" || state.factionSubTab !== "ffscouter") return;
+        if (state.isMinimized || state.currentTab !== "faction" || state.factionSubTab !== "ffscouter") return;
         const setting = getAutoRefreshSetting("faction:ffscouter");
         if (!setting.enabled) return;
         state.warTargetsRefreshTimer = setInterval(() => {
-            if (state.currentTab !== "faction" || state.factionSubTab !== "ffscouter") {
+            if (state.isMinimized || state.currentTab !== "faction" || state.factionSubTab !== "ffscouter") {
                 stopWarTargetsRefreshTimer();
                 return;
             }
-            void refreshWarTargets(false);
+            void refreshWarTargets();
         }, setting.seconds * 1000);
     }
 
@@ -3950,9 +3953,10 @@
 
     function startChainCountdownTimer() {
         stopChainCountdownTimer();
+        if (state.isMinimized) return;
         const updateCountdown = () => {
             const elements = document.querySelectorAll("[data-chain-seconds]");
-            if (!elements.length || state.currentTab !== "faction") {
+            if (state.isMinimized || !elements.length || state.currentTab !== "faction") {
                 stopChainCountdownTimer();
                 return;
             }
@@ -4027,6 +4031,7 @@
 
     async function refreshAllSections(options = {}) {
         const { silent = false } = options;
+        if (state.isMinimized) return false;
         const apiKey = getStoredKey();
         debugLog("Faction refresh initiated", { silent, apiKeyPresent: !!apiKey });
         if (!apiKey) {
@@ -4078,6 +4083,10 @@
     // Company updates once daily at a fixed UTC time (see isCompanyUpdateDue).
     // Inventory is fully manual-only. Activity has been removed entirely.
     function performAutoRefreshCycle() {
+        if (state.isMinimized) {
+            state.autoRefreshTimer = null;
+            return;
+        }
         const apiKey = getStoredKey();
         if (!apiKey) {
             debugLog("Auto refresh skipped: no API key");
@@ -4126,11 +4135,11 @@
 
     function startFactionLiveRefreshTimer() {
         stopFactionLiveRefreshTimer();
-        if (state.currentTab !== "faction" || state.factionSubTab !== "general") return;
+        if (state.isMinimized || state.currentTab !== "faction" || state.factionSubTab !== "general") return;
         const setting = getAutoRefreshSetting("faction:general");
         if (!setting.enabled) return;
         state.factionLiveRefreshTimer = setInterval(() => {
-            if (state.currentTab !== "faction" || state.factionSubTab !== "general") {
+            if (state.isMinimized || state.currentTab !== "faction" || state.factionSubTab !== "general") {
                 stopFactionLiveRefreshTimer();
                 return;
             }
@@ -4280,13 +4289,40 @@
         if (!widgetBody || !content || state.isMinimized) return;
 
         content.style.zoom = "1";
-        if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") return;
+        if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") {
+            const layout = content.querySelector(".ntc-ffscouter-layout");
+            const summary = layout?.querySelector(".ntc-ffscouter-summary");
+            if (!layout || !summary) return;
+
+            summary.style.zoom = "1";
+            const availableSummaryHeight = Math.max(58, Math.floor(layout.clientHeight * 0.48));
+            const requiredSummaryHeight = Math.max(summary.scrollHeight, summary.offsetHeight);
+            summary.style.zoom = String(Math.min(1, availableSummaryHeight / Math.max(1, requiredSummaryHeight)));
+            return;
+        }
 
         const bodyRect = widgetBody.getBoundingClientRect();
         const contentRect = content.getBoundingClientRect();
         const availableHeight = Math.max(1, bodyRect.bottom - contentRect.top);
         const requiredHeight = Math.max(content.scrollHeight, content.offsetHeight);
         content.style.zoom = String(Math.min(1, availableHeight / Math.max(1, requiredHeight)));
+    }
+
+    function pauseWindowActivity() {
+        stopChainCountdownTimer();
+        stopFactionLiveRefreshTimer();
+        stopWarTargetsRefreshTimer();
+        if (state.autoRefreshTimer) clearTimeout(state.autoRefreshTimer);
+        state.autoRefreshTimer = null;
+    }
+
+    function resumeWindowActivity() {
+        if (state.isMinimized) return;
+        scheduleAutoRefresh();
+        if (state.currentTab !== "faction") return;
+        startChainCountdownTimer();
+        startFactionLiveRefreshTimer();
+        if (state.factionSubTab === "ffscouter") startWarTargetsRefreshTimer();
     }
 
     function applyWidgetView() {
@@ -4317,6 +4353,7 @@
             title.style.letterSpacing = "0.06em";
             toggleBtn.style.display = "none";
             dashboard.title = "Naughty Faction Companion — click to restore";
+            pauseWindowActivity();
             applyWidgetPosition();
         } else {
             widgetBody.style.display = "flex";
@@ -4336,6 +4373,7 @@
             toggleBtn.innerText = "_";
             dashboard.title = "";
             applyCurrentWidgetSize();
+            resumeWindowActivity();
         }
     }
 
@@ -4473,6 +4511,11 @@
                 #nfc-faction-wrapper #nfc-content.ntc-ffscouter-active .ntc-ffscouter-layout {
                     min-height: 0;
                     height: 100%;
+                }
+                #nfc-faction-wrapper #nfc-content.ntc-ffscouter-active .ntc-ffscouter-summary {
+                    flex: 0 1 auto;
+                    min-height: 0;
+                    transform-origin: top left;
                 }
                 #nfc-faction-wrapper #nfc-content.ntc-inventory-active {
                     flex: 1 1 auto;

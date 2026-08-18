@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.12
+// @version      1.0.13
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.12";
+    const SCRIPT_VERSION = "1.0.13";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -4317,12 +4317,12 @@
         if (!widgetBody || !dragHandle || !title || !toggleBtn || !resizeHandles.length) return;
 
         if (state.isMinimized) {
-            widgetBody.style.display = "none";
-            dashboard.style.width = "48px";
+            widgetBody.style.setProperty("display", "none", "important");
+            dashboard.style.width = "36px";
             dashboard.style.height = "36px";
-            dashboard.style.minWidth = "48px";
+            dashboard.style.minWidth = "36px";
             dashboard.style.minHeight = "36px";
-            dashboard.style.maxWidth = "48px";
+            dashboard.style.maxWidth = "36px";
             dashboard.style.maxHeight = "36px";
             resizeHandles.forEach((handle) => { handle.style.display = "none"; });
             dragHandle.style.padding = "0";
@@ -4339,7 +4339,7 @@
             pauseWindowActivity();
             applyWidgetPosition();
         } else {
-            widgetBody.style.display = "flex";
+            widgetBody.style.setProperty("display", "flex", "important");
             widgetBody.style.flexDirection = "column";
             widgetBody.style.flex = "1 1 auto";
             widgetBody.style.minHeight = "0";

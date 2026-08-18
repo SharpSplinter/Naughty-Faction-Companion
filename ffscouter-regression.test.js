@@ -43,6 +43,10 @@ assert.match(source, /data-corner="bottom-right"/, "bottom-right window resize g
 assert.doesNotMatch(source, /data-corner="top-right"/, "top-right corner must remain reserved for Minimize");
 assert.match(source, /resizeCorner\.endsWith\("left"\)/, "corner resize must support both left-side grips");
 assert.match(source, /resizeCorner\.startsWith\("top"\)/, "corner resize must support top-left grip");
+assert.match(source, /overflow-x: hidden !important/, "widget content must not overflow horizontally");
+assert.match(source, /min-inline-size: 0 !important/, "cards and fields must be allowed to shrink with the widget");
+assert.match(source, /max-inline-size: 100% !important/, "cards and fields must remain constrained to the widget width");
+assert.match(source, /Math\.max\(1, Math\.floor\(floors\[i\] \* scale\)\)/, "FFScouter columns must scale below fixed floors at extreme widths");
 
 const defaults = { okay: true, hospitalized: true, traveling: true, online: true, idle: true, offline: true };
 const targets = [

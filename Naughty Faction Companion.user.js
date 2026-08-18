@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.0
+// @version      1.0.1
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.0";
+    const SCRIPT_VERSION = "1.0.1";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const TORN_V1_BASE_URL = "https://api.torn.com/";
@@ -2764,8 +2764,11 @@
         if (floorTotal >= availableWidth) {
             // Even hard floors don't fit (extremely narrow viewport) — scale floors down
             // proportionally as a last resort rather than forcing horizontal scroll.
+            // Do not retain a fixed pixel minimum here: a six-column table at a very
+            // narrow PDA width must stay inside its container, even if each cell has
+            // to become extremely compact.
             const scale = availableWidth / floorTotal;
-            return Object.fromEntries(cols.map((key, i) => [key, Math.max(18, Math.floor(floors[i] * scale))]));
+            return Object.fromEntries(cols.map((key, i) => [key, Math.max(1, Math.floor(floors[i] * scale))]));
         }
 
         const shrinkable = naturalTotal - floorTotal;
@@ -4431,7 +4434,13 @@
                 #nfc-faction-wrapper #nfc-content {
                     container-type: inline-size;
                     min-width: 0;
-                    font-size: clamp(10px, 2.4cqi, 12px) !important;
+                    max-width: 100%;
+                    overflow-x: hidden;
+                    font-size: clamp(9px, 2.4cqi, 12px) !important;
+                }
+                #nfc-faction-wrapper #nfc-main-body {
+                    min-width: 0;
+                    overflow-x: hidden !important;
                 }
                 #nfc-faction-wrapper #nfc-content.ntc-ffscouter-active {
                     flex: 1 1 auto;
@@ -4458,9 +4467,17 @@
                 #nfc-faction-wrapper #nfc-content *,
                 #nfc-faction-wrapper #nfc-main-body > * {
                     box-sizing: border-box;
-                    min-width: 0;
-                    max-width: 100%;
+                    min-inline-size: 0 !important;
+                    max-inline-size: 100% !important;
                     overflow-wrap: anywhere;
+                }
+                #nfc-faction-wrapper #nfc-content [style*="display: flex"] {
+                    flex-wrap: wrap !important;
+                }
+                #nfc-faction-wrapper #nfc-content input,
+                #nfc-faction-wrapper #nfc-content select,
+                #nfc-faction-wrapper #nfc-content button {
+                    max-width: 100% !important;
                 }
                 #nfc-faction-wrapper #nfc-content [style*="grid-template-columns: repeat("] {
                     grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr)) !important;
@@ -4488,8 +4505,10 @@
                     table-layout: fixed !important;
                 }
                 #nfc-faction-wrapper #nfc-content .ntc-attack-button {
-                    min-width: max-content !important;
-                    max-width: none !important;
+                    min-width: 0 !important;
+                    max-width: 100% !important;
+                    padding: 4px 5px !important;
+                    font-size: clamp(7px, 2.2cqi, 10px) !important;
                     white-space: nowrap !important;
                     overflow-wrap: normal !important;
                     word-break: keep-all !important;
@@ -4502,6 +4521,23 @@
                 @container (max-width: 430px) {
                     #nfc-faction-wrapper #nfc-content [style*="grid-template-columns"] {
                         grid-template-columns: minmax(0, 1fr) !important;
+                    }
+                }
+                @container (max-width: 330px) {
+                    #nfc-faction-wrapper #nfc-content {
+                        font-size: 8px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content [style*="padding"] {
+                        padding: 5px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content button {
+                        padding: 4px 5px !important;
+                        font-size: 8px !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .ntc-war-target-table th,
+                    #nfc-faction-wrapper #nfc-content .ntc-war-target-table td {
+                        padding: 3px 2px !important;
+                        font-size: 7px !important;
                     }
                 }
                 .nfc-resize-handle::after {

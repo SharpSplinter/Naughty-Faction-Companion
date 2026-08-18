@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.11
+// @version      1.0.12
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.11";
+    const SCRIPT_VERSION = "1.0.12";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -4327,12 +4327,14 @@
             resizeHandles.forEach((handle) => { handle.style.display = "none"; });
             dragHandle.style.padding = "0";
             dragHandle.style.height = "36px";
+            dragHandle.style.width = "100%";
             dragHandle.style.justifyContent = "center";
-            dragHandle.style.cursor = "move";
-            title.textContent = `NTC v${SCRIPT_VERSION}`;
+            dragHandle.style.cursor = "pointer";
+            title.textContent = "NFC";
             title.style.fontSize = "11px";
             title.style.letterSpacing = "0.06em";
             toggleBtn.style.display = "none";
+            dashboard.style.cursor = "pointer";
             dashboard.title = "Naughty Faction Companion — click to restore";
             pauseWindowActivity();
             applyWidgetPosition();
@@ -4346,12 +4348,14 @@
             resizeHandles.forEach((handle) => { handle.style.display = "block"; });
             dragHandle.style.padding = "8px 10px";
             dragHandle.style.height = "auto";
+            dragHandle.style.width = "auto";
             dragHandle.style.justifyContent = "space-between";
             title.textContent = `🧭 Naughty Faction Companion v${SCRIPT_VERSION}`;
             title.style.fontSize = "12px";
             title.style.letterSpacing = "normal";
             toggleBtn.style.display = "block";
             toggleBtn.innerText = "_";
+            dashboard.style.cursor = "";
             dashboard.title = "";
             applyCurrentWidgetSize();
             resumeWindowActivity();
@@ -4694,8 +4698,8 @@
             isDragging = false;
         });
 
-        dragHandle.addEventListener("click", (e) => {
-            if (e.target.closest("#nfc-toggle-view-btn") || !state.isMinimized || didDrag) return;
+        dashboard.addEventListener("click", (e) => {
+            if (!state.isMinimized || didDrag) return;
             state.isMinimized = false;
             setStoredDashboardState({ isMinimized: false });
             applyWidgetView();

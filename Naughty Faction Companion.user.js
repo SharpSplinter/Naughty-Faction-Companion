@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.13
+// @version      1.0.14
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.13";
+    const SCRIPT_VERSION = "1.0.14";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -3166,7 +3166,6 @@
                         <input type="password" id="torn-api-key-input" value="${escapeHtml(getStoredKey())}" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 1; font-size: 11px;" placeholder="Enter Torn API key" />
                         <button id="save-api-key-btn" style="background: #3b5998; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Save</button>
                     </div>
-                    <button id="full-refresh-btn" style="background: #a13b3b; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Refresh Faction</button>
                     <div style="display: grid; gap: 6px;">${refreshMarkup}</div>
                 </div>
             `;
@@ -3311,7 +3310,6 @@
         if (!contentEl || state.currentTab !== "settings") return;
 
         const saveButton = document.getElementById("save-api-key-btn");
-        const fullRefreshButton = document.getElementById("full-refresh-btn");
         const themeToggleButton = document.getElementById("theme-toggle-btn");
         const apiKeyInput = document.getElementById("torn-api-key-input");
         const ffscouterKeyInput = document.getElementById("ffscouter-api-key-input");
@@ -3437,15 +3435,6 @@
                 if (ffscouterKeyInput) ffscouterKeyInput.value = "";
                 setFFScouterStatus("Not configured");
                 if (status) status.textContent = "FFScouter key cleared.";
-            };
-        }
-
-        if (fullRefreshButton && !fullRefreshButton.dataset.bound) {
-            fullRefreshButton.dataset.bound = "true";
-            fullRefreshButton.onclick = async () => {
-                debugLog("Manual faction refresh button clicked");
-                if (status) status.innerText = "Refreshing faction data...";
-                await refreshAllSections();
             };
         }
 

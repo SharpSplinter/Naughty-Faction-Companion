@@ -1,13 +1,13 @@
 // ==UserScript==
-// @name         Naughty Torn Companion
-// @namespace    https://github.com/xf4k31tx/Naughty-Torn-Companion
-// @version      5.22.19
-// @description  One-stop Torn dashboard for personal, faction, company, and inventory tracking.
+// @name         Naughty Faction Companion
+// @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
+// @version      1.0.0
+// @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
-// @source       https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.user.js
-// @updateURL    https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.user.js
-// @downloadURL  https://raw.githubusercontent.com/xf4k31tx/Naughty-Torn-Companion/refs/heads/main/Naughty%20Torn%20Companion.user.js
+// @source       https://raw.githubusercontent.com/xf4k31tx/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
+// @updateURL    https://raw.githubusercontent.com/xf4k31tx/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
+// @downloadURL  https://raw.githubusercontent.com/xf4k31tx/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM.getValue
 // @grant        GM.setValue
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "5.22.19";
+    const SCRIPT_VERSION = "1.0.0";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const TORN_V1_BASE_URL = "https://api.torn.com/";
@@ -78,28 +78,24 @@
 
     // Legacy localStorage keys — read once during migration, then never touched again.
     const LEGACY_STORAGE = {
-        key: "TORN_V2_USER_KEY",
-        inventory: "TORN_V2_INVENTORY_DATA",
-        position: "TORN_V2_WIDGET_POS",
-        dashboard: "TORN_V2_DASHBOARD_STATE"
+        key: "NFC_LEGACY_USER_KEY",
+        inventory: "NFC_LEGACY_INVENTORY_DATA",
+        position: "NFC_LEGACY_WIDGET_POS",
+        dashboard: "NFC_LEGACY_DASHBOARD_STATE"
     };
 
     // GM-storage keys (Tampermonkey GM.getValue/GM.setValue — shared across all matched
     // domains/pages, unlike localStorage which is scoped per-origin).
     const APP_STORAGE = {
-        key: "TORN_V2_USER_KEY",
-        ffscouterKey: "TORN_V2_FFSCOUTER_KEY",
-        position: "TORN_V2_WIDGET_POS",
-        dashboard: "TORN_V2_DASHBOARD_STATE",
-        companyStockHistory: "TORN_V2_COMPANY_STOCK_HISTORY",
-        networthTracking: "TORN_V2_NETWORTH_TRACKING",
-        migrated: "TORN_V2_GM_MIGRATED_V1",
+        key: "NFC_V1_USER_KEY",
+        ffscouterKey: "NFC_V1_FFSCOUTER_KEY",
+        position: "NFC_V1_WIDGET_POS",
+        dashboard: "NFC_V1_DASHBOARD_STATE",
+        companyStockHistory: "NFC_V1_COMPANY_STOCK_HISTORY",
+        networthTracking: "NFC_V1_NETWORTH_TRACKING",
+        migrated: "NFC_V1_GM_MIGRATED_V1",
         sections: {
-            overview: "TORN_V2_CACHE_OVERVIEW",
-            personal: "TORN_V2_CACHE_PERSONAL",
-            faction: "TORN_V2_CACHE_FACTION",
-            company: "TORN_V2_CACHE_COMPANY",
-            inventory: "TORN_V2_CACHE_INVENTORY"
+            faction: "NFC_V1_CACHE_FACTION"
         }
     };
 
@@ -110,16 +106,8 @@
     // Views that have remote data. Sub-tabs sharing a source are intentionally
     // deduplicated: one response refreshes every view backed by that source.
     const AUTO_REFRESH_TARGETS = [
-        { id: "overview:general", label: "Overview › General", section: "overview", defaultEnabled: true, defaultSeconds: 300 },
-        { id: "overview:status", label: "Overview › Status", section: "overview", defaultEnabled: true, defaultSeconds: 300 },
-        { id: "personal:info", label: "Personal › Info", section: "personal", defaultEnabled: true, defaultSeconds: 300 },
-        { id: "personal:skills", label: "Personal › Skills / Education", section: "personal", defaultEnabled: true, defaultSeconds: 300 },
-        { id: "personal:perks", label: "Personal › Perks", section: "personal", defaultEnabled: true, defaultSeconds: 300 },
-        { id: "personal:awards", label: "Personal › Awards", section: "personal", defaultEnabled: true, defaultSeconds: 300 },
         { id: "faction:general", label: "Faction › General", section: "faction", defaultEnabled: true, defaultSeconds: 10 },
-        { id: "faction:ffscouter", label: "Faction › FFScouter", section: "warTargets", defaultEnabled: true, defaultSeconds: 30 },
-        { id: "company:general", label: "Company", section: "company", defaultEnabled: true, defaultSeconds: 86400 },
-        { id: "inventory:general", label: "Inventory", section: "inventory", defaultEnabled: false, defaultSeconds: 300 }
+        { id: "faction:ffscouter", label: "Faction › FFScouter", section: "warTargets", defaultEnabled: true, defaultSeconds: 30 }
     ];
     const AUTO_REFRESH_DEFAULTS = Object.fromEntries(AUTO_REFRESH_TARGETS.map((target) => [target.id, {
         enabled: target.defaultEnabled,
@@ -135,11 +123,7 @@
     // is manual-refresh-only; a player knows when their own inventory changes, so it
     // never needs a background/staleness-triggered fetch. The Activity tab has been
     // removed entirely (redundant with Torn's own built-in notifications).
-    const SECTION_STALENESS_MS = {
-        overview: QUICK_REFRESH_MS,   // 5 min
-        personal: QUICK_REFRESH_MS,   // 5 min
-        faction: QUICK_REFRESH_MS     // 5 min
-    };
+    const SECTION_STALENESS_MS = { faction: QUICK_REFRESH_MS };
 
     const WAR_TARGET_FILTER_DEFAULTS = {
         okay: true,
@@ -159,8 +143,7 @@
         warTargetColumnWidths: { player: 112, online: 64, status: 150, stats: 82, ff: 44, attack: 62 },
         warTargetColumnLayoutVersion: 2,
         expandedCategories: new Set(),
-        currentTab: "overview",
-        overviewSubTab: "general",
+        currentTab: "faction",
         factionSubTab: "general",
         settingsSubTab: "controls",
         personalSubTab: "info",
@@ -395,7 +378,7 @@
 
     function readOfficialTornNetworth() {
         const root = document.querySelector('li[aria-label^="Networth:"]');
-        if (!root || root.closest("#torn-v2-inventory-wrapper")) return 0;
+        if (!root || root.closest("#nfc-faction-wrapper")) return 0;
         const source = root.getAttribute("aria-label") || root.textContent || "";
         const match = source.match(/Networth:\s*\$?([\d,]+)/i);
         return match ? Number(match[1].replace(/,/g, "")) : 0;
@@ -528,13 +511,6 @@
                 if (legacyKey) await gmSetValue(APP_STORAGE.key, legacyKey);
                 if (legacyPosition) await gmSetValue(APP_STORAGE.position, legacyPosition);
                 if (legacyDashboard) await gmSetValue(APP_STORAGE.dashboard, legacyDashboard);
-                if (legacyInventory) {
-                    await gmSetValue(APP_STORAGE.sections.inventory, {
-                        data: legacyInventory,
-                        lastRefresh: Date.now(),
-                        status: "Migrated from legacy storage"
-                    });
-                }
                 await gmSetValue(APP_STORAGE.migrated, true);
                 debugLog("Legacy localStorage migrated to GM storage", {
                     hadKey: !!legacyKey, hadInventory: !!legacyInventory,
@@ -549,12 +525,8 @@
         state.ffscouterKey = (await gmGetValue(APP_STORAGE.ffscouterKey, "")) || "";
         state.ffscouterStatus = state.ffscouterKey ? "Saved · Not verified" : "Not configured";
         state.widgetPosition = await gmGetValue(APP_STORAGE.position, null);
-        state.companyStockHistory = await gmGetValue(APP_STORAGE.companyStockHistory, {}) || {};
-        state.networthTracking = await gmGetValue(APP_STORAGE.networthTracking, { official: null, history: [] }) || { official: null, history: [] };
-
-        const dashboardState = await gmGetValue(APP_STORAGE.dashboard, { currentTab: "overview" });
-        state.currentTab = dashboardState.currentTab || "overview";
-        state.overviewSubTab = dashboardState.overviewSubTab || state.overviewSubTab;
+        const dashboardState = await gmGetValue(APP_STORAGE.dashboard, { currentTab: "faction" });
+        state.currentTab = dashboardState.currentTab === "settings" ? "settings" : "faction";
         state.factionSubTab = dashboardState.factionSubTab || state.factionSubTab;
         state.settingsSubTab = dashboardState.settingsSubTab || state.settingsSubTab;
         state.personalSubTab = dashboardState.personalSubTab || state.personalSubTab;
@@ -2810,7 +2782,7 @@
     // widget-body padding and the table-wrap border) so columns can be sized to fit
     // before the table is even in the DOM (colgroup widths are computed at render time).
     function getWarTargetTableAvailableWidth() {
-        const widgetPadding = 20; // #widget-main-body has 10px padding on each side
+        const widgetPadding = 20; // #nfc-main-body has 10px padding on each side
         const wrapBorder = 2;     // .ntc-war-target-table-wrap has a 1px border on each side
         // state.dashboard is only assigned AFTER the widget element is appended to the page
         // (see initializeDOMDashboard). But if FFScouter is the tab restored from a previous
@@ -3154,20 +3126,8 @@
 
         try {
             switch (sectionKey) {
-                case "overview":
-                    setSectionCache("overview", (await fetchOverviewData(apiKey)) || state.caches.overview);
-                    break;
-                case "personal":
-                    setSectionCache("personal", (await fetchPersonalData(apiKey)) || state.caches.personal);
-                    break;
                 case "faction":
                     setSectionCache("faction", (await fetchFactionData(apiKey)) || state.caches.faction);
-                    break;
-                case "company":
-                    setSectionCache("company", (await fetchCompanyData(apiKey)) || state.caches.company);
-                    break;
-                case "inventory":
-                    setSectionCache("inventory", (await fetchInventoryData(apiKey, statusEl)) || state.caches.inventory);
                     break;
                 default:
                     return false;
@@ -3194,21 +3154,13 @@
     }
 
     function getCurrentAutoRefreshTarget() {
-        if (state.currentTab === "overview") return `overview:${state.overviewSubTab}`;
-        if (state.currentTab === "personal") return `personal:${state.personalSubTab}`;
         if (state.currentTab === "faction") return `faction:${state.factionSubTab}`;
-        if (state.currentTab === "company") return "company:general";
-        if (state.currentTab === "inventory") return "inventory:general";
         return null;
     }
 
     function renderSettingsPanel() {
         const snapshotButtons = [
-            { key: "overview", label: "Overview" },
-            { key: "personal", label: "Personal" },
-            { key: "faction", label: "Faction" },
-            { key: "company", label: "Company" },
-            { key: "inventory", label: "Inventory" }
+            { key: "faction", label: "Faction" }
         ];
 
         const currentSubTab = state.settingsSubTab || "controls";
@@ -3244,12 +3196,12 @@
                         <div style="color: #aaa; font-size: 11px; line-height: 1.4;">Clears every saved size and position for every tab, and re-applies the default layout for this device (full-width below the icon row on mobile/PDA, a floating panel on desktop).</div>
                         <button id="reset-window-size-btn" style="background: #a13b3b; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Reset Window Size &amp; Position</button>
                     </div>
-                    <div style="color: #fff; font-weight: 700; font-size: 12px;">Naughty Torn Companion · Torn API Key</div>
+                    <div style="color: #fff; font-weight: 700; font-size: 12px;">Naughty Faction Companion · Torn API Key</div>
                     <div style="display: flex; gap: 8px;">
                         <input type="password" id="torn-api-key-input" value="${escapeHtml(getStoredKey())}" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 1; font-size: 11px;" placeholder="Enter Torn API key" />
                         <button id="save-api-key-btn" style="background: #3b5998; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Save</button>
                     </div>
-                    <button id="full-refresh-btn" style="background: #a13b3b; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Refresh all sections</button>
+                    <button id="full-refresh-btn" style="background: #a13b3b; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Refresh Faction</button>
                     <div style="display: grid; gap: 6px;">${refreshMarkup}</div>
                 </div>
             `;
@@ -3257,7 +3209,7 @@
                 <div style="border: 1px solid #3d3d3d; border-radius: 8px; padding: 11px; display: grid; gap: 9px; background: rgba(255,255,255,0.02);">
                     <div>
                         <div style="color: #fff; font-weight: 800; font-size: 13px;">FFScouter</div>
-                        <div style="color: #aaa; font-size: 11px; line-height: 1.45; margin-top: 3px;">Enter the Torn API key registered with FFScouter. This credential is stored separately and is never substituted for the Naughty Torn Companion Torn API key.</div>
+                        <div style="color: #aaa; font-size: 11px; line-height: 1.45; margin-top: 3px;">Enter the Torn API key registered with FFScouter. This credential is stored separately and is never substituted for the Naughty Faction Companion Torn API key.</div>
                     </div>
                     <div style="display: flex; gap: 7px; flex-wrap: wrap;">
                         <input type="password" id="ffscouter-api-key-input" value="${escapeHtml(getStoredFFScouterKey())}" maxlength="16" autocomplete="off" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 1 1 190px; min-width: 0; font-size: 11px;" placeholder="16-character FFScouter-linked Torn key" />
@@ -3361,7 +3313,7 @@
     }
 
     function bindInventoryTableControls() {
-        const contentEl = document.getElementById("torn-companion-content");
+        const contentEl = document.getElementById("nfc-content");
         if (!contentEl || state.currentTab !== "inventory") return;
 
         const theadEl = contentEl.querySelector("thead");
@@ -3390,7 +3342,7 @@
     }
 
     function bindSettingsControls() {
-        const contentEl = document.getElementById("torn-companion-content");
+        const contentEl = document.getElementById("nfc-content");
         if (!contentEl || state.currentTab !== "settings") return;
 
         const saveButton = document.getElementById("save-api-key-btn");
@@ -3526,13 +3478,9 @@
         if (fullRefreshButton && !fullRefreshButton.dataset.bound) {
             fullRefreshButton.dataset.bound = "true";
             fullRefreshButton.onclick = async () => {
-                debugLog("Full section refresh button clicked");
-                if (status) status.innerText = "Refreshing all sections...";
-                // Explicit manual "refresh everything" action — unlike automatic/periodic
-                // refresh (which only ever touches overview/personal/faction), this button
-                // deliberately opts into company/inventory too since the user asked for
-                // genuinely everything. Activity tab has been removed entirely.
-                await refreshAllSections({ includeCompany: true, includeInventory: true });
+                debugLog("Manual faction refresh button clicked");
+                if (status) status.innerText = "Refreshing faction data...";
+                await refreshAllSections();
             };
         }
 
@@ -3647,7 +3595,7 @@
     }
 
     function bindPersonalControls() {
-        const contentEl = document.getElementById("torn-companion-content");
+        const contentEl = document.getElementById("nfc-content");
         if (!contentEl || state.currentTab !== "personal") return;
         contentEl.querySelectorAll("[data-personal-subtab]").forEach((button) => {
             button.onclick = () => {
@@ -3703,7 +3651,7 @@
     }
 
     function bindFactionControls() {
-        const contentEl = document.getElementById("torn-companion-content");
+        const contentEl = document.getElementById("nfc-content");
         if (!contentEl || state.currentTab !== "faction") return;
         contentEl.querySelectorAll("[data-war-target-filter]").forEach((input) => {
             input.onchange = () => {
@@ -3878,7 +3826,7 @@
     }
 
     function bindOverviewControls() {
-        const contentEl = document.getElementById("torn-companion-content");
+        const contentEl = document.getElementById("nfc-content");
         if (!contentEl || state.currentTab !== "overview") return;
         contentEl.querySelectorAll("[data-overview-subtab]").forEach((button) => {
             button.onclick = () => {
@@ -3948,30 +3896,21 @@
     };
 
     function renderTabContent() {
-        const contentEl = document.getElementById("torn-companion-content");
+        const contentEl = document.getElementById("nfc-content");
         if (!contentEl) return;
 
         let innerHtml = "";
         const previousTab = state.currentTab;
         switch (state.currentTab) {
-            case "personal":
-                innerHtml = renderPersonalPanel();
-                break;
             case "faction":
                 innerHtml = renderFactionPanel();
-                break;
-            case "company":
-                innerHtml = renderCompanyPanel();
-                break;
-            case "inventory":
-                innerHtml = renderInventorySection();
                 break;
             case "settings":
                 innerHtml = renderSettingsPanel();
                 break;
-            case "overview":
             default:
-                innerHtml = renderOverviewPanel();
+                state.currentTab = "faction";
+                innerHtml = renderFactionPanel();
                 break;
         }
 
@@ -3982,13 +3921,9 @@
 
         debugLog("Tab render", { previousTab, activeTab: state.currentTab, sectionStatus: state.sectionStatus });
         contentEl.classList.toggle("ntc-ffscouter-active", state.currentTab === "faction" && state.factionSubTab === "ffscouter");
-        contentEl.classList.toggle("ntc-inventory-active", state.currentTab === "inventory");
         contentEl.innerHTML = innerHtml;
-        bindInventoryTableControls();
         bindSettingsControls();
-        bindPersonalControls();
         bindFactionControls();
-        bindOverviewControls();
         bindSectionRefreshButtons();
 
         if (state.currentTab === "faction") {
@@ -4000,7 +3935,6 @@
         }
         if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") startWarTargetsRefreshTimer();
         else stopWarTargetsRefreshTimer();
-        startCooldownCountdownTimer();
     }
 
     function stopChainCountdownTimer() {
@@ -4088,15 +4022,9 @@
     }
 
     async function refreshAllSections(options = {}) {
-        // Auto-refreshable core is ONLY overview/personal/faction now — company and
-        // inventory are manual-refresh-only tabs and default to false here. The two
-        // callers that want a genuinely complete refresh (the "Refresh all sections"
-        // button and the one-time fresh-install bootstrap) explicitly pass both
-        // flags true; every automatic/periodic caller uses the defaults and only
-        // ever touches the core three. Activity tab has been removed entirely.
-        const { includeCompany = false, includeInventory = false, silent = false } = options;
+        const { silent = false } = options;
         const apiKey = getStoredKey();
-        debugLog("Full refresh initiated", { includeCompany, includeInventory, silent, apiKeyPresent: !!apiKey });
+        debugLog("Faction refresh initiated", { silent, apiKeyPresent: !!apiKey });
         if (!apiKey) {
             const status = document.getElementById("fetch-status-bar");
             if (status && !silent) status.innerText = "⚠️ Enter a Torn API key before refreshing.";
@@ -4106,31 +4034,8 @@
         const status = document.getElementById("fetch-status-bar");
         try {
             state.lastRefresh = Date.now();
-            const [overview, personal, faction] = await Promise.all([
-                fetchOverviewData(apiKey),
-                fetchPersonalData(apiKey),
-                fetchFactionData(apiKey)
-            ]);
-
-            setSectionCache("overview", overview || state.caches.overview);
-            setSectionCache("personal", personal || state.caches.personal);
+            const faction = await fetchFactionData(apiKey);
             setSectionCache("faction", faction || state.caches.faction);
-
-            if (includeCompany) {
-                const company = await fetchCompanyData(apiKey);
-                setSectionCache("company", company || state.caches.company);
-            }
-
-            // Inventory is intentionally excluded from every automatic/bulk refresh
-            // path (periodic auto-refresh, startup staleness check, and this
-            // "refresh all" action by default) unless explicitly opted into. It's a
-            // manual-refresh-only tab — see its dedicated "Refresh" button
-            // (refreshSectionByKey(...)), which is unaffected by this and always
-            // works on demand.
-            if (includeInventory) {
-                const inventoryData = await fetchInventoryData(apiKey, status);
-                setSectionCache("inventory", inventoryData || state.caches.inventory);
-            }
             state.lastRefreshBySection.all = Date.now();
             renderTabContent();
 
@@ -4366,11 +4271,11 @@
     function applyWidgetView() {
         const dashboard = state.dashboard;
         if (!dashboard) return;
-        const widgetBody = dashboard.querySelector("#widget-main-body");
-        const dragHandle = dashboard.querySelector("#widget-drag-handle");
-        const title = dashboard.querySelector("#widget-title");
-        const toggleBtn = dashboard.querySelector("#widget-toggle-view-btn");
-        const resizeHandles = dashboard.querySelectorAll(".widget-resize-handle");
+        const widgetBody = dashboard.querySelector("#nfc-main-body");
+        const dragHandle = dashboard.querySelector("#nfc-drag-handle");
+        const title = dashboard.querySelector("#nfc-title");
+        const toggleBtn = dashboard.querySelector("#nfc-toggle-view-btn");
+        const resizeHandles = dashboard.querySelectorAll(".nfc-resize-handle");
         if (!widgetBody || !dragHandle || !title || !toggleBtn || !resizeHandles.length) return;
 
         if (state.isMinimized) {
@@ -4390,7 +4295,7 @@
             title.style.fontSize = "11px";
             title.style.letterSpacing = "0.06em";
             toggleBtn.style.display = "none";
-            dashboard.title = "Naughty Torn Companion — click to restore";
+            dashboard.title = "Naughty Faction Companion — click to restore";
             applyWidgetPosition();
         } else {
             widgetBody.style.display = "flex";
@@ -4403,7 +4308,7 @@
             dragHandle.style.padding = "8px 10px";
             dragHandle.style.height = "auto";
             dragHandle.style.justifyContent = "space-between";
-            title.textContent = `🧭 Naughty Torn Companion v${SCRIPT_VERSION}`;
+            title.textContent = `🧭 Naughty Faction Companion v${SCRIPT_VERSION}`;
             title.style.fontSize = "12px";
             title.style.letterSpacing = "normal";
             toggleBtn.style.display = "block";
@@ -4414,14 +4319,14 @@
     }
 
     function initializeDOMDashboard() {
-        if (document.getElementById("torn-v2-inventory-wrapper")) return;
+        if (document.getElementById("nfc-faction-wrapper")) return;
 
         debugLog("Initializing Torn Companion dashboard");
         const storedDashboardState = getStoredDashboardState();
-        state.currentTab = storedDashboardState.currentTab || "overview";
+        state.currentTab = storedDashboardState.currentTab === "settings" ? "settings" : "faction";
 
         const dashboard = document.createElement("div");
-        dashboard.id = "torn-v2-inventory-wrapper";
+        dashboard.id = "nfc-faction-wrapper";
         dashboard.style.position = "fixed";
         dashboard.style.bottom = "20px";
         dashboard.style.right = "20px";
@@ -4438,155 +4343,151 @@
         dashboard.style.flexDirection = "column";
 
         const tabs = [
-            { id: "overview", label: "Overview" },
-            { id: "personal", label: "Personal" },
             { id: "faction", label: "Faction" },
-            { id: "company", label: "Company" },
-            { id: "inventory", label: "Inventory" },
             { id: "settings", label: "Settings" }
         ];
 
         const navHtml = tabs.map((tab) => `
-            <button data-tab="${tab.id}" class="torn-companion-tab" style="padding: 6px 8px; font-size: 10px; background: ${state.currentTab === tab.id ? '#3b5998' : '#2a2a2a'}; border: 1px solid #3d3d3d; color: #fff; border-radius: 4px; cursor: pointer; ${state.currentTab === tab.id ? 'font-weight: 700;' : ''};">${tab.label}</button>
+            <button data-tab="${tab.id}" class="nfc-tab" style="padding: 6px 8px; font-size: 10px; background: ${state.currentTab === tab.id ? '#3b5998' : '#2a2a2a'}; border: 1px solid #3d3d3d; color: #fff; border-radius: 4px; cursor: pointer; ${state.currentTab === tab.id ? 'font-weight: 700;' : ''};">${tab.label}</button>
         `).join("");
 
         dashboard.innerHTML = `
             <style>
-                #torn-v2-inventory-wrapper[data-theme="light"] #widget-drag-handle {
+                #nfc-faction-wrapper[data-theme="light"] #nfc-drag-handle {
                     background-color: #e2e8f0 !important;
                     border-bottom-color: #cbd5e1 !important;
                 }
-                #torn-v2-inventory-wrapper[data-theme="light"] #widget-main-body,
-                #torn-v2-inventory-wrapper[data-theme="light"] #torn-companion-content {
+                #nfc-faction-wrapper[data-theme="light"] #nfc-main-body,
+                #nfc-faction-wrapper[data-theme="light"] #nfc-content {
                     color: #172033 !important;
                 }
-                #torn-v2-inventory-wrapper[data-theme="light"] [style*="rgba(20,20,20"],
-                #torn-v2-inventory-wrapper[data-theme="light"] [style*="rgba(255,255,255,0.02)"],
-                #torn-v2-inventory-wrapper[data-theme="light"] [style*="linear-gradient(180deg"] {
+                #nfc-faction-wrapper[data-theme="light"] [style*="rgba(20,20,20"],
+                #nfc-faction-wrapper[data-theme="light"] [style*="rgba(255,255,255,0.02)"],
+                #nfc-faction-wrapper[data-theme="light"] [style*="linear-gradient(180deg"] {
                     background: #ffffff !important;
                     border-color: #cbd5e1 !important;
                 }
-                #torn-v2-inventory-wrapper[data-theme="light"] [style*="background-color: #151515"],
-                #torn-v2-inventory-wrapper[data-theme="light"] [style*="background: #111"] {
+                #nfc-faction-wrapper[data-theme="light"] [style*="background-color: #151515"],
+                #nfc-faction-wrapper[data-theme="light"] [style*="background: #111"] {
                     background-color: #ffffff !important;
                     border-color: #cbd5e1 !important;
                 }
-                #torn-v2-inventory-wrapper[data-theme="light"] [style*="background-color: #252525"],
-                #torn-v2-inventory-wrapper[data-theme="light"] [style*="background-color: #2c2c2c"],
-                #torn-v2-inventory-wrapper[data-theme="light"] [style*="background: #2a2a2a"] {
+                #nfc-faction-wrapper[data-theme="light"] [style*="background-color: #252525"],
+                #nfc-faction-wrapper[data-theme="light"] [style*="background-color: #2c2c2c"],
+                #nfc-faction-wrapper[data-theme="light"] [style*="background: #2a2a2a"] {
                     background-color: #e2e8f0 !important;
                     border-color: #cbd5e1 !important;
                 }
-                #torn-v2-inventory-wrapper[data-theme="light"] .torn-companion-tab {
+                #nfc-faction-wrapper[data-theme="light"] .nfc-tab {
                     background: #e2e8f0 !important;
                     border-color: #cbd5e1 !important;
                     color: #172033 !important;
                 }
-                #torn-v2-inventory-wrapper[data-theme="light"] .torn-companion-tab[style*="#3b5998"] {
+                #nfc-faction-wrapper[data-theme="light"] .nfc-tab[style*="#3b5998"] {
                     background: #3b5998 !important;
                     color: #ffffff !important;
                 }
-                #torn-v2-inventory-wrapper[data-theme="light"] :not(button)[style*="color: #fff"],
-                #torn-v2-inventory-wrapper[data-theme="light"] :not(button)[style*="color:#fff"] {
+                #nfc-faction-wrapper[data-theme="light"] :not(button)[style*="color: #fff"],
+                #nfc-faction-wrapper[data-theme="light"] :not(button)[style*="color:#fff"] {
                     color: #172033 !important;
                 }
-                #torn-v2-inventory-wrapper[data-theme="light"] [style*="color: #aaa"],
-                #torn-v2-inventory-wrapper[data-theme="light"] [style*="color: #999"],
-                #torn-v2-inventory-wrapper[data-theme="light"] [style*="color: #888"],
-                #torn-v2-inventory-wrapper[data-theme="light"] [style*="color: #ccc"],
-                #torn-v2-inventory-wrapper[data-theme="light"] [style*="color: #ddd"] {
+                #nfc-faction-wrapper[data-theme="light"] [style*="color: #aaa"],
+                #nfc-faction-wrapper[data-theme="light"] [style*="color: #999"],
+                #nfc-faction-wrapper[data-theme="light"] [style*="color: #888"],
+                #nfc-faction-wrapper[data-theme="light"] [style*="color: #ccc"],
+                #nfc-faction-wrapper[data-theme="light"] [style*="color: #ddd"] {
                     color: #475569 !important;
                 }
-                #torn-v2-inventory-wrapper[data-theme="light"] input {
+                #nfc-faction-wrapper[data-theme="light"] input {
                     background: #ffffff !important;
                     border-color: #94a3b8 !important;
                     color: #172033 !important;
                 }
-                #torn-v2-inventory-wrapper[data-theme="light"] .ntc-perk-section,
-                #torn-v2-inventory-wrapper[data-theme="light"] .ntc-perk-item {
+                #nfc-faction-wrapper[data-theme="light"] .ntc-perk-section,
+                #nfc-faction-wrapper[data-theme="light"] .ntc-perk-item {
                     background: #ffffff !important;
                     border-color: #cbd5e1 !important;
                 }
-                #torn-v2-inventory-wrapper[data-theme="light"] .ntc-perk-item span:last-child {
+                #nfc-faction-wrapper[data-theme="light"] .ntc-perk-item span:last-child {
                     color: #334155 !important;
                 }
-                #torn-v2-inventory-wrapper[data-theme="light"] .ntc-war-target-filter-panel,
-                #torn-v2-inventory-wrapper[data-theme="light"] .ntc-war-target-filter-option {
+                #nfc-faction-wrapper[data-theme="light"] .ntc-war-target-filter-panel,
+                #nfc-faction-wrapper[data-theme="light"] .ntc-war-target-filter-option {
                     background: #f8fafc !important;
                     border-color: #cbd5e1 !important;
                     color: #334155 !important;
                 }
-                #torn-v2-inventory-wrapper[data-theme="light"] .ntc-war-ff-range button {
+                #nfc-faction-wrapper[data-theme="light"] .ntc-war-ff-range button {
                     background: #e2e8f0 !important;
                     border-color: #94a3b8 !important;
                     color: #334155 !important;
                 }
-                #torn-v2-inventory-wrapper[data-theme="light"] .ntc-war-filter-heading {
+                #nfc-faction-wrapper[data-theme="light"] .ntc-war-filter-heading {
                     color: #172033 !important;
                 }
-                #torn-v2-inventory-wrapper[data-theme="light"] .ntc-war-filter-group-label {
+                #nfc-faction-wrapper[data-theme="light"] .ntc-war-filter-group-label {
                     color: #475569 !important;
                 }
-                #torn-v2-inventory-wrapper #torn-companion-content {
+                #nfc-faction-wrapper #nfc-content {
                     container-type: inline-size;
                     min-width: 0;
                     font-size: clamp(10px, 2.4cqi, 12px) !important;
                 }
-                #torn-v2-inventory-wrapper #torn-companion-content.ntc-ffscouter-active {
+                #nfc-faction-wrapper #nfc-content.ntc-ffscouter-active {
                     flex: 1 1 auto;
                     min-height: 0;
                     grid-template-rows: auto auto minmax(0, 1fr);
                 }
-                #torn-v2-inventory-wrapper #torn-companion-content.ntc-ffscouter-active .ntc-ffscouter-layout {
+                #nfc-faction-wrapper #nfc-content.ntc-ffscouter-active .ntc-ffscouter-layout {
                     min-height: 0;
                     height: 100%;
                 }
-                #torn-v2-inventory-wrapper #torn-companion-content.ntc-inventory-active {
+                #nfc-faction-wrapper #nfc-content.ntc-inventory-active {
                     flex: 1 1 auto;
                     min-height: 0;
                     grid-template-rows: auto minmax(0, 1fr);
                 }
-                #torn-v2-inventory-wrapper #torn-companion-content.ntc-inventory-active .ntc-inventory-layout {
+                #nfc-faction-wrapper #nfc-content.ntc-inventory-active .ntc-inventory-layout {
                     min-height: 0;
                     height: 100%;
                 }
-                #torn-v2-inventory-wrapper #torn-companion-content.ntc-inventory-active .ntc-inventory-table-wrap {
+                #nfc-faction-wrapper #nfc-content.ntc-inventory-active .ntc-inventory-table-wrap {
                     min-height: 160px;
                     height: 100%;
                 }
-                #torn-v2-inventory-wrapper #torn-companion-content *,
-                #torn-v2-inventory-wrapper #widget-main-body > * {
+                #nfc-faction-wrapper #nfc-content *,
+                #nfc-faction-wrapper #nfc-main-body > * {
                     box-sizing: border-box;
                     min-width: 0;
                     max-width: 100%;
                     overflow-wrap: anywhere;
                 }
-                #torn-v2-inventory-wrapper #torn-companion-content [style*="grid-template-columns: repeat("] {
+                #nfc-faction-wrapper #nfc-content [style*="grid-template-columns: repeat("] {
                     grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr)) !important;
                 }
-                #torn-v2-inventory-wrapper #torn-companion-content .ntc-personal-stats-pair {
+                #nfc-faction-wrapper #nfc-content .ntc-personal-stats-pair {
                     grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
                 }
-                #torn-v2-inventory-wrapper #torn-companion-content .ntc-battle-stats-grid {
+                #nfc-faction-wrapper #nfc-content .ntc-battle-stats-grid {
                     grid-template-columns: minmax(48px, .75fr) minmax(64px, 1fr) minmax(38px, .55fr) minmax(64px, 1fr) !important;
                     gap: 4px !important;
                 }
-                #torn-v2-inventory-wrapper #torn-companion-content .ntc-battle-stats-card span {
+                #nfc-faction-wrapper #nfc-content .ntc-battle-stats-card span {
                     font-size: clamp(9px, 1.7cqi, 12px) !important;
                 }
-                #torn-v2-inventory-wrapper #torn-companion-content table {
+                #nfc-faction-wrapper #nfc-content table {
                     max-width: 100%;
                 }
-                #torn-v2-inventory-wrapper #torn-companion-content .ntc-war-target-table-wrap {
+                #nfc-faction-wrapper #nfc-content .ntc-war-target-table-wrap {
                     width: 100% !important;
                     min-width: 0 !important;
                     max-width: 100% !important;
                 }
-                #torn-v2-inventory-wrapper #torn-companion-content .ntc-war-target-table {
+                #nfc-faction-wrapper #nfc-content .ntc-war-target-table {
                     width: 100% !important;
                     table-layout: fixed !important;
                 }
-                #torn-v2-inventory-wrapper #torn-companion-content .ntc-attack-button {
+                #nfc-faction-wrapper #nfc-content .ntc-attack-button {
                     min-width: max-content !important;
                     max-width: none !important;
                     white-space: nowrap !important;
@@ -4594,52 +4495,52 @@
                     word-break: keep-all !important;
                 }
                 @container (max-width: 520px) {
-                    #torn-v2-inventory-wrapper #torn-companion-content .ntc-personal-stats-pair {
+                    #nfc-faction-wrapper #nfc-content .ntc-personal-stats-pair {
                         grid-template-columns: minmax(0, 1fr) !important;
                     }
                 }
                 @container (max-width: 430px) {
-                    #torn-v2-inventory-wrapper #torn-companion-content [style*="grid-template-columns"] {
+                    #nfc-faction-wrapper #nfc-content [style*="grid-template-columns"] {
                         grid-template-columns: minmax(0, 1fr) !important;
                     }
                 }
-                .widget-resize-handle::after {
+                .nfc-resize-handle::after {
                     content: "";
                     position: absolute;
                     width: 9px;
                     height: 9px;
                 }
-                .widget-resize-handle[data-corner="bottom-left"]::after {
+                .nfc-resize-handle[data-corner="bottom-left"]::after {
                     left: 4px;
                     bottom: 4px;
                     border-left: 2px solid #777;
                     border-bottom: 2px solid #777;
                 }
-                .widget-resize-handle[data-corner="bottom-right"]::after {
+                .nfc-resize-handle[data-corner="bottom-right"]::after {
                     right: 4px;
                     bottom: 4px;
                     border-right: 2px solid #777;
                     border-bottom: 2px solid #777;
                 }
-                .widget-resize-handle[data-corner="top-left"]::after {
+                .nfc-resize-handle[data-corner="top-left"]::after {
                     left: 4px;
                     top: 4px;
                     border-left: 2px solid #777;
                     border-top: 2px solid #777;
                 }
             </style>
-            <div id="widget-drag-handle" style="background-color: #2c2c2c; padding: 8px 10px; display: flex; justify-content: space-between; align-items: center; cursor: move; border-bottom: 1px solid #444; user-select: none;">
-                <span id="widget-title" style="color: #fff; font-size: 12px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">🧭 Naughty Torn Companion v${SCRIPT_VERSION}</span>
-                <button id="widget-toggle-view-btn" type="button" title="Minimize Naughty Torn Companion" aria-label="Minimize Naughty Torn Companion" style="width: 32px; height: 28px; flex: 0 0 32px; display: grid; place-items: center; background-color: #444; color: #fff; border: 1px solid #666; padding: 0; border-radius: 5px; cursor: pointer; font-size: 18px; font-weight: 700; line-height: 1;">−</button>
+            <div id="nfc-drag-handle" style="background-color: #2c2c2c; padding: 8px 10px; display: flex; justify-content: space-between; align-items: center; cursor: move; border-bottom: 1px solid #444; user-select: none;">
+                <span id="nfc-title" style="color: #fff; font-size: 12px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">🧭 Naughty Faction Companion v${SCRIPT_VERSION}</span>
+                <button id="nfc-toggle-view-btn" type="button" title="Minimize Naughty Faction Companion" aria-label="Minimize Naughty Faction Companion" style="width: 32px; height: 28px; flex: 0 0 32px; display: grid; place-items: center; background-color: #444; color: #fff; border: 1px solid #666; padding: 0; border-radius: 5px; cursor: pointer; font-size: 18px; font-weight: 700; line-height: 1;">−</button>
             </div>
 
-            <div id="widget-main-body" style="padding: 10px; box-sizing: border-box; flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;">
+            <div id="nfc-main-body" style="padding: 10px; box-sizing: border-box; flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;">
                 <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px;">${navHtml}</div>
-                <div id="torn-companion-content" style="display: grid; gap: 8px; color: #fff; font-size: 11px;"></div>
+                <div id="nfc-content" style="display: grid; gap: 8px; color: #fff; font-size: 11px;"></div>
             </div>
-            <div class="widget-resize-handle" data-corner="top-left" title="Resize this tab" style="position:absolute;left:0;top:0;width:20px;height:20px;cursor:nwse-resize;z-index:4;touch-action:none;"></div>
-            <div class="widget-resize-handle" data-corner="bottom-left" title="Resize this tab" style="position:absolute;left:0;bottom:0;width:20px;height:20px;cursor:nesw-resize;z-index:4;touch-action:none;"></div>
-            <div class="widget-resize-handle" data-corner="bottom-right" title="Resize this tab" style="position:absolute;right:0;bottom:0;width:20px;height:20px;cursor:nwse-resize;z-index:4;touch-action:none;"></div>
+            <div class="nfc-resize-handle" data-corner="top-left" title="Resize this tab" style="position:absolute;left:0;top:0;width:20px;height:20px;cursor:nwse-resize;z-index:4;touch-action:none;"></div>
+            <div class="nfc-resize-handle" data-corner="bottom-left" title="Resize this tab" style="position:absolute;left:0;bottom:0;width:20px;height:20px;cursor:nesw-resize;z-index:4;touch-action:none;"></div>
+            <div class="nfc-resize-handle" data-corner="bottom-right" title="Resize this tab" style="position:absolute;right:0;bottom:0;width:20px;height:20px;cursor:nwse-resize;z-index:4;touch-action:none;"></div>
         `;
 
         document.body.appendChild(dashboard);
@@ -4649,7 +4550,7 @@
 
         applyWidgetPosition();
 
-        const toggleBtn = document.getElementById("widget-toggle-view-btn");
+        const toggleBtn = document.getElementById("nfc-toggle-view-btn");
         toggleBtn.addEventListener("click", (e) => {
             e.stopPropagation();
             if (!state.isMinimized) captureCurrentWidgetSize(false);
@@ -4658,14 +4559,14 @@
             applyWidgetView();
         });
 
-        const dragHandle = document.getElementById("widget-drag-handle");
+        const dragHandle = document.getElementById("nfc-drag-handle");
         let isDragging = false;
         let didDrag = false;
         let offsetX;
         let offsetY;
 
         dragHandle.addEventListener("mousedown", (e) => {
-            if (e.target.closest("#widget-toggle-view-btn")) return;
+            if (e.target.closest("#nfc-toggle-view-btn")) return;
             isDragging = true;
             didDrag = false;
             const rect = dashboard.getBoundingClientRect();
@@ -4700,13 +4601,13 @@
         });
 
         dragHandle.addEventListener("click", (e) => {
-            if (e.target.closest("#widget-toggle-view-btn") || !state.isMinimized || didDrag) return;
+            if (e.target.closest("#nfc-toggle-view-btn") || !state.isMinimized || didDrag) return;
             state.isMinimized = false;
             setStoredDashboardState({ isMinimized: false });
             applyWidgetView();
         });
 
-        const resizeHandles = dashboard.querySelectorAll(".widget-resize-handle");
+        const resizeHandles = dashboard.querySelectorAll(".nfc-resize-handle");
         let isResizing = false;
         let resizeStartX = 0;
         let resizeStartY = 0;
@@ -4782,14 +4683,14 @@
             }, 150);
         });
 
-        dashboard.querySelectorAll(".torn-companion-tab").forEach((button) => {
+        dashboard.querySelectorAll(".nfc-tab").forEach((button) => {
             button.addEventListener("click", () => {
                 captureCurrentWidgetSize(false);
                 state.currentTab = button.getAttribute("data-tab");
                 setStoredDashboardState({ currentTab: state.currentTab, windowSizes: state.windowSizes });
                 applyCurrentWidgetSize();
                 renderTabContent();
-                dashboard.querySelectorAll(".torn-companion-tab").forEach((tabButton) => {
+                dashboard.querySelectorAll(".nfc-tab").forEach((tabButton) => {
                     const selected = tabButton.getAttribute("data-tab") === state.currentTab;
                     tabButton.style.background = selected ? '#3b5998' : '#2a2a2a';
                     tabButton.style.fontWeight = selected ? '700' : '400';
@@ -4797,20 +4698,13 @@
             });
         });
 
-        state.sectionStatus.settings = "Auto refresh: Overview (5 min), Personal-Info (5 min), Faction (live, 10s while viewing). Company updates once daily at 18:10 UTC. Inventory is manual-only. Activity tab removed.";
+        state.sectionStatus.settings = "Faction General and FFScouter auto-refresh settings are configurable in Settings › Auto Refresh.";
         renderTabContent();
 
         if (state.apiKey) {
             const hasAnyCache = Object.values(state.caches).some((cache) => cache !== null);
             if (!hasAnyCache) {
-                // Fresh install / nothing restored from storage. Only fetches the
-                // auto-refreshable core (overview/personal/faction) — company and
-                // inventory are manual-refresh-only tabs (company also gets its own
-                // once-daily 18:10 UTC auto-update, unrelated to this bootstrap call)
-                // and stay empty until the user visits/refreshes them, even on a
-                // brand new install, for consistency with "never auto-fetched" being
-                // a strict rule for those two. Activity tab has been removed
-                // entirely.
+                // Fresh install: load only the faction data required by this helper.
                 void refreshAllSections({ silent: true });
             } else {
                 // Returning session — restored data is already showing; only refresh

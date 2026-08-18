@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.10
+// @version      1.0.11
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.10";
+    const SCRIPT_VERSION = "1.0.11";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -1558,14 +1558,11 @@
             //   state.chainReportCache (keyed by chain id, in-memory only) since a
             //   finished chain's report never changes — later refreshes only need
             //   to check for any NEW chain that's appeared since.
-            // - "Bonus Hits" is the total RESPECT specifically from chain-bonus
-            //   milestone hits (10th, 25th, 50th... hit in a chain) accrued across
-            //   the whole war, NOT a count. chainreport only exposes a per-member
-            //   bonus-hit COUNT, not the respect value of those specific hits, so
-            //   this is computed from user/attacks + the CHAIN_BONUS_RESPECT
-            //   lookup table (matching each hit's chain position), same source the
-            //   original pre-chainreport implementation used for this figure.
-            const personalContribution = { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0, bonusRespect: 0 };
+            // - "Bonus Hits" is your exact completed-chain count from
+            //   chainreport.attackers[].attacks.bonuses, plus milestones made in the
+            //   current live chain. "Bonus Respect" is the respect earned only from
+            //   those milestones, calculated from the user attack log.
+            const personalContribution = { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0, bonusHits: 0, bonusRespect: 0 };
             try {
                 if (ownFactionId) {
                     const basicResponse = await fetchJson(withKey(`${BASE_URL}user/basic`, apiKey)).catch(() => null);
@@ -1621,6 +1618,7 @@
                                 const warAttacks = Number(atk.war || 0);
                                 const totalRespect = Number(rsp.total || 0);
                                 personalContribution.warHits += warAttacks;
+                                personalContribution.bonusHits += Number(atk.bonuses || 0);
                                 // chainreport gives per-type ATTACK COUNTS but not a
                                 // per-type RESPECT breakdown. totalRespect IS already
                                 // the war-period respect for this chain whenever every
@@ -1631,8 +1629,9 @@
                             }
                         }
 
-                        // Bonus-hit respect: not available from chainreport, so pulled
-                        // from user/attacks directly + the milestone lookup table.
+                        // Bonus-hit respect is calculated from the attack log and its
+                        // milestone lookup. The count comes from completed reports;
+                        // only current active-chain milestones are added here.
                         // Known limitation: a single call with no explicit pagination —
                         // for a very long-running war with a huge attack volume this
                         // may not capture the entire window if Torn caps page size.
@@ -1643,7 +1642,12 @@
                             if (atk.result !== "Attacked") return;
                             const started = Number(atk.started || atk.timestamp_started || 0);
                             if (started < war.start || started > warWindowEnd) return;
-                            personalContribution.bonusRespect += getChainBonusRespect(atk);
+                            const bonusRespect = getChainBonusRespect(atk);
+                            if (!bonusRespect) return;
+                            personalContribution.bonusRespect += bonusRespect;
+                            if (chain.id > 0 && started >= Number(chain.start || 0)) {
+                                personalContribution.bonusHits += 1;
+                            }
                         });
                     }
                 }
@@ -2899,13 +2903,14 @@
 
         const chain = faction.chain || {};
         const war = faction.war || null;
-        const contribution = faction.personalContribution || { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0, bonusRespect: 0 };
+        const contribution = faction.personalContribution || { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0, bonusHits: 0, bonusRespect: 0 };
         const contributionCards = [
             buildStatCard("Chain Hits", contribution.chainHits, "Your successful attacks in the currently active chain (0 when no chain is active)", "#9dd8ff"),
             buildStatCard("Chain Respect", Math.floor(contribution.chainRespect || 0), "Respect earned in the currently active chain (0 when no chain is active)", "#7fe18d"),
             buildStatCard("War Hits", contribution.warHits, "Total war-flagged attacks across every chain this war, while the war is active", "#9dd8ff"),
             buildStatCard("War Respect", Math.floor(contribution.warRespect || 0), "Total respect from war-flagged attacks across every chain this war", "#7fe18d"),
-            buildStatCard("Bonus Hits", Math.floor(contribution.bonusRespect || 0), "Total respect from chain-bonus milestone hits accrued this war", "#c9a0ff")
+            buildStatCard("Bonus Hits", contribution.bonusHits, "Your total chain-bonus milestone hits this war", "#c9a0ff"),
+            buildStatCard("Bonus Respect", Math.floor(contribution.bonusRespect || 0), "Respect earned solely from your chain-bonus milestone hits this war", "#c9a0ff")
         ].join("");
 
         const factionSubTabs = [

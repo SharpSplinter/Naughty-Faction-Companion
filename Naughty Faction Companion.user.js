@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.18
+// @version      1.0.20
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
-// @match        https://www.torn.com/*
+// @match        https://www.torn.com/factions.php*
 // @source       https://raw.githubusercontent.com/xf4k31tx/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
 // @updateURL    https://raw.githubusercontent.com/xf4k31tx/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
 // @downloadURL  https://raw.githubusercontent.com/xf4k31tx/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
@@ -25,7 +25,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.18";
+    const SCRIPT_VERSION = "1.0.20";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -84,11 +84,11 @@
         const hasPDAUserAgent = TORN_PDA_UA_PATTERN.test(userAgent);
         const hasPDAScriptHandler = TORN_PDA_HANDLER_PATTERN.test(scriptHandler);
         const bridgeCandidate = !!getTornPDABridge();
-        const isTornPDA = hasPDAUserAgent || hasPDAScriptHandler;
+        const isTornPDA = false;
         return {
-            platform: isTornPDA ? "tornpda" : (bridgeCandidate ? "pda-pending" : "desktop"),
+            platform: hasPDAUserAgent || hasPDAScriptHandler || bridgeCandidate ? "pda-pending" : "desktop",
             isTornPDA,
-            pdaCandidate: isTornPDA || bridgeCandidate,
+            pdaCandidate: hasPDAUserAgent || hasPDAScriptHandler || bridgeCandidate,
             source: hasPDAUserAgent ? "user-agent" : (hasPDAScriptHandler ? "gm-info" : (bridgeCandidate ? "native-check-pending" : "desktop")),
             nativeChecked: false,
             nativeCheckInFlight: false,
@@ -300,6 +300,7 @@
             console.log("[Torn Companion]", ...args);
         }
     };
+    const PDA_STORE = { loaded: null, values: null };
 
     let safeAreaProbe = null;
 
@@ -420,12 +421,28 @@
         "'": '&#39;'
     }[char]));
 
-    // --- GM-backed persistent storage ---
-    // Design: writes are fire-and-forget async (GM.setValue), but every write ALSO
+    // --- TornPDA-storage-first persistent storage ---
+    // PDA_storage is the durable per-script store on TornPDA. GM remains the desktop
+    // and compatibility fallback. Writes update in-memory state synchronously first.
     // updates an in-memory mirror (state.*) synchronously first. Reads are therefore
     // synchronous throughout the rest of the file — render functions etc. don't need
     // to become async. The only genuinely async step is the one-time bootstrap load.
-    const gmGetValue = async (key, fallback) => {
+    const hasPdaStorage = () => typeof PDA_storage !== "undefined" && typeof PDA_storage.loadAll === "function";
+    const loadPdaStorage = async () => {
+        if (!hasPdaStorage()) return null;
+        if (!PDA_STORE.loaded) {
+            PDA_STORE.loaded = Promise.resolve(PDA_storage.loadAll()).then((values) => {
+                PDA_STORE.values = values && typeof values === "object" ? values : {};
+                return PDA_STORE.values;
+            }).catch((error) => {
+                debugLog("PDA_storage unavailable; using GM storage", error);
+                PDA_STORE.values = null;
+                return null;
+            });
+        }
+        return PDA_STORE.loaded;
+    };
+    const legacyGetValue = async (key, fallback) => {
         try {
             if (typeof GM !== "undefined" && typeof GM.getValue === "function") return await GM.getValue(key, fallback);
             if (typeof GM_getValue === "function") return await Promise.resolve(GM_getValue(key, fallback));
@@ -434,7 +451,7 @@
         }
         return fallback;
     };
-    const gmSetValue = async (key, value) => {
+    const legacySetValue = async (key, value) => {
         try {
             if (typeof GM !== "undefined" && typeof GM.setValue === "function") return await GM.setValue(key, value);
             if (typeof GM_setValue === "function") return await Promise.resolve(GM_setValue(key, value));
@@ -443,6 +460,28 @@
         }
         return undefined;
     };
+    const pdaSetValues = async (values) => {
+        const stored = await loadPdaStorage();
+        if (!stored || !hasPdaStorage()) {
+            await Promise.all(Object.entries(values).map(([key, value]) => legacySetValue(key, value)));
+            return;
+        }
+        try {
+            await PDA_storage.setMany(values);
+            Object.assign(stored, values);
+        } catch (error) {
+            debugLog(error?.code === "QuotaExceeded" ? "PDA_storage quota exceeded; using GM fallback" : "PDA_storage write failed; using GM fallback", error);
+            await Promise.all(Object.entries(values).map(([key, value]) => legacySetValue(key, value)));
+        }
+    };
+    const gmGetValue = async (key, fallback) => {
+        const stored = await loadPdaStorage();
+        if (stored && Object.prototype.hasOwnProperty.call(stored, key)) return stored[key];
+        const value = await legacyGetValue(key, fallback);
+        if (stored) await pdaSetValues({ [key]: value });
+        return value;
+    };
+    const gmSetValue = async (key, value) => pdaSetValues({ [key]: value });
 
     const getStoredKey = () => state.apiKey || "";
     const setStoredKey = (key) => {
@@ -651,6 +690,7 @@
     // everything (api key, position, dashboard state, all six section caches) into
     // the in-memory state before the dashboard renders for the first time.
     async function loadPersistedState() {
+        await loadPdaStorage();
         try {
             const alreadyMigrated = await gmGetValue(APP_STORAGE.migrated, false);
             if (!alreadyMigrated) {
@@ -760,10 +800,30 @@
         });
     }
 
+    function pdaHandler(handler, ...args) {
+        const bridge = getTornPDABridge();
+        if (bridge) return bridge.callHandler(handler, ...args);
+        return new Promise((resolve, reject) => {
+            const timeout = window.setTimeout(() => reject(new Error("TornPDA native bridge is unavailable.")), 1200);
+            window.addEventListener("flutterInAppWebViewPlatformReady", () => {
+                window.clearTimeout(timeout);
+                const readyBridge = getTornPDABridge();
+                if (!readyBridge) reject(new Error("TornPDA native bridge is unavailable."));
+                else readyBridge.callHandler(handler, ...args).then(resolve, reject);
+            }, { once: true });
+        });
+    }
+
+    function crossOriginRequest(request) {
+        if (typeof GM_xmlhttpRequest === "function") return GM_xmlhttpRequest(request);
+        if (typeof GM !== "undefined" && typeof GM.xmlHttpRequest === "function") return GM.xmlHttpRequest(request);
+        return pdaHandler("PDA_httpGet", request.url, request.headers || {}).then(request.onload, request.onerror);
+    }
+
     function secureCustomFetch(url) {
         if (state.isMinimized) return Promise.reject(new Error("Naughty Faction Companion is minimized; API requests are paused."));
         return new Promise((resolve, reject) => {
-            GM_xmlhttpRequest({
+            crossOriginRequest({
                 method: "GET",
                 url: url,
                 headers: { Accept: "application/json" },
@@ -835,7 +895,7 @@
             if (value !== undefined && value !== null && value !== "") url.searchParams.set(name, String(value));
         });
         return new Promise((resolve, reject) => {
-            GM_xmlhttpRequest({
+            crossOriginRequest({
                 method: "GET",
                 url: url.toString(),
                 headers: { Accept: "application/json" },
@@ -4614,10 +4674,16 @@
                 #nfc-faction-wrapper #nfc-toggle-view-btn:hover { filter: brightness(1.18); transform: translateY(-1px); }
                 #nfc-faction-wrapper #nfc-main-body {
                     background: linear-gradient(180deg, rgba(14,20,30,.44), rgba(11,16,25,.18));
+                }
+                #nfc-faction-wrapper #nfc-main-body,
+                #nfc-faction-wrapper #nfc-content .ntc-war-target-table-wrap,
+                #nfc-faction-wrapper dialog {
                     scrollbar-width: none;
                     -ms-overflow-style: none;
                 }
-                #nfc-faction-wrapper #nfc-main-body::-webkit-scrollbar { width: 0; height: 0; }
+                #nfc-faction-wrapper #nfc-main-body::-webkit-scrollbar,
+                #nfc-faction-wrapper #nfc-content .ntc-war-target-table-wrap::-webkit-scrollbar,
+                #nfc-faction-wrapper dialog::-webkit-scrollbar { display: none; width: 0; height: 0; }
                 #nfc-faction-wrapper .nfc-primary-nav {
                     display: flex;
                     align-items: center;
@@ -4956,12 +5022,6 @@
                     width: 100% !important;
                     min-width: 0 !important;
                     max-width: 100% !important;
-                    scrollbar-width: none;
-                    -ms-overflow-style: none;
-                }
-                #nfc-faction-wrapper #nfc-content .ntc-war-target-table-wrap::-webkit-scrollbar {
-                    width: 0;
-                    height: 0;
                 }
                 #nfc-faction-wrapper #nfc-content .ntc-war-target-table {
                     width: 100% !important;
@@ -5431,8 +5491,18 @@
         const interactionEvents = typeof window.PointerEvent === "function"
             ? { down: "pointerdown", move: "pointermove", up: "pointerup", cancel: "pointercancel" }
             : { down: "mousedown", move: "mousemove", up: "mouseup", cancel: null };
-        const isPrimaryInteraction = (event) => event.isPrimary !== false && !(event.pointerType === "mouse" && event.button !== 0);
+        const isPrimaryInteraction = (event) => event.isPrimary !== false && (typeof event.button !== "number" || event.button === 0);
         const eventMatchesPointer = (event, pointerId) => pointerId === null || typeof event.pointerId !== "number" || event.pointerId === pointerId;
+        const capturePointer = (element, pointerId) => {
+            if (pointerId === null || typeof element?.setPointerCapture !== "function") return;
+            try { element.setPointerCapture(pointerId); } catch {}
+        };
+        const releasePointer = (element, pointerId) => {
+            if (pointerId === null || typeof element?.releasePointerCapture !== "function") return;
+            try {
+                if (typeof element.hasPointerCapture !== "function" || element.hasPointerCapture(pointerId)) element.releasePointerCapture(pointerId);
+            } catch {}
+        };
         let isDragging = false;
         let didDrag = false;
         let offsetX;
@@ -5446,7 +5516,7 @@
             isDragging = true;
             didDrag = false;
             dragPointerId = typeof e.pointerId === "number" ? e.pointerId : null;
-            if (dragPointerId !== null && dashboard.setPointerCapture) dashboard.setPointerCapture(dragPointerId);
+            capturePointer(dashboard, dragPointerId);
             const rect = dashboard.getBoundingClientRect();
             offsetX = e.clientX - rect.left;
             offsetY = e.clientY - rect.top;
@@ -5492,30 +5562,39 @@
         });
 
         const resizeHandles = dashboard.querySelectorAll(".nfc-resize-handle");
+        const resizeDirections = Object.freeze({
+            "top-left": { fromLeft: true, fromTop: true },
+            "bottom-left": { fromLeft: true, fromTop: false },
+            "bottom-right": { fromLeft: false, fromTop: false }
+        });
         let isResizing = false;
         let resizeStartX = 0;
         let resizeStartY = 0;
         let resizeStartWidth = 0;
         let resizeStartHeight = 0;
-        let resizeCorner = "bottom-left";
+        let resizeDirection = resizeDirections["bottom-left"];
         let resizeStartRect = null;
         let resizeRenderTimer = null;
         let resizePointerId = null;
+        let resizeHandle = null;
 
         resizeHandles.forEach((handle) => handle.addEventListener(interactionEvents.down, (e) => {
             if (state.isMinimized) return;
             if (!isPrimaryInteraction(e)) return;
+            const direction = resizeDirections[handle.dataset.corner];
+            if (!direction) return;
             e.preventDefault();
             e.stopPropagation();
             resizeStartRect = dashboard.getBoundingClientRect();
             isResizing = true;
             resizePointerId = typeof e.pointerId === "number" ? e.pointerId : null;
-            if (resizePointerId !== null && dashboard.setPointerCapture) dashboard.setPointerCapture(resizePointerId);
+            resizeHandle = handle;
+            capturePointer(handle, resizePointerId);
             resizeStartX = e.clientX;
             resizeStartY = e.clientY;
             resizeStartWidth = resizeStartRect.width;
             resizeStartHeight = resizeStartRect.height;
-            resizeCorner = handle.dataset.corner || "bottom-left";
+            resizeDirection = direction;
             document.body.style.userSelect = "none";
         }));
 
@@ -5524,8 +5603,7 @@
             e.preventDefault();
             const limits = getWidgetSizeLimits();
             const bounds = getWidgetViewportBounds();
-            const resizeFromLeft = resizeCorner.endsWith("left");
-            const resizeFromTop = resizeCorner.startsWith("top");
+            const { fromLeft: resizeFromLeft, fromTop: resizeFromTop } = resizeDirection;
             const widthDelta = resizeFromLeft ? resizeStartX - e.clientX : e.clientX - resizeStartX;
             const heightDelta = resizeFromTop ? resizeStartY - e.clientY : e.clientY - resizeStartY;
             const maxWidth = Math.min(limits.maxWidth, resizeFromLeft ? resizeStartRect.right - bounds.minLeft : bounds.maxRight - resizeStartRect.left);
@@ -5551,8 +5629,10 @@
 
         const finishResize = (e) => {
             if (!isResizing || !eventMatchesPointer(e, resizePointerId)) return;
+            releasePointer(resizeHandle, resizePointerId);
             isResizing = false;
             resizePointerId = null;
+            resizeHandle = null;
             clearTimeout(resizeRenderTimer);
             resizeRenderTimer = null;
             document.body.style.userSelect = "";

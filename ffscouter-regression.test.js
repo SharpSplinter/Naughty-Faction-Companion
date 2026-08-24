@@ -12,6 +12,11 @@ const refresh = section("async function refreshWarTargets", "function bindFactio
 const factionFetch = section("async function fetchFactionData", "async function fetchCompanyData");
 const factionOnlyRefresh = section("async function refreshAllSections", "function performAutoRefreshCycle");
 const navigation = section("const tabs =", "const navHtml");
+const resize = section("const resizeHandles = dashboard.querySelectorAll", "let viewportLayoutTimer");
+const scrollbarStyles = section("#nfc-faction-wrapper #nfc-main-body {", "#nfc-faction-wrapper .nfc-primary-nav");
+
+assert.match(source, /@version\s+1\.0\.20/, "userscript header version must be 1.0.20");
+assert.match(source, /const SCRIPT_VERSION = "1\.0\.20";/, "displayed version must match the userscript header");
 
 for (const key of ["warTargetSort", "warTargetFilters", "warTargetFFRange", "warTargetColumnOrder", "warTargetColumnWidths"]) {
     assert.match(persistence, new RegExp(key), `${key} must be saved`);
@@ -53,8 +58,12 @@ assert.match(source, /data-corner="top-left"/, "top-left window resize grip must
 assert.match(source, /data-corner="bottom-left"/, "bottom-left window resize grip must exist");
 assert.match(source, /data-corner="bottom-right"/, "bottom-right window resize grip must exist");
 assert.doesNotMatch(source, /data-corner="top-right"/, "top-right corner must remain reserved for Minimize");
-assert.match(source, /resizeCorner\.endsWith\("left"\)/, "corner resize must support both left-side grips");
-assert.match(source, /resizeCorner\.startsWith\("top"\)/, "corner resize must support top-left grip");
+assert.match(resize, /"bottom-left": \{ fromLeft: true, fromTop: false \}/, "bottom-left grip must resize from the left");
+assert.match(resize, /"bottom-right": \{ fromLeft: false, fromTop: false \}/, "bottom-right grip must resize from the right");
+assert.match(resize, /capturePointer\(handle, resizePointerId\)/, "each active resize grip must capture its pointer when available");
+assert.match(resize, /releasePointer\(resizeHandle, resizePointerId\)/, "resize pointer capture must be released when resizing ends");
+assert.match(source, /down: "pointerdown", move: "pointermove", up: "pointerup"/, "pointer events must support resize interactions");
+assert.match(source, /down: "mousedown", move: "mousemove", up: "mouseup"/, "mouse events must remain a resize fallback");
 assert.match(source, /overflow: hidden !important/, "widget content must not overflow horizontally or vertically");
 assert.match(source, /min-inline-size: 0 !important/, "cards and fields must be allowed to shrink with the widget");
 assert.match(source, /max-inline-size: 100% !important/, "cards and fields must remain constrained to the widget width");
@@ -62,6 +71,10 @@ assert.match(source, /minWidth: Math\.min\(380, maxWidth\)/, "the script window 
 assert.match(source, /minHeight: Math\.min\(620, maxHeight\)/, "the script window must enforce a readable minimum height");
 assert.match(source, /grid-template-rows: auto auto auto minmax\(0, 1fr\)/, "FFScouter must reserve separate rows for refresh header, section title, tabs, and targets");
 assert.match(source, /scrollbar-width: none/, "FFScouter scrollbars must remain hidden without disabling scrolling");
+assert.match(scrollbarStyles, /ntc-war-target-table-wrap/, "war-target scrollbars must be visually hidden");
+assert.match(scrollbarStyles, /dialog::-webkit-scrollbar \{ display: none;/, "dialog scrollbars must be visually hidden");
+assert.match(source, /ntc-war-target-table-wrap[\s\S]*overflow-y:auto/, "war-target vertical scrolling must remain enabled");
+assert.match(source, /dialog id="ffscouter-verification-dialog"[\s\S]*overflow-y: auto/, "dialog vertical scrolling must remain enabled");
 assert.match(source, /resizeRenderTimer = setTimeout/, "FFScouter columns must recalculate while the window is being resized");
 assert.match(source, /widgetBody\.style\.overflowY = "hidden"/, "the script window itself must not vertically scroll");
 assert.match(source, /function fitCurrentContentToWidget\(\)/, "non-table panels must scale to fit the available window height");

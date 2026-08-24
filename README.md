@@ -52,11 +52,19 @@ Use the **FFScouter** sub-tab during a Ranked War to evaluate enemy targets. Cli
 
 ## Data sources and privacy
 
-The companion stores keys, layout preferences, filters, cached faction data, and FFScouter display settings only in local userscript storage under its own `NFC_V1_*` namespace. Torn data is requested directly from `api.torn.com`. FFScouter is contacted only after you configure its separate integration key.
+The companion stores keys, layout preferences, filters, cached faction data, and FFScouter display settings only in local per-script storage under its own `NFC_V1_*` namespace. Torn data is requested directly from `api.torn.com`. FFScouter is contacted only after you configure its separate integration key.
 
 FFScouter’s availability, registration, and data-policy requirements are controlled by FFScouter. This script displays a verification result before relying on that key for target analysis.
 
 API keys are secrets. Revoke any key that may have been exposed.
+
+## TornPDA compatibility and storage
+
+`PDA_storage` is the preferred durable store when the script is running in TornPDA. The companion loads its native namespace once during startup, writes related values in batches, and keeps an in-memory mirror for the interface. Existing GM/Tampermonkey values are migrated into native storage only when the native key is absent. If the native store cannot be read or written, including a quota failure, the same local GM compatibility storage remains active so saved keys, filters, layout, caches, and FFScouter settings are preserved.
+
+TornPDA is confirmed through its native `flutterInAppWebViewPlatformReady` bridge and the `isTornPDA` handler. Browser/manager hints and a narrow viewport can inform presentation, but they do not by themselves identify the runtime as native TornPDA. The compact interface reacts independently to the usable viewport; confirmed native sessions also use TornPDA's `PDA_httpGet` handler if the declared GM network request APIs are unavailable.
+
+The Faction Companion intentionally has one page scope only: `https://www.torn.com/factions.php*`. Its sole `@match` rule does not run from Torn's broad parent-page wildcard. The metadata retains both legacy and modern GM storage/network grants for Tampermonkey and TornPDA compatibility; `PDA_storage` itself does not require a userscript `@grant`.
 
 ## Updating and verification
 

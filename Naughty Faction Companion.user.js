@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.17
+// @version      1.0.18
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/*
@@ -10,6 +10,9 @@
 // @downloadURL  https://raw.githubusercontent.com/xf4k31tx/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM.info
+// @grant        GM_info
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @grant        GM.getValue
 // @grant        GM.setValue
 // @connect      api.torn.com
@@ -22,7 +25,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.17";
+    const SCRIPT_VERSION = "1.0.18";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -105,6 +108,17 @@
 
     function isTornPDACandidate() {
         return state?.runtime?.pdaCandidate ?? initialRuntime.pdaCandidate;
+    }
+
+    function compactRuntimeInfo() {
+        const viewport = getViewportMetrics();
+        const scale = Number(window.visualViewport?.scale) || 1;
+        const compact = isTornPDAEnvironment() || viewport.width <= 700 || viewport.height <= 520 || (scale > 1.1 && viewport.width <= 960);
+        return { compact, label: isTornPDAEnvironment() ? "TornPDA" : compact ? "Compact viewport" : "Desktop" };
+    }
+
+    function isCompactRuntime() {
+        return compactRuntimeInfo().compact;
     }
 
     // Legacy localStorage keys — read once during migration, then never touched again.
@@ -310,7 +324,7 @@
 
     function getWidgetViewportBounds() {
         const viewport = getViewportMetrics();
-        const usePDAInsets = isTornPDACandidate();
+        const usePDAInsets = isCompactRuntime();
         const safeArea = usePDAInsets ? getSafeAreaInsets() : { top: 0, right: 0, bottom: 0, left: 0 };
         const margin = usePDAInsets ? 6 : 0;
         return {
@@ -326,10 +340,11 @@
 
     function publishRuntimeState() {
         const viewport = getViewportMetrics();
-        state.runtime = { ...state.runtime, viewport };
+        const compact = isCompactRuntime();
+        state.runtime = { ...state.runtime, viewport, compact };
         const dashboard = state.dashboard;
         if (dashboard) {
-            dashboard.dataset.runtime = state.runtime.platform;
+            dashboard.dataset.runtime = compact ? "tornpda" : state.runtime.platform;
             dashboard.dataset.orientation = viewport.orientation;
             dashboard.dataset.minimized = String(state.isMinimized);
             dashboard.style.setProperty("--nfc-runtime-width", `${viewport.width}px`);
@@ -338,6 +353,7 @@
         window[RUNTIME_GLOBAL_KEY] = Object.freeze({
             platform: state.runtime.platform,
             isTornPDA: state.runtime.isTornPDA,
+            compact,
             pdaCandidate: state.runtime.pdaCandidate,
             source: state.runtime.source,
             nativeChecked: state.runtime.nativeChecked,
@@ -411,18 +427,21 @@
     // to become async. The only genuinely async step is the one-time bootstrap load.
     const gmGetValue = async (key, fallback) => {
         try {
-            return await GM.getValue(key, fallback);
+            if (typeof GM !== "undefined" && typeof GM.getValue === "function") return await GM.getValue(key, fallback);
+            if (typeof GM_getValue === "function") return await Promise.resolve(GM_getValue(key, fallback));
         } catch (e) {
             debugLog("GM.getValue failed", key, e);
-            return fallback;
         }
+        return fallback;
     };
     const gmSetValue = async (key, value) => {
         try {
-            await GM.setValue(key, value);
+            if (typeof GM !== "undefined" && typeof GM.setValue === "function") return await GM.setValue(key, value);
+            if (typeof GM_setValue === "function") return await Promise.resolve(GM_setValue(key, value));
         } catch (e) {
             debugLog("GM.setValue failed", key, e);
         }
+        return undefined;
     };
 
     const getStoredKey = () => state.apiKey || "";
@@ -691,7 +710,7 @@
         // once a user has moved/resized/expanded the widget, their choice is respected
         // on every later load regardless of device.
         const isFirstEverRun = state.widgetPosition === null && dashboardState.isMinimized === undefined;
-        if (isFirstEverRun && isTornPDACandidate()) {
+        if (isFirstEverRun && isCompactRuntime()) {
             state.isMinimized = true;
             // The top offset is deliberately small; safe-area insets are measured at
             // runtime so phones with a notch or rounded corners keep the badge reachable.
@@ -3277,7 +3296,7 @@
         const dialogText = state.theme === "light" ? "#17202b" : "#f1f3f5";
         const dialogMuted = state.theme === "light" ? "#536170" : "#aeb7c2";
         const runtimeViewport = state.runtime.viewport || getViewportMetrics();
-        const runtimeLabel = state.runtime.isTornPDA ? "TornPDA" : (state.runtime.pdaCandidate && !state.runtime.nativeChecked ? "Checking TornPDA…" : "Desktop");
+        const runtimeLabel = state.runtime.isTornPDA ? "TornPDA" : (state.runtime.pdaCandidate && !state.runtime.nativeChecked ? "Checking TornPDA…" : compactRuntimeInfo().label);
         const runtimeDetail = `${runtimeViewport.orientation} · ${runtimeViewport.width}×${runtimeViewport.height}`;
         const exportMarkup = snapshotButtons.map(({ key, label }) => `
             <button data-export-section="${key}" style="background: #2f5d3d; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Download ${label} to .csv</button>
@@ -3606,7 +3625,7 @@
                 // genuine first run, just re-triggerable on demand instead of only once.
                 state.windowSizes = {};
                 setStoredDashboardState({ windowSizes: state.windowSizes });
-                const defaultPosition = isTornPDACandidate()
+                const defaultPosition = isCompactRuntime()
                     ? { edge: "right", x: null, y: MOBILE_TOP_OFFSET_PX }
                     : { edge: "right", x: null, y: 20 };
                 setStoredPosition(defaultPosition);
@@ -4290,7 +4309,7 @@
         // still respected, but is clamped in real time on rotation/keyboard changes.
         let defaultWidth = 480;
         let defaultHeight = Math.min(720, Math.round(getViewportMetrics().height * 0.8));
-        if (isTornPDACandidate() && (!hasStoredWidth || !hasStoredHeight)) {
+        if (isCompactRuntime() && (!hasStoredWidth || !hasStoredHeight)) {
             defaultWidth = limits.maxWidth;
             defaultHeight = limits.maxHeight;
         }
@@ -4380,7 +4399,7 @@
         const dashboard = state.dashboard;
         if (!dashboard || state.isMinimized) return;
         const limits = getWidgetSizeLimits();
-        const size = getCurrentWidgetSize();
+        const size = isCompactRuntime() ? { width: limits.maxWidth, height: limits.maxHeight } : getCurrentWidgetSize();
         dashboard.style.minWidth = `${limits.minWidth}px`;
         dashboard.style.minHeight = `${limits.minHeight}px`;
         dashboard.style.maxWidth = `${limits.maxWidth}px`;

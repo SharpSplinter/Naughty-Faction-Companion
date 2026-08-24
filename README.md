@@ -24,7 +24,7 @@ Naughty Faction Companion is a standalone Torn faction-operations userscript for
 
 - Dark and lower-glare light themes.
 - Desktop move, resize, snap, and minimize controls.
-- Native TornPDA detection at startup, safe-area-aware mobile layout, and viewport/orientation updates.
+- Native TornPDA detection plus the same compact-viewport trigger as the other companions: effective width ≤700px, effective height ≤520px, or scale >1.1 at ≤960px. Compact mode follows safe areas and live viewport/orientation updates.
 - CSV export for cached sections.
 
 ## Installation

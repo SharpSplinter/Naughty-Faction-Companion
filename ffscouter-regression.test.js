@@ -15,8 +15,21 @@ const navigation = section("const tabs =", "const navHtml");
 const resize = section("const resizeHandles = dashboard.querySelectorAll", "let viewportLayoutTimer");
 const scrollbarStyles = section("#nfc-faction-wrapper #nfc-main-body {", "#nfc-faction-wrapper .nfc-primary-nav");
 
-assert.match(source, /@version\s+1\.0\.20/, "userscript header version must be 1.0.20");
-assert.match(source, /const SCRIPT_VERSION = "1\.0\.20";/, "displayed version must match the userscript header");
+assert.match(source, /@version\s+1\.0\.21/, "userscript header version must be 1.0.21");
+assert.match(source, /const SCRIPT_VERSION = "1\.0\.21";/, "displayed version must match the userscript header");
+assert.match(source, /const CONSOLE_TAG = "\[Naughty Faction Companion\]";/, "diagnostics must use the script-specific console prefix");
+assert.match(source, /function redactSecretText\(value\)/, "diagnostics must redact secret-bearing text");
+assert.match(source, /function getSafeRequestTarget\(method, rawUrl\)/, "API diagnostics must build a query-free request target");
+assert.match(source, /host: parsed\.host/, "API diagnostics must include the request host");
+assert.match(source, /path: parsed\.pathname/, "API diagnostics must include the request path");
+assert.match(source, /API request started/, "API diagnostics must log request starts");
+assert.match(source, /API request succeeded/, "API diagnostics must log status and duration on success");
+assert.match(source, /API request failed/, "API diagnostics must log failures");
+assert.match(source, /Storage backend selected/, "storage backend and fallback diagnostics must be visible");
+assert.match(source, /Native bridge HTTP fallback/, "native bridge fallback diagnostics must be visible");
+assert.match(source, /Startup runtime/, "startup runtime diagnostics must be visible");
+assert.doesNotMatch(source, /console\.warn\("Catalog fetch failed:/, "raw console warnings must use the secret-safe logger");
+assert.doesNotMatch(source, /console\.error\("Refresh failed:/, "raw console errors must use the secret-safe logger");
 
 for (const key of ["warTargetSort", "warTargetFilters", "warTargetFFRange", "warTargetColumnOrder", "warTargetColumnWidths"]) {
     assert.match(persistence, new RegExp(key), `${key} must be saved`);
@@ -49,7 +62,7 @@ assert.match(source, /faction\/\$\{factionId\}\/members/, "live enemy status mus
 assert.doesNotMatch(source, /TORN_V1_BASE_URL/, "legacy Torn v1 profile batches must not be used for live status");
 assert.match(source, /function pauseWindowActivity\(\)/, "minimizing must pause all refresh timers");
 assert.match(source, /function resumeWindowActivity\(\)/, "restoring must resume permitted refresh timers");
-assert.match(source, /if \(state\.isMinimized\) return Promise\.reject/, "request wrappers must block API calls while minimized");
+assert.match(source, /if \(state\.isMinimized\) \{[\s\S]*return Promise\.reject/, "request wrappers must block API calls while minimized");
 assert.match(source, /if \(state\.isMinimized\) return false;/, "refresh entry points must pause while minimized");
 assert.doesNotMatch(renderer, /buildStatCard\("Estimates"/, "backend Estimates card must remain hidden");
 assert.match(controls, /input\.onwheel/, "FF range fields must support wheel stepping");

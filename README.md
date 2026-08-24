@@ -66,6 +66,10 @@ TornPDA is confirmed through its native `flutterInAppWebViewPlatformReady` bridg
 
 The Faction Companion intentionally has one page scope only: `https://www.torn.com/factions.php*`. Its sole `@match` rule does not run from Torn's broad parent-page wildcard. The metadata retains both legacy and modern GM storage/network grants for Tampermonkey and TornPDA compatibility; `PDA_storage` itself does not require a userscript `@grant`.
 
+## Diagnostics
+
+Browser developer tools show concise diagnostics by default: startup and confirmed runtime state, native bridge and storage fallback decisions, plus each API request's method, host, path, status, and duration. Request queries, headers, bodies, API keys, and other credentials are deliberately omitted or redacted from these logs.
+
 ## Updating and verification
 
 Reopen the raw userscript URL in your userscript manager to update.

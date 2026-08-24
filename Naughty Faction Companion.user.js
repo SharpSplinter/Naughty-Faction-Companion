@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.20
+// @version      1.0.21
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/factions.php*
@@ -25,7 +25,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.20";
+    const SCRIPT_VERSION = "1.0.21";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -295,12 +295,72 @@
     };
     const getUtcDateKey = (time = Date.now()) => new Date(time).toISOString().slice(0, 10);
     const getCompanyStockDayKey = (time = Date.now()) => getUtcDateKey(time - ((18 * 60 + 8) * 60 * 1000));
-    const debugLog = (...args) => {
-        if (typeof console !== "undefined" && console.log) {
-            console.log("[Torn Companion]", ...args);
+    const CONSOLE_TAG = "[Naughty Faction Companion]";
+    const SENSITIVE_LOG_PROPERTY = /^(?:api[-_]?key|key|token|authorization|cookie|password|secret|session|ffscouterkey)$/i;
+    const OMITTED_LOG_PROPERTY = /^(?:headers?|body|data|responseText|responseHeaders)$/i;
+    const REQUEST_LOG_PROPERTY = /^(?:url|uri|href)$/i;
+    let apiRequestSequence = 0;
+
+    function redactSecretText(value) {
+        return String(value ?? "")
+            .replace(/([?&](?:api[-_]?key|key|token|authorization|cookie|password|secret|session)=)[^&#\s]*/gi, "$1[redacted]")
+            .replace(/\b((?:api[-_ ]?key|key|token|authorization|cookie|password|secret|session)\s*(?:[:=]\s*|\s+))[A-Za-z0-9._~+/=-]{6,}/gi, "$1[redacted]")
+            .replace(/((?:authorization|cookie|x-api-key)\s*[:=]\s*)[^\s,;]+/gi, "$1[redacted]");
+    }
+
+    function safeErrorMessage(error) {
+        return redactSecretText(error?.message || error || "Unknown error");
+    }
+
+    function getSafeRequestTarget(method, rawUrl) {
+        const normalizedMethod = String(method || "GET").toUpperCase();
+        try {
+            const parsed = new URL(String(rawUrl || ""), window.location.origin);
+            return { method: normalizedMethod, host: parsed.host || "unknown", path: parsed.pathname || "/" };
+        } catch (error) {
+            return { method: normalizedMethod, host: "invalid-url", path: "/" };
         }
-    };
-    const PDA_STORE = { loaded: null, values: null };
+    }
+
+    function safeLogValue(value, depth = 0) {
+        if (value === null || value === undefined || typeof value === "boolean" || typeof value === "number") return value;
+        if (typeof value === "string") return redactSecretText(value);
+        if (value instanceof Error) return { name: value.name || "Error", message: safeErrorMessage(value) };
+        if (typeof URL !== "undefined" && value instanceof URL) return getSafeRequestTarget("GET", value.toString());
+        if (Array.isArray(value)) {
+            return depth >= 2 ? `[${value.length} items]` : value.slice(0, 12).map((entry) => safeLogValue(entry, depth + 1));
+        }
+        if (typeof value === "object") {
+            if (depth >= 2) return "[object omitted]";
+            const safe = {};
+            Object.keys(value).slice(0, 20).forEach((key) => {
+                if (SENSITIVE_LOG_PROPERTY.test(key)) {
+                    safe[key] = "[redacted]";
+                } else if (OMITTED_LOG_PROPERTY.test(key)) {
+                    safe[key] = "[omitted]";
+                } else if (REQUEST_LOG_PROPERTY.test(key) && typeof value[key] === "string") {
+                    safe[key] = getSafeRequestTarget("GET", value[key]);
+                } else {
+                    safe[key] = safeLogValue(value[key], depth + 1);
+                }
+            });
+            return safe;
+        }
+        return redactSecretText(value);
+    }
+
+    function consoleLog(level, event, details) {
+        if (typeof console === "undefined") return;
+        const logger = typeof console[level] === "function" ? console[level] : console.log;
+        if (typeof logger !== "function") return;
+        if (details === undefined) logger.call(console, CONSOLE_TAG, event);
+        else logger.call(console, CONSOLE_TAG, event, safeLogValue(details));
+    }
+
+    const debugLog = (event, details) => consoleLog("log", event, details);
+    const warnLog = (event, details) => consoleLog("warn", event, details);
+    const errorLog = (event, details) => consoleLog("error", event, details);
+    const PDA_STORE = { loaded: null, values: null, fallbackLogged: false };
 
     let safeAreaProbe = null;
 
@@ -376,7 +436,14 @@
             hasPDABridge: !!getTornPDABridge()
         };
         publishRuntimeState();
-        debugLog("[NFC] Runtime detection", window[RUNTIME_GLOBAL_KEY]);
+        debugLog("Runtime state updated", {
+            mode: state.runtime.platform,
+            compact: isCompactRuntime(),
+            confirmedTornPDA: state.runtime.isTornPDA,
+            nativeChecked: state.runtime.nativeChecked,
+            source: state.runtime.source,
+            viewport: state.runtime.viewport
+        });
         if (!state.dashboard) return;
         applyCurrentWidgetSize();
         applyWidgetPosition();
@@ -390,6 +457,7 @@
         const bridge = getTornPDABridge();
         if (!bridge || state.runtime.nativeCheckInFlight || state.runtime.nativeChecked) return;
         state.runtime.nativeCheckInFlight = true;
+        debugLog("TornPDA native check started", { bridgeAvailable: true, pdaCandidate: state.runtime.pdaCandidate });
         Promise.resolve(bridge.callHandler("isTornPDA"))
             .then((response) => {
                 const confirmed = response === true || response?.isTornPDA === true || response?.is_torn_pda === true;
@@ -397,7 +465,7 @@
             })
             .catch((error) => {
                 state.runtime.nativeCheckInFlight = false;
-                debugLog("[NFC] TornPDA native check deferred", error);
+                warnLog("TornPDA native check failed; retaining current runtime", { error: safeErrorMessage(error) });
             });
     }
 
@@ -406,11 +474,24 @@
         window.addEventListener("flutterInAppWebViewPlatformReady", confirm, { once: true });
         if (getTornPDABridge()) setTimeout(confirm, 0);
         publishRuntimeState();
+        debugLog("Runtime bridge registered", {
+            bridgeAvailable: !!getTornPDABridge(),
+            pdaCandidate: state.runtime.pdaCandidate,
+            confirmedTornPDA: state.runtime.isTornPDA
+        });
     }
 
     // Logged on every boot and exposed as window.__NAUGHTY_FACTION_COMPANION_RUNTIME__
     // so TornPDA/desktop results can be confirmed without guessing from viewport width.
-    const _envDebug = () => debugLog("[NFC] Environment detection", window[RUNTIME_GLOBAL_KEY]);
+    const _envDebug = () => debugLog("Startup runtime", {
+        version: SCRIPT_VERSION,
+        mode: compactRuntimeInfo().label,
+        confirmedTornPDA: state.runtime.isTornPDA,
+        pdaCandidate: state.runtime.pdaCandidate,
+        nativeChecked: state.runtime.nativeChecked,
+        source: state.runtime.source,
+        viewport: state.runtime.viewport
+    });
     setTimeout(_envDebug, 0);
 
     const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -429,14 +510,22 @@
     // to become async. The only genuinely async step is the one-time bootstrap load.
     const hasPdaStorage = () => typeof PDA_storage !== "undefined" && typeof PDA_storage.loadAll === "function";
     const loadPdaStorage = async () => {
-        if (!hasPdaStorage()) return null;
+        if (!hasPdaStorage()) {
+            if (!PDA_STORE.fallbackLogged) {
+                PDA_STORE.fallbackLogged = true;
+                debugLog("Storage backend selected", { backend: "GM compatibility", reason: "PDA_storage unavailable" });
+            }
+            return null;
+        }
         if (!PDA_STORE.loaded) {
             PDA_STORE.loaded = Promise.resolve(PDA_storage.loadAll()).then((values) => {
                 PDA_STORE.values = values && typeof values === "object" ? values : {};
+                debugLog("Storage backend selected", { backend: "PDA_storage", storedKeys: Object.keys(PDA_STORE.values).length });
                 return PDA_STORE.values;
             }).catch((error) => {
-                debugLog("PDA_storage unavailable; using GM storage", error);
+                warnLog("PDA_storage load failed; using GM compatibility storage", { error: safeErrorMessage(error) });
                 PDA_STORE.values = null;
+                PDA_STORE.fallbackLogged = true;
                 return null;
             });
         }
@@ -447,7 +536,7 @@
             if (typeof GM !== "undefined" && typeof GM.getValue === "function") return await GM.getValue(key, fallback);
             if (typeof GM_getValue === "function") return await Promise.resolve(GM_getValue(key, fallback));
         } catch (e) {
-            debugLog("GM.getValue failed", key, e);
+            warnLog("GM storage read failed", { error: safeErrorMessage(e) });
         }
         return fallback;
     };
@@ -456,7 +545,7 @@
             if (typeof GM !== "undefined" && typeof GM.setValue === "function") return await GM.setValue(key, value);
             if (typeof GM_setValue === "function") return await Promise.resolve(GM_setValue(key, value));
         } catch (e) {
-            debugLog("GM.setValue failed", key, e);
+            warnLog("GM storage write failed", { error: safeErrorMessage(e) });
         }
         return undefined;
     };
@@ -470,7 +559,7 @@
             await PDA_storage.setMany(values);
             Object.assign(stored, values);
         } catch (error) {
-            debugLog(error?.code === "QuotaExceeded" ? "PDA_storage quota exceeded; using GM fallback" : "PDA_storage write failed; using GM fallback", error);
+            warnLog(error?.code === "QuotaExceeded" ? "PDA_storage quota exceeded; using GM compatibility storage" : "PDA_storage write failed; using GM compatibility storage", { error: safeErrorMessage(error) });
             await Promise.all(Object.entries(values).map(([key, value]) => legacySetValue(key, value)));
         }
     };
@@ -802,44 +891,115 @@
 
     function pdaHandler(handler, ...args) {
         const bridge = getTornPDABridge();
-        if (bridge) return bridge.callHandler(handler, ...args);
+        if (bridge) {
+            debugLog("Native bridge handler", { handler, state: "available" });
+            return bridge.callHandler(handler, ...args);
+        }
+        debugLog("Native bridge waiting", { handler, timeoutMs: 1200 });
         return new Promise((resolve, reject) => {
-            const timeout = window.setTimeout(() => reject(new Error("TornPDA native bridge is unavailable.")), 1200);
+            const timeout = window.setTimeout(() => {
+                warnLog("Native bridge unavailable", { handler, timeoutMs: 1200 });
+                reject(new Error("TornPDA native bridge is unavailable."));
+            }, 1200);
             window.addEventListener("flutterInAppWebViewPlatformReady", () => {
                 window.clearTimeout(timeout);
                 const readyBridge = getTornPDABridge();
-                if (!readyBridge) reject(new Error("TornPDA native bridge is unavailable."));
-                else readyBridge.callHandler(handler, ...args).then(resolve, reject);
+                if (!readyBridge) {
+                    warnLog("Native bridge unavailable after readiness event", { handler });
+                    reject(new Error("TornPDA native bridge is unavailable."));
+                    return;
+                }
+                debugLog("Native bridge handler", { handler, state: "ready" });
+                readyBridge.callHandler(handler, ...args).then(resolve, (error) => {
+                    warnLog("Native bridge handler failed", { handler, error: safeErrorMessage(error) });
+                    reject(error);
+                });
             }, { once: true });
+        });
+    }
+
+    function getCrossOriginTransport() {
+        if (typeof GM_xmlhttpRequest === "function") return "GM_xmlhttpRequest";
+        if (typeof GM !== "undefined" && typeof GM.xmlHttpRequest === "function") return "GM.xmlHttpRequest";
+        return "PDA_httpGet";
+    }
+
+    function startApiRequest(method, url) {
+        const request = {
+            id: ++apiRequestSequence,
+            ...getSafeRequestTarget(method, url),
+            transport: getCrossOriginTransport(),
+            startedAt: Date.now()
+        };
+        const { startedAt, ...details } = request;
+        debugLog("API request started", details);
+        return request;
+    }
+
+    function finishApiRequest(request, response) {
+        const { startedAt, ...details } = request;
+        debugLog("API request succeeded", {
+            ...details,
+            status: Number(response?.status) || 0,
+            durationMs: Math.max(0, Date.now() - startedAt)
+        });
+    }
+
+    function failApiRequest(request, error, response) {
+        const { startedAt, ...details } = request;
+        errorLog("API request failed", {
+            ...details,
+            status: response?.status === undefined ? undefined : Number(response.status) || 0,
+            durationMs: Math.max(0, Date.now() - startedAt),
+            error: safeErrorMessage(error)
         });
     }
 
     function crossOriginRequest(request) {
         if (typeof GM_xmlhttpRequest === "function") return GM_xmlhttpRequest(request);
         if (typeof GM !== "undefined" && typeof GM.xmlHttpRequest === "function") return GM.xmlHttpRequest(request);
+        debugLog("Native bridge HTTP fallback", { handler: "PDA_httpGet" });
         return pdaHandler("PDA_httpGet", request.url, request.headers || {}).then(request.onload, request.onerror);
     }
 
     function secureCustomFetch(url) {
-        if (state.isMinimized) return Promise.reject(new Error("Naughty Faction Companion is minimized; API requests are paused."));
+        if (state.isMinimized) {
+            debugLog("API request skipped", { ...getSafeRequestTarget("GET", url), reason: "window minimized" });
+            return Promise.reject(new Error("Naughty Faction Companion is minimized; API requests are paused."));
+        }
+        const requestLog = startApiRequest("GET", url);
         return new Promise((resolve, reject) => {
-            crossOriginRequest({
-                method: "GET",
-                url: url,
-                headers: { Accept: "application/json" },
-                onload: function(response) {
-                    if (response.status >= 200 && response.status < 300) {
-                        try {
-                            resolve(JSON.parse(response.responseText));
-                        } catch (e) {
-                            reject(new Error("Failed to parse JSON"));
+            try {
+                crossOriginRequest({
+                    method: "GET",
+                    url: url,
+                    headers: { Accept: "application/json" },
+                    onload: function(response) {
+                        if (response.status >= 200 && response.status < 300) {
+                            try {
+                                const data = JSON.parse(response.responseText);
+                                finishApiRequest(requestLog, response);
+                                resolve(data);
+                            } catch (error) {
+                                const failure = new Error("Failed to parse JSON");
+                                failApiRequest(requestLog, failure, response);
+                                reject(failure);
+                            }
+                        } else {
+                            const failure = new Error(`HTTP Status ${response.status}`);
+                            failApiRequest(requestLog, failure, response);
+                            reject(failure);
                         }
-                    } else {
-                        reject(new Error(`HTTP Status ${response.status}`));
+                    },
+                    onerror: (error) => {
+                        failApiRequest(requestLog, error);
+                        reject(error);
                     }
-                },
-                onerror: (err) => reject(err)
-            });
+                });
+            } catch (error) {
+                failApiRequest(requestLog, error);
+                reject(error);
+            }
         });
     }
 
@@ -869,7 +1029,13 @@
     async function fetchJson(url) {
         const data = await secureCustomFetch(url);
         if (data && data.error) {
-            throw new Error(data.error.error || `API error ${data.error.code || "unknown"}`);
+            const error = new Error(data.error.error || `API error ${data.error.code || "unknown"}`);
+            errorLog("API response rejected", {
+                ...getSafeRequestTarget("GET", url),
+                code: data.error.code ?? "unknown",
+                error: safeErrorMessage(error)
+            });
+            throw error;
         }
         return data;
     }
@@ -889,34 +1055,56 @@
     }
 
     function requestFFScouter(endpoint, params = {}) {
-        if (state.isMinimized) return Promise.reject(new Error("Naughty Faction Companion is minimized; API requests are paused."));
         const url = new URL(`${FFSCOUTER_BASE_URL}/${endpoint}`);
         Object.entries(params).forEach(([name, value]) => {
             if (value !== undefined && value !== null && value !== "") url.searchParams.set(name, String(value));
         });
+        if (state.isMinimized) {
+            debugLog("API request skipped", { ...getSafeRequestTarget("GET", url), reason: "window minimized" });
+            return Promise.reject(new Error("Naughty Faction Companion is minimized; API requests are paused."));
+        }
+        const requestLog = startApiRequest("GET", url);
         return new Promise((resolve, reject) => {
-            crossOriginRequest({
-                method: "GET",
-                url: url.toString(),
-                headers: { Accept: "application/json" },
-                timeout: 30000,
-                onload: (response) => {
-                    let data;
-                    try {
-                        data = JSON.parse(response.responseText);
-                    } catch (error) {
-                        reject(new Error(`FFScouter returned invalid JSON (HTTP ${response.status}).`));
-                        return;
+            try {
+                crossOriginRequest({
+                    method: "GET",
+                    url: url.toString(),
+                    headers: { Accept: "application/json" },
+                    timeout: 30000,
+                    onload: (response) => {
+                        let data;
+                        try {
+                            data = JSON.parse(response.responseText);
+                        } catch (error) {
+                            const failure = new Error(`FFScouter returned invalid JSON (HTTP ${response.status}).`);
+                            failApiRequest(requestLog, failure, response);
+                            reject(failure);
+                            return;
+                        }
+                        if (response.status < 200 || response.status >= 300 || data?.code !== undefined) {
+                            const failure = new Error(data?.error || `FFScouter request failed (HTTP ${response.status}).`);
+                            failApiRequest(requestLog, failure, response);
+                            reject(failure);
+                            return;
+                        }
+                        finishApiRequest(requestLog, response);
+                        resolve({ data, limits: parseFFScouterRateLimits(response.responseHeaders) });
+                    },
+                    onerror: () => {
+                        const failure = new Error("Unable to connect to FFScouter.");
+                        failApiRequest(requestLog, failure);
+                        reject(failure);
+                    },
+                    ontimeout: () => {
+                        const failure = new Error("FFScouter request timed out.");
+                        failApiRequest(requestLog, failure);
+                        reject(failure);
                     }
-                    if (response.status < 200 || response.status >= 300 || data?.code !== undefined) {
-                        reject(new Error(data?.error || `FFScouter request failed (HTTP ${response.status}).`));
-                        return;
-                    }
-                    resolve({ data, limits: parseFFScouterRateLimits(response.responseHeaders) });
-                },
-                onerror: () => reject(new Error("Unable to connect to FFScouter.")),
-                ontimeout: () => reject(new Error("FFScouter request timed out."))
-            });
+                });
+            } catch (error) {
+                failApiRequest(requestLog, error);
+                reject(error);
+            }
         });
     }
 
@@ -1094,7 +1282,7 @@
             if (statusEl) {
                 statusEl.innerText = `Catalog fetch warning: ${error.message}`;
             }
-            console.warn("Catalog fetch failed:", error);
+            warnLog("Catalog fetch failed", { error: safeErrorMessage(error) });
         }
 
         return priceMap;
@@ -1177,7 +1365,7 @@
 
             return { bonusMap, modsMap };
         } catch (error) {
-            console.warn("Equipment bonus lookup failed:", error);
+            warnLog("Equipment bonus lookup failed", { error: safeErrorMessage(error) });
             return { bonusMap: {}, modsMap: {} };
         }
     }
@@ -1318,7 +1506,7 @@
                         collectedRows.push({ category, name, quantity, price: marketValue, total, factionOwned, uid, equipped, bonusText, modsText });
                     });
                 } catch (error) {
-                    console.warn(`Inventory fetch failed for ${category}:`, error);
+                    warnLog("Inventory fetch failed", { category, error: safeErrorMessage(error) });
                 }
 
                 if (i < INVENTORY_CATEGORIES.length - 1) {
@@ -1870,7 +2058,7 @@
                     }
                 }
             } catch (contributionError) {
-                console.warn("Personal contribution calculation failed:", contributionError);
+                warnLog("Personal contribution calculation failed", { error: safeErrorMessage(contributionError) });
             }
 
             const previousWarTargets = war && Number(previousFaction.war?.warId || 0) === Number(war.warId || 0)
@@ -4245,7 +4433,7 @@
         } catch (error) {
             if (!silent && status) status.innerText = `Refresh failed: ${error.message}`;
             debugLog("Full refresh failed", { error: error.message });
-            console.error("Refresh failed:", error);
+            errorLog("Refresh failed", { error: safeErrorMessage(error) });
             return false;
         }
     }

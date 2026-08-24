@@ -1,0 +1,53 @@
+name: Feature request
+description: Suggest an improvement to Naughty Faction Companion.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Explain the faction-use case first. Do not include API keys, target lists, or private faction exports.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Faction use case or problem
+      description: What makes the current faction workflow difficult?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe what the companion should do and how it should look or behave.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: area
+    attributes:
+      label: Primary area
+      options:
+        - Faction General
+        - Chain or Ranked War
+        - FFScouter
+        - Refresh, storage, or export
+        - Layout or accessibility
+        - Other
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Primary runtime affected
+      options:
+        - Desktop browser with Tampermonkey
+        - TornPDA on Android
+        - TornPDA on iOS
+        - All runtimes
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing requests and did not include private data.
+          required: true

@@ -2,6 +2,10 @@
 
 Naughty Faction Companion is a standalone Torn faction-operations userscript for Tampermonkey and TornPDA. It concentrates on faction state, chains, Ranked War contribution, and FFScouter target analysis without loading unrelated personal, company, inventory, or activity dashboards.
 
+## Project goals
+
+This open-source userscript gives Torn factions a focused, local operations view for chains, Ranked War contribution, and optional FFScouter target analysis. Its goals are useful live context, privacy-conscious credential handling, predictable refresh behavior, and equal usability on desktop Tampermonkey and TornPDA. It is an independent community project and is not affiliated with Torn, TornPDA, or FFScouter.
+
 ## Features
 
 ### Faction General
@@ -27,13 +31,13 @@ Naughty Faction Companion is a standalone Torn faction-operations userscript for
 - Native TornPDA detection plus the same compact-viewport trigger as the other companions: effective width ≤700px, effective height ≤520px, or scale >1.1 at ≤960px. Compact mode follows safe areas and live viewport/orientation updates.
 - Hidden scrollbar tracks for every intentional scroll region without disabling desktop wheel/keyboard or TornPDA touch scrolling. General and Settings fit within the panel; the FFScouter player list remains the only in-panel vertical list.
 - Compact portrait and landscape reflow keeps controls, cards, statuses, filters, and tables inside the usable viewport. FFScouter fits all columns to its width and keeps only its results list vertically scrollable.
-- User-triggered CSV export for cached sections: TornPDA opens its native share sheet, while desktop/Tampermonkey downloads the file locally. Includes a complete local JSON backup/restore flow.
+- User-triggered CSV export and JSON backup for cached local data: TornPDA opens its native share sheet through `shareFile({ base64Data, fileName })`, while desktop/Tampermonkey downloads the file locally. Android and iOS choose Files or another destination from that system sheet rather than a browser save-location picker. A native share failure is shown as an error instead of being mislabeled as a download, and simultaneous share requests are prevented.
 - Native TornPDA toast feedback for successful saves, refreshes, reminder actions, and recoverable errors; desktop keeps its in-panel status feedback.
 
 ## Installation
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) or use TornPDA’s userscript support.
-2. Open the [raw userscript](https://raw.githubusercontent.com/xf4k31tx/Naughty-Faction-Companion/main/Naughty%20Faction%20Companion.user.js) and install it.
+2. Open the [raw userscript](https://raw.githubusercontent.com/SharpSplinter/Naughty-Faction-Companion/main/Naughty%20Faction%20Companion.user.js) and install it.
 3. Reload Torn and open the companion.
 4. Go to **Settings → Controls**, save a Torn API key, and use **Refresh Faction**.
 5. To use the target board, go to **Settings → Integrations**, save an FFScouter-registered Torn API key, and verify it.
@@ -51,7 +55,7 @@ Use the **FFScouter** sub-tab during a Ranked War to evaluate enemy targets. Cli
 - **Controls** shows Runtime, Screen Size, and Storage Method; stores the primary Torn API key, chooses the theme, resets panel layout, refreshes faction data, and can schedule or cancel a TornPDA-native faction reminder. Desktop leaves native reminder controls disabled.
 - **Auto Refresh** separately controls Faction General and FFScouter refresh intervals.
 - **Integrations** stores, validates, and clears the FFScouter-linked key.
-- **Exports** downloads available cached sections as CSV and can download or load a complete local JSON backup. Backups include local faction data, layout, refresh preferences, cached snapshot, and stock/networth history. API keys are excluded by default; including them at download and restoring them later both require separate explicit confirmation.
+- **Exports** saves available cached sections as CSV and can save or load a complete local JSON backup. Backups include local faction data, layout, refresh preferences, cached snapshot, and stock/networth history. API keys are excluded by default; including them at download and restoring them later both require separate explicit confirmation. TornPDA uses the system share sheet for both CSV and backup files.
 
 ## Data sources and privacy
 
@@ -86,6 +90,14 @@ node --check "Naughty Faction Companion.user.js"
 node --test ffscouter-regression.test.js storage-adapter.test.js
 ```
 
+## Community and governance
+
+- [Contributing guidelines](CONTRIBUTING.md) explain how to propose code and documentation changes.
+- [Code of Conduct](CODE_OF_CONDUCT.md) sets expectations for every project space.
+- [Security policy](SECURITY.md) explains how to report a vulnerability privately.
+- Use the [bug report](https://github.com/SharpSplinter/Naughty-Faction-Companion/issues/new?template=bug_report.yml) and [feature request](https://github.com/SharpSplinter/Naughty-Faction-Companion/issues/new?template=feature_request.yml) forms for public feedback.
+- Source is available under the permissive [MIT License](LICENSE).
+
 ## License
 
-Released under the [GNU General Public License v3.0](LICENSE).
+Released under the [MIT License](LICENSE).

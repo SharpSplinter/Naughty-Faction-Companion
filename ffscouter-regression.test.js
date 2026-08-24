@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const source = fs.readFileSync(path.join(__dirname, "Naughty Faction Companion.user.js"), "utf8");
+const readme = fs.readFileSync(path.join(__dirname, "README.md"), "utf8");
 const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 const persistence = section("const getStoredDashboardState", "function updateCompanyStockHistory");
 const restore = section("async function loadPersistedState", "async function secureCustomFetch");
@@ -19,8 +20,11 @@ const storage = section("// --- TornPDA-storage-first persistent storage ---", "
 const settings = section("function renderSettingsPanel", "function renderInventorySection");
 const settingsControls = section("function bindSettingsControls", "function bindPersonalControls");
 
-assert.match(source, /@version\s+1\.0\.28/, "userscript header version must be 1.0.28");
-assert.match(source, /const SCRIPT_VERSION = "1\.0\.28";/, "displayed version must match the userscript header");
+assert.match(source, /@version\s+1\.0\.30/, "userscript header version must be 1.0.30");
+assert.match(source, /https:\/\/github\.com\/SharpSplinter\/Naughty-Faction-Companion/, "metadata must use the renamed GitHub account");
+assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Faction-Companion\/refs\/heads\/main/, "metadata must update from the renamed account");
+assert.doesNotMatch(source + readme, /xf4k31tx/, "stale GitHub account links must not remain");
+assert.match(source, /const SCRIPT_VERSION = "1\.0\.30";/, "displayed version must match the userscript header");
 assert.match(source, /const CONSOLE_TAG = "\[Naughty Faction Companion\]";/, "diagnostics must use the script-specific console prefix");
 assert.match(source, /function redactSecretText\(value\)/, "diagnostics must redact secret-bearing text");
 assert.match(source, /function getSafeRequestTarget\(method, rawUrl\)/, "API diagnostics must build a query-free request target");
@@ -150,8 +154,12 @@ assert.match(settings, /Local backup &amp; restore/, "Settings exports must expo
 assert.match(settingsControls, /stageLocalBackupRestore\(file\)/, "selected backup files must be staged and validated");
 assert.match(settingsControls, /confirmLocalBackupRestoreInput\?\.checked/, "restoring a backup must require explicit confirmation");
 assert.match(source, /async function shareCsvWithTornPDA\(csv, fileName\)/, "TornPDA CSV exports must provide a native share-sheet path");
-assert.match(source, /pdaHandler\("shareFile", \{ base64Data, fileName \}\)/, "native CSV sharing must use TornPDA shareFile data");
+assert.match(source, /async function shareTextWithTornPDA\(text, fileName\)/, "TornPDA backups and CSV exports must share through one native path");
+assert.match(source, /bridge\.callHandler\("shareFile", \{ base64Data, fileName \}\)/, "native exports must use TornPDA shareFile data");
+assert.match(source, /response\?\.status === "success"/, "native exports must require a successful TornPDA share response");
+assert.match(source, /exportInFlight: false/, "native shares must be serialized");
 assert.match(source, /snapshot opened in the TornPDA share sheet/, "CSV export feedback must identify the native share sheet");
+assert.match(source, /Faction backup \$\{destination\}/, "Backup feedback must distinguish the native share sheet from a desktop download");
 
 const testColumns = {
     player: { minWidth: 104, hardFloor: 58 },

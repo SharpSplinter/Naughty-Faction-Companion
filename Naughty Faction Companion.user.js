@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
-// @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.28
+// @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
+// @version      1.0.30
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
-// @author       sharpsplinter [315311]
+// @author       SharpSplinter [315311]
 // @match        https://www.torn.com/factions.php*
-// @source       https://raw.githubusercontent.com/xf4k31tx/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
-// @updateURL    https://raw.githubusercontent.com/xf4k31tx/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
-// @downloadURL  https://raw.githubusercontent.com/xf4k31tx/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
+// @source       https://raw.githubusercontent.com/SharpSplinter/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
+// @updateURL    https://raw.githubusercontent.com/SharpSplinter/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
+// @downloadURL  https://raw.githubusercontent.com/SharpSplinter/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM.info
 // @grant        GM_info
@@ -27,7 +27,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.28";
+    const SCRIPT_VERSION = "1.0.30";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -265,7 +265,8 @@
             faction: null,
             company: null,
             inventory: null
-        }
+        },
+        exportInFlight: false
     };
 
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -942,18 +943,30 @@
         return { restoredKeys: restoredKeys.size, restoredApiKeys: includeSecrets };
     }
     async function downloadLocalBackup(includeApiKeys) {
-        const payload = await createLocalBackupPayload(includeApiKeys);
-        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = `naughty-faction-companion-backup-v${BACKUP_SCHEMA_VERSION}-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        URL.revokeObjectURL(url);
-        debugLog("Local backup downloaded", { includesApiKeys: payload.includesApiKeys, keyCount: Object.keys(payload.values).length });
-        return { includesApiKeys: payload.includesApiKeys, keyCount: Object.keys(payload.values).length };
+        if (state.exportInFlight) throw new Error("Another export is already in progress.");
+        state.exportInFlight = true;
+        try {
+            const payload = await createLocalBackupPayload(includeApiKeys);
+            const text = JSON.stringify(payload, null, 2);
+            const fileName = `naughty-faction-companion-backup-v${BACKUP_SCHEMA_VERSION}-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+            const share = await shareTextWithTornPDA(text, fileName);
+            if (share.native && !share.shared) throw new Error(share.message || "TornPDA could not open its share sheet.");
+            if (!share.shared) {
+                const blob = new Blob([text], { type: "application/json;charset=utf-8" });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = fileName;
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                URL.revokeObjectURL(url);
+            }
+            debugLog("Local backup exported", { includesApiKeys: payload.includesApiKeys, keyCount: Object.keys(payload.values).length, transport: share.shared ? "TornPDA shareFile" : "desktop download" });
+            return { includesApiKeys: payload.includesApiKeys, keyCount: Object.keys(payload.values).length, transport: share.shared ? "share" : "download" };
+        } finally {
+            state.exportInFlight = false;
+        }
     }
 
     const getStoredKey = () => getInjectedTornPDAApiKey() || state.apiKey || "";
@@ -3961,17 +3974,25 @@
         return btoa(binary);
     }
 
-    async function shareCsvWithTornPDA(csv, fileName) {
-        if (!canUseNativePdaFeatures()) return false;
-        const base64Data = utf8Base64(csv);
-        if (!base64Data) return false;
+    async function shareTextWithTornPDA(text, fileName) {
+        const bridge = getTornPDABridge();
+        if (!bridge && !isTornPDACandidate()) return { native: false, shared: false };
+        const base64Data = utf8Base64(text);
+        if (!base64Data) return { native: true, shared: false, message: "This runtime could not encode the export." };
         try {
-            const response = await pdaHandler("shareFile", { base64Data, fileName });
-            return response?.status !== "error";
+            const response = bridge
+                ? await bridge.callHandler("shareFile", { base64Data, fileName })
+                : await pdaHandler("shareFile", { base64Data, fileName });
+            if (response?.status === "success") return { native: true, shared: true };
+            return { native: true, shared: false, message: String(response?.message || "TornPDA could not open its share sheet.") };
         } catch (error) {
-            warnLog("Native CSV share unavailable; using local download", { error: safeErrorMessage(error) });
-            return false;
+            warnLog("Native share unavailable", { error: safeErrorMessage(error) });
+            return { native: true, shared: false, message: "TornPDA could not open its share sheet." };
         }
+    }
+
+    async function shareCsvWithTornPDA(csv, fileName) {
+        return (await shareTextWithTornPDA(csv, fileName)).shared;
     }
 
     async function downloadSectionCsv(sectionName) {
@@ -3982,12 +4003,21 @@
             if (status) status.innerText = `${sectionName} snapshot is empty.`;
             return;
         }
+        if (state.exportInFlight) return false;
+        state.exportInFlight = true;
+        try {
 
         const cleanName = sectionName.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "snapshot";
         const csv = toCsvString(source);
         const fileName = `${cleanName}-snapshot.csv`;
-        const shared = await shareCsvWithTornPDA(csv, fileName);
-        if (!shared) {
+        const share = await shareTextWithTornPDA(csv, fileName);
+        if (share.native && !share.shared) {
+            const status = document.getElementById("fetch-status-bar");
+            if (status) status.innerText = share.message || "TornPDA could not open the native share sheet. No CSV was exported.";
+            void showNativeToast(share.message || "TornPDA share failed.", "error");
+            return;
+        }
+        if (!share.shared) {
             const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
             const url = URL.createObjectURL(blob);
             const link = document.createElement("a");
@@ -4000,7 +4030,11 @@
         }
 
         const status = document.getElementById("fetch-status-bar");
-        if (status) status.innerText = shared ? `${sectionName} snapshot opened in the TornPDA share sheet.` : `${sectionName} snapshot downloaded.`;
+        if (status) status.innerText = share.shared ? `${sectionName} snapshot opened in the TornPDA share sheet.` : `${sectionName} snapshot downloaded.`;
+        return true;
+        } finally {
+            state.exportInFlight = false;
+        }
     }
 
     async function refreshSectionByKey(sectionKey, statusEl) {
@@ -4504,12 +4538,13 @@
                 downloadLocalBackupButton.disabled = true;
                 try {
                     const result = await downloadLocalBackup(backupIncludeKeysInput?.checked === true);
+                    const destination = result.transport === "share" ? "opened in the TornPDA share sheet" : "downloaded";
                     const message = result.includesApiKeys
-                        ? `Faction backup downloaded with ${formatInteger(result.keyCount)} saved values, including opted-in API keys.`
-                        : `Faction backup downloaded with ${formatInteger(result.keyCount)} saved values and no API keys.`;
+                        ? `Faction backup ${destination} with ${formatInteger(result.keyCount)} saved values, including opted-in API keys.`
+                        : `Faction backup ${destination} with ${formatInteger(result.keyCount)} saved values and no API keys.`;
                     state.sectionStatus.settings = message;
                     setUserStatus(status, message, "success");
-                    void showNativeToast("Faction backup downloaded.", "success");
+                    void showNativeToast(result.transport === "share" ? "Faction backup opened in the TornPDA share sheet." : "Faction backup downloaded.", "success");
                 } catch (error) {
                     const message = `Backup download failed: ${safeErrorMessage(error)}`;
                     state.sectionStatus.settings = message;
@@ -4677,11 +4712,16 @@
         exportButtons.forEach((button) => {
             if (button.dataset.bound === "true") return;
             button.dataset.bound = "true";
-            button.onclick = () => {
+            button.onclick = async () => {
                 const key = button.getAttribute("data-export-section");
                 if (!key) return;
                 debugLog("CSV export button clicked", { key });
-                downloadSectionCsv(key);
+                button.disabled = true;
+                try {
+                    await downloadSectionCsv(key);
+                } finally {
+                    button.disabled = false;
+                }
             };
         });
     }

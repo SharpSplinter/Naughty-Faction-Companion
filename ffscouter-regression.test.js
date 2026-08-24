@@ -15,8 +15,8 @@ const navigation = section("const tabs =", "const navHtml");
 const resize = section("const resizeHandles = dashboard.querySelectorAll", "let viewportLayoutTimer");
 const scrollbarStyles = section("#nfc-faction-wrapper #nfc-main-body {", "#nfc-faction-wrapper .nfc-primary-nav");
 
-assert.match(source, /@version\s+1\.0\.21/, "userscript header version must be 1.0.21");
-assert.match(source, /const SCRIPT_VERSION = "1\.0\.21";/, "displayed version must match the userscript header");
+assert.match(source, /@version\s+1\.0\.22/, "userscript header version must be 1.0.22");
+assert.match(source, /const SCRIPT_VERSION = "1\.0\.22";/, "displayed version must match the userscript header");
 assert.match(source, /const CONSOLE_TAG = "\[Naughty Faction Companion\]";/, "diagnostics must use the script-specific console prefix");
 assert.match(source, /function redactSecretText\(value\)/, "diagnostics must redact secret-bearing text");
 assert.match(source, /function getSafeRequestTarget\(method, rawUrl\)/, "API diagnostics must build a query-free request target");
@@ -84,8 +84,12 @@ assert.match(source, /minWidth: Math\.min\(380, maxWidth\)/, "the script window 
 assert.match(source, /minHeight: Math\.min\(620, maxHeight\)/, "the script window must enforce a readable minimum height");
 assert.match(source, /grid-template-rows: auto auto auto minmax\(0, 1fr\)/, "FFScouter must reserve separate rows for refresh header, section title, tabs, and targets");
 assert.match(source, /scrollbar-width: none/, "FFScouter scrollbars must remain hidden without disabling scrolling");
-assert.match(scrollbarStyles, /ntc-war-target-table-wrap/, "war-target scrollbars must be visually hidden");
-assert.match(scrollbarStyles, /dialog::-webkit-scrollbar \{ display: none;/, "dialog scrollbars must be visually hidden");
+assert.match(scrollbarStyles, /\.nfc-scroll-region/, "every intentional scroll region must use the shared hidden-scrollbar treatment");
+assert.match(scrollbarStyles, /\.nfc-scroll-region::-webkit-scrollbar \{ display: none;/, "WebKit scrollbar tracks must be hidden for every intentional scroll region");
+assert.match(scrollbarStyles, /-webkit-overflow-scrolling: touch/, "TornPDA touch scrolling must remain enabled for intentional scroll regions");
+assert.match(source, /ntc-war-target-table-wrap nfc-war-target-table-shell nfc-scroll-region" tabindex="0"/, "war-target scrolling must remain keyboard focusable");
+assert.match(source, /ntc-inventory-table-wrap nfc-scroll-region" tabindex="0"/, "inventory scrolling must receive the same hidden-scrollbar and keyboard treatment");
+assert.match(source, /ffscouter-verification-dialog" class="nfc-scroll-region" tabindex="0"/, "verification dialog scrolling must receive the same hidden-scrollbar treatment");
 assert.match(source, /ntc-war-target-table-wrap[\s\S]*overflow-y:auto/, "war-target vertical scrolling must remain enabled");
 assert.match(source, /dialog id="ffscouter-verification-dialog"[\s\S]*overflow-y: auto/, "dialog vertical scrolling must remain enabled");
 assert.match(source, /resizeRenderTimer = setTimeout/, "FFScouter columns must recalculate while the window is being resized");

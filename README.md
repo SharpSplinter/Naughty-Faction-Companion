@@ -25,6 +25,7 @@ Naughty Faction Companion is a standalone Torn faction-operations userscript for
 - Dark and lower-glare light themes.
 - Desktop move, resize, snap, and minimize controls.
 - Native TornPDA detection plus the same compact-viewport trigger as the other companions: effective width ≤700px, effective height ≤520px, or scale >1.1 at ≤960px. Compact mode follows safe areas and live viewport/orientation updates.
+- Hidden scrollbar tracks for every intentional scroll region without disabling desktop wheel/keyboard or TornPDA touch scrolling. General and Settings fit within the panel; the FFScouter player list remains the only in-panel vertical list.
 - CSV export for cached sections.
 
 ## Installation

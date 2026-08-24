@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.21
+// @version      1.0.22
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/factions.php*
@@ -25,7 +25,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.21";
+    const SCRIPT_VERSION = "1.0.22";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -3285,7 +3285,7 @@
                         ${notices.map((notice) => `<div style="color:#e0a25e;font-size:10px;line-height:1.4;">⚠ ${escapeHtml(notice)}</div>`).join("")}
                     </div>
                 </div>
-                <div class="ntc-war-target-table-wrap nfc-war-target-table-shell" style="width:100%;min-width:0;min-height:210px;flex:1 1 auto;border:1px solid #343a43;overflow-y:auto;overflow-x:hidden;">
+                <div class="ntc-war-target-table-wrap nfc-war-target-table-shell nfc-scroll-region" tabindex="0" role="region" aria-label="Ranked War target list. Use mouse wheel, touch, or arrow keys to scroll." style="width:100%;min-width:0;min-height:210px;flex:1 1 auto;border:1px solid #343a43;overflow-y:auto;overflow-x:hidden;">
                     <table class="ntc-war-target-table nfc-ffscouter-table${compactWarTargetTable ? " nfc-war-target-table--compact" : ""}" style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:10px;">
                         <colgroup>${columnOrder.map((key) => `<col data-war-column="${key}" style="width:${responsiveColumnWidths[key]}px;">`).join("")}</colgroup>
                         <thead class="nfc-war-target-head" style="position:sticky;top:0;z-index:2;text-align:left;"><tr>${columnOrder.map((key) => renderWarTargetSortHeader(key, compactWarTargetTable)).join("")}</tr></thead>
@@ -3598,7 +3598,7 @@
                     </div>
                     <div id="ffscouter-key-status" style="color: ${state.ffscouterStatus.startsWith("Verified") ? "#7fe18d" : "#bfc7d1"}; font-size: 11px; line-height: 1.4;">${escapeHtml(state.ffscouterStatus)}</div>
                     <a href="https://ffscouter.com/api-docs" target="_blank" rel="noopener noreferrer" style="color: #70b7ff; font-size: 10px; text-decoration: underline; width: fit-content;">FFScouter API documentation</a>
-                    <dialog id="ffscouter-verification-dialog" style="width: min(420px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow-y: auto; border: 1px solid #4a5564; border-radius: 10px; padding: 0; background: ${dialogBackground}; color: ${dialogText}; box-shadow: 0 18px 60px rgba(0,0,0,0.55);">
+                    <dialog id="ffscouter-verification-dialog" class="nfc-scroll-region" tabindex="0" aria-label="FFScouter verification details" style="width: min(420px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow-y: auto; border: 1px solid #4a5564; border-radius: 10px; padding: 0; background: ${dialogBackground}; color: ${dialogText}; box-shadow: 0 18px 60px rgba(0,0,0,0.55);">
                         <div style="padding: 16px; display: grid; gap: 12px;">
                             <div id="ffscouter-dialog-title" style="font-size: 15px; font-weight: 850; line-height: 1.3;">FFScouter Key Status</div>
                             <div id="ffscouter-dialog-summary" style="color: ${dialogMuted}; font-size: 11px; line-height: 1.5;"></div>
@@ -3659,7 +3659,7 @@
                     ${buildStatCard("Inventory Items", inventory.totalCount || 0, "Tracked item count", "#7fe18d")}
                     ${buildStatCard("Inventory Value", formatMoney(inventory.totalValue || 0), "Estimated market value", "#85bb65")}
                 </div>
-                <div class="ntc-inventory-table-wrap" style="min-height:160px;overflow:auto;border:1px solid #222;background-color:#151515;border-radius:3px;">
+                <div class="ntc-inventory-table-wrap nfc-scroll-region" tabindex="0" role="region" aria-label="Inventory list. Use mouse wheel, touch, or arrow keys to scroll." style="min-height:160px;overflow:auto;border:1px solid #222;background-color:#151515;border-radius:3px;">
                     <table style="width: 100%; border-collapse: collapse; text-align: left;">
                         <thead style="position: sticky; top: 0; background-color: #252525; z-index: 10; border-bottom: 1px solid #333;">
                             <tr style="color: #fff; font-size: 11px; font-weight: bold;">
@@ -4864,14 +4864,20 @@
                     background: linear-gradient(180deg, rgba(14,20,30,.44), rgba(11,16,25,.18));
                 }
                 #nfc-faction-wrapper #nfc-main-body,
-                #nfc-faction-wrapper #nfc-content .ntc-war-target-table-wrap,
-                #nfc-faction-wrapper dialog {
+                #nfc-faction-wrapper .nfc-scroll-region {
                     scrollbar-width: none;
                     -ms-overflow-style: none;
                 }
                 #nfc-faction-wrapper #nfc-main-body::-webkit-scrollbar,
-                #nfc-faction-wrapper #nfc-content .ntc-war-target-table-wrap::-webkit-scrollbar,
-                #nfc-faction-wrapper dialog::-webkit-scrollbar { display: none; width: 0; height: 0; }
+                #nfc-faction-wrapper .nfc-scroll-region::-webkit-scrollbar { display: none; width: 0; height: 0; }
+                #nfc-faction-wrapper .nfc-scroll-region {
+                    overscroll-behavior: contain;
+                    -webkit-overflow-scrolling: touch;
+                }
+                #nfc-faction-wrapper .nfc-scroll-region:focus-visible {
+                    outline: 2px solid #7db8ff;
+                    outline-offset: -2px;
+                }
                 #nfc-faction-wrapper .nfc-primary-nav {
                     display: flex;
                     align-items: center;
@@ -5550,7 +5556,7 @@
                 #nfc-faction-wrapper[data-theme="light"] .nfc-runtime-indicator em { color:#43566d; }
 
                 /* TornPDA and a native-check-pending WebView use the safe visual viewport,
-                   enlarged touch targets, and a single vertical-scroll region (the target table). */
+                   enlarged touch targets, and a dedicated vertical target-list scroll region. */
                 #nfc-faction-wrapper[data-runtime="tornpda"],
                 #nfc-faction-wrapper[data-runtime="pda-pending"] {
                     box-sizing:border-box;
@@ -5649,7 +5655,7 @@
                 <button id="nfc-toggle-view-btn" type="button" title="Minimize Naughty Faction Companion" aria-label="Minimize Naughty Faction Companion">−</button>
             </header>
 
-            <div id="nfc-main-body" style="padding: 10px; box-sizing: border-box; flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;">
+            <div id="nfc-main-body" style="padding: 10px; box-sizing: border-box; flex: 1 1 auto; min-height: 0; overflow: hidden;">
                 <nav class="nfc-primary-nav" aria-label="Naughty Faction Companion sections">${navHtml}</nav>
                 <div id="nfc-content" style="display: grid; gap: 8px; color: #fff; font-size: 11px;"></div>
             </div>

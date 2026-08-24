@@ -27,7 +27,7 @@ Naughty Faction Companion is a standalone Torn faction-operations userscript for
 - Native TornPDA detection plus the same compact-viewport trigger as the other companions: effective width ≤700px, effective height ≤520px, or scale >1.1 at ≤960px. Compact mode follows safe areas and live viewport/orientation updates.
 - Hidden scrollbar tracks for every intentional scroll region without disabling desktop wheel/keyboard or TornPDA touch scrolling. General and Settings fit within the panel; the FFScouter player list remains the only in-panel vertical list.
 - Compact portrait and landscape reflow keeps controls, cards, statuses, filters, and tables inside the usable viewport. FFScouter fits all columns to its width and keeps only its results list vertically scrollable.
-- User-triggered CSV download for cached sections and a complete local JSON backup/restore flow.
+- User-triggered CSV export for cached sections: TornPDA opens its native share sheet, while desktop/Tampermonkey downloads the file locally. Includes a complete local JSON backup/restore flow.
 - Native TornPDA toast feedback for successful saves, refreshes, reminder actions, and recoverable errors; desktop keeps its in-panel status feedback.
 
 ## Installation

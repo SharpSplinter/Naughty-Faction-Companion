@@ -19,8 +19,8 @@ const storage = section("// --- TornPDA-storage-first persistent storage ---", "
 const settings = section("function renderSettingsPanel", "function renderInventorySection");
 const settingsControls = section("function bindSettingsControls", "function bindPersonalControls");
 
-assert.match(source, /@version\s+1\.0\.27/, "userscript header version must be 1.0.27");
-assert.match(source, /const SCRIPT_VERSION = "1\.0\.27";/, "displayed version must match the userscript header");
+assert.match(source, /@version\s+1\.0\.28/, "userscript header version must be 1.0.28");
+assert.match(source, /const SCRIPT_VERSION = "1\.0\.28";/, "displayed version must match the userscript header");
 assert.match(source, /const CONSOLE_TAG = "\[Naughty Faction Companion\]";/, "diagnostics must use the script-specific console prefix");
 assert.match(source, /function redactSecretText\(value\)/, "diagnostics must redact secret-bearing text");
 assert.match(source, /function getSafeRequestTarget\(method, rawUrl\)/, "API diagnostics must build a query-free request target");
@@ -149,6 +149,9 @@ assert.match(storage, /async function restoreLocalBackupPayload\(raw, \{ restore
 assert.match(settings, /Local backup &amp; restore/, "Settings exports must expose local backup controls");
 assert.match(settingsControls, /stageLocalBackupRestore\(file\)/, "selected backup files must be staged and validated");
 assert.match(settingsControls, /confirmLocalBackupRestoreInput\?\.checked/, "restoring a backup must require explicit confirmation");
+assert.match(source, /async function shareCsvWithTornPDA\(csv, fileName\)/, "TornPDA CSV exports must provide a native share-sheet path");
+assert.match(source, /pdaHandler\("shareFile", \{ base64Data, fileName \}\)/, "native CSV sharing must use TornPDA shareFile data");
+assert.match(source, /snapshot opened in the TornPDA share sheet/, "CSV export feedback must identify the native share sheet");
 
 const testColumns = {
     player: { minWidth: 104, hardFloor: 58 },

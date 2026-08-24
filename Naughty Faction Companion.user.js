@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.27
+// @version      1.0.28
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/factions.php*
@@ -27,7 +27,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.27";
+    const SCRIPT_VERSION = "1.0.28";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -3953,7 +3953,28 @@
         return `field,value\n${csvRows.join("\n")}`;
     }
 
-    function downloadSectionCsv(sectionName) {
+    function utf8Base64(text) {
+        if (typeof TextEncoder === "undefined" || typeof btoa !== "function") return "";
+        const bytes = new TextEncoder().encode(String(text));
+        let binary = "";
+        for (const byte of bytes) binary += String.fromCharCode(byte);
+        return btoa(binary);
+    }
+
+    async function shareCsvWithTornPDA(csv, fileName) {
+        if (!canUseNativePdaFeatures()) return false;
+        const base64Data = utf8Base64(csv);
+        if (!base64Data) return false;
+        try {
+            const response = await pdaHandler("shareFile", { base64Data, fileName });
+            return response?.status !== "error";
+        } catch (error) {
+            warnLog("Native CSV share unavailable; using local download", { error: safeErrorMessage(error) });
+            return false;
+        }
+    }
+
+    async function downloadSectionCsv(sectionName) {
         const source = state.caches[sectionName] || getStoredInventory();
         debugLog("CSV export triggered", { sectionName, hasData: !!source, keys: source ? Object.keys(source) : [] });
         if (!source || typeof source !== "object") {
@@ -3964,18 +3985,22 @@
 
         const cleanName = sectionName.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "snapshot";
         const csv = toCsvString(source);
-        const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = `${cleanName}-snapshot.csv`;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        URL.revokeObjectURL(url);
+        const fileName = `${cleanName}-snapshot.csv`;
+        const shared = await shareCsvWithTornPDA(csv, fileName);
+        if (!shared) {
+            const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = fileName;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+        }
 
         const status = document.getElementById("fetch-status-bar");
-        if (status) status.innerText = `${sectionName} snapshot downloaded.`;
+        if (status) status.innerText = shared ? `${sectionName} snapshot opened in the TornPDA share sheet.` : `${sectionName} snapshot downloaded.`;
     }
 
     async function refreshSectionByKey(sectionKey, statusEl) {

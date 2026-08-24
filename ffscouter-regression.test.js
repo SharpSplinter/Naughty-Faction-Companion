@@ -15,9 +15,12 @@ const navigation = section("const tabs =", "const navHtml");
 const resize = section("const resizeHandles = dashboard.querySelectorAll", "let viewportLayoutTimer");
 const scrollbarStyles = section("#nfc-faction-wrapper #nfc-main-body {", "#nfc-faction-wrapper .nfc-primary-nav");
 const responsiveColumns = section("function allocateColumnPixels", "function getWarTargetTableAvailableWidth");
+const storage = section("// --- TornPDA-storage-first persistent storage ---", "const getStoredKey");
+const settings = section("function renderSettingsPanel", "function renderInventorySection");
+const settingsControls = section("function bindSettingsControls", "function bindPersonalControls");
 
-assert.match(source, /@version\s+1\.0\.23/, "userscript header version must be 1.0.23");
-assert.match(source, /const SCRIPT_VERSION = "1\.0\.23";/, "displayed version must match the userscript header");
+assert.match(source, /@version\s+1\.0\.27/, "userscript header version must be 1.0.27");
+assert.match(source, /const SCRIPT_VERSION = "1\.0\.27";/, "displayed version must match the userscript header");
 assert.match(source, /const CONSOLE_TAG = "\[Naughty Faction Companion\]";/, "diagnostics must use the script-specific console prefix");
 assert.match(source, /function redactSecretText\(value\)/, "diagnostics must redact secret-bearing text");
 assert.match(source, /function getSafeRequestTarget\(method, rawUrl\)/, "API diagnostics must build a query-free request target");
@@ -31,6 +34,27 @@ assert.match(source, /Native bridge HTTP fallback/, "native bridge fallback diag
 assert.match(source, /Startup runtime/, "startup runtime diagnostics must be visible");
 assert.doesNotMatch(source, /console\.warn\("Catalog fetch failed:/, "raw console warnings must use the secret-safe logger");
 assert.doesNotMatch(source, /console\.error\("Refresh failed:/, "raw console errors must use the secret-safe logger");
+assert.match(source, /storagePreference: "NFC_V1_STORAGE_PREFERENCE"/, "storage preference needs its own durable key");
+assert.match(source, /useLegacyGMStorage: false/, "PDA_storage must remain the unchecked default");
+assert.match(storage, /const loadStoragePreference = async \(\)/, "the storage preference must load before normal persisted values");
+assert.match(restore, /await loadStoragePreference\(\)/, "storage routing must be selected before restoring settings and keys");
+assert.match(storage, /nextUseLegacyGMStorage \? "pda-to-gm" : "gm-to-pda"/, "switching storage must migrate known companion values in the selected direction");
+assert.match(storage, /const writeStoragePreference = async \(preference, requireLegacyGM = false\)/, "the preference must persist independently of the selected backend");
+assert.match(storage, /if \(state\.useLegacyGMStorage\)/, "legacy GM mode must route reads and writes through GM first");
+assert.match(settings, /Screen Size/, "Settings must display the current screen size");
+assert.match(settings, /Storage Method/, "Settings must display the active storage method");
+assert.match(settings, /Use legacy GM storage/, "Settings must expose the legacy GM storage option");
+assert.match(settingsControls, /setUseLegacyGMStorage\(legacyStorageToggle\.checked\)/, "the legacy GM checkbox must persist and apply its selected mode");
+assert.match(source, /GM_deleteValue/, "GM delete compatibility must be granted when native deletion is unavailable");
+assert.match(storage, /PDA_storage\.delete\(key\)/, "native deletion must use TornPDA's documented delete API");
+assert.match(storage, /function createPdaWriteQueue/, "ordinary PDA writes must be debounced into setMany batches");
+assert.match(source, /TORN_PDA_INJECTED_API_KEY = "_###PDA-APIKEY###_"/, "TornPDA injected API keys must be detected without exposing their value");
+assert.match(settings, /Using TornPDA’s injected API key/, "injected key status must be visible without displaying the key");
+assert.match(source, /function showNativeToast/, "TornPDA feedback must prefer native toasts");
+assert.match(source, /function scheduleNativeReminder/, "TornPDA native reminders must be supported");
+assert.match(source, /tornpda:tabState/, "TornPDA tab state must pause automatic refresh while inactive");
+assert.match(source, /document\.addEventListener\("visibilitychange"/, "document visibility must pause automatic refresh while inactive");
+assert.match(source, /function isAutomaticRefreshAllowed/, "auto-refresh must centrally gate inactive states");
 
 for (const key of ["warTargetSort", "warTargetFilters", "warTargetFFRange", "warTargetColumnOrder", "warTargetColumnWidths"]) {
     assert.match(persistence, new RegExp(key), `${key} must be saved`);
@@ -119,6 +143,12 @@ assert.match(source, /#nfc-faction-wrapper #nfc-content \[style\*="display:flex"
 assert.match(source, /@container \(max-width: 360px\)[\s\S]*nfc-war-target-filter-group[\s\S]*flex:1 1 100% !important/, "narrow filter controls must stack instead of overflowing");
 assert.match(source, /ntc-inventory-table-wrap \{[\s\S]*overflow-x:hidden !important/, "latent table containers must not create horizontal scrolling");
 assert.match(source, /nfc-section-meta \{[\s\S]*flex-direction:column/, "compact section status must reflow into the available width");
+assert.match(source, /const BACKUP_SCHEMA = "naughty-faction-companion-backup";/, "Faction backups must use their own schema");
+assert.match(storage, /function validateLocalBackupPayload\(raw\)/, "backup files must be validated before restore");
+assert.match(storage, /async function restoreLocalBackupPayload\(raw, \{ restoreApiKeys = false \} = \{\}\)/, "backup restore must preserve keys unless explicitly enabled");
+assert.match(settings, /Local backup &amp; restore/, "Settings exports must expose local backup controls");
+assert.match(settingsControls, /stageLocalBackupRestore\(file\)/, "selected backup files must be staged and validated");
+assert.match(settingsControls, /confirmLocalBackupRestoreInput\?\.checked/, "restoring a backup must require explicit confirmation");
 
 const testColumns = {
     player: { minWidth: 104, hardFloor: 58 },
@@ -168,4 +198,4 @@ for (let mask = 0; mask < 64; mask += 1) {
     }
 }
 
-console.log("FFScouter regression checks passed: persistence, 384 filter/range combinations, cache race guards, responsive widths, hidden Estimates card, and wheel controls.");
+console.log("FFScouter regression checks passed: persistence, storage preference, 384 filter/range combinations, cache race guards, responsive widths, hidden Estimates card, and wheel controls.");

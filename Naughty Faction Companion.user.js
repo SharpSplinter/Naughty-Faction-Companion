@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.23
+// @version      1.0.27
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/factions.php*
@@ -13,8 +13,10 @@
 // @grant        GM_info
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_deleteValue
 // @grant        GM.getValue
 // @grant        GM.setValue
+// @grant        GM.deleteValue
 // @connect      api.torn.com
 // @connect      ffscouter.com
 // ==/UserScript==
@@ -25,10 +27,20 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.23";
+    const SCRIPT_VERSION = "1.0.27";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
+    // TornPDA replaces this marker at runtime when an API key has been injected.
+    // It is intentionally never rendered, persisted, or written to diagnostic logs.
+    const TORN_PDA_INJECTED_API_KEY = "_###PDA-APIKEY###_";
+    const TORN_PDA_API_KEY_MARKER = "_###PDA-APIKEY###_";
+    const NATIVE_REMINDER_ID = 4271;
+    const PDA_WRITE_DEBOUNCE_MS = 120;
+    const BACKUP_SCHEMA = "naughty-faction-companion-backup";
+    const BACKUP_SCHEMA_VERSION = 1;
+    const BACKUP_STORAGE_NAMESPACE = "NFC_V1";
+    const BACKUP_MAX_BYTES = 10 * 1024 * 1024;
     const INVENTORY_CATEGORIES = [
         "medical", "drug", "booster", "alcohol",
         "candy", "enhancer", "jewelry", "plushie",
@@ -121,6 +133,11 @@
         return compactRuntimeInfo().compact;
     }
 
+    function getInjectedTornPDAApiKey() {
+        const key = String(TORN_PDA_INJECTED_API_KEY || "").trim();
+        return key && key !== TORN_PDA_API_KEY_MARKER ? key : "";
+    }
+
     // Legacy localStorage keys — read once during migration, then never touched again.
     const LEGACY_STORAGE = {
         key: "NFC_LEGACY_USER_KEY",
@@ -139,6 +156,7 @@
         companyStockHistory: "NFC_V1_COMPANY_STOCK_HISTORY",
         networthTracking: "NFC_V1_NETWORTH_TRACKING",
         migrated: "NFC_V1_GM_MIGRATED_V1",
+        storagePreference: "NFC_V1_STORAGE_PREFERENCE",
         sections: {
             faction: "NFC_V1_CACHE_FACTION"
         }
@@ -195,6 +213,13 @@
         personalSubTab: "info",
         autoRefreshSettings: { ...AUTO_REFRESH_DEFAULTS },
         theme: "dark",
+        useLegacyGMStorage: false,
+        storageSwitchInFlight: false,
+        injectedApiKeyActive: false,
+        runtimeTabState: { isActiveTab: true, isWebViewVisible: true },
+        autoRefreshSuspended: false,
+        nativeReminderMinutes: 15,
+        nativeReminderAt: 0,
         isMinimized: false,
         windowSizes: {},
         companyStockHistory: {},
@@ -202,6 +227,7 @@
         apiKey: "",
         ffscouterKey: "",
         ffscouterStatus: "Not configured",
+        pendingBackupRestore: null,
         widgetPosition: null,
         dashboard: null,
         lastRefresh: null,
@@ -447,6 +473,7 @@
         if (!state.dashboard) return;
         applyCurrentWidgetSize();
         applyWidgetPosition();
+        if (confirmed) void refreshNativeTabState();
         requestAnimationFrame(() => {
             fitCurrentContentToWidget();
             renderTabContent();
@@ -504,11 +531,26 @@
 
     // --- TornPDA-storage-first persistent storage ---
     // PDA_storage is the durable per-script store on TornPDA. GM remains the desktop
-    // and compatibility fallback. Writes update in-memory state synchronously first.
-    // updates an in-memory mirror (state.*) synchronously first. Reads are therefore
-    // synchronous throughout the rest of the file — render functions etc. don't need
-    // to become async. The only genuinely async step is the one-time bootstrap load.
+    // and compatibility fallback unless the user explicitly opts into GM-first storage.
+    // Reads are therefore synchronous throughout the rest of the file — render
+    // functions do not need to become async. The bootstrap load is the only async step.
+    const STORAGE_MISSING = "__NFC_STORAGE_MISSING_V1__";
     const hasPdaStorage = () => typeof PDA_storage !== "undefined" && typeof PDA_storage.loadAll === "function";
+    const hasLegacyGMStorage = () => (
+        (typeof GM !== "undefined" && typeof GM.getValue === "function" && typeof GM.setValue === "function")
+        || (typeof GM_getValue === "function" && typeof GM_setValue === "function")
+    );
+    const getManagedStorageKeys = () => [
+        APP_STORAGE.key,
+        APP_STORAGE.ffscouterKey,
+        APP_STORAGE.position,
+        APP_STORAGE.dashboard,
+        APP_STORAGE.companyStockHistory,
+        APP_STORAGE.networthTracking,
+        APP_STORAGE.migrated,
+        APP_STORAGE.storagePreference,
+        ...Object.values(APP_STORAGE.sections)
+    ];
     const loadPdaStorage = async () => {
         if (!hasPdaStorage()) {
             if (!PDA_STORE.fallbackLogged) {
@@ -542,47 +584,391 @@
     };
     const legacySetValue = async (key, value) => {
         try {
-            if (typeof GM !== "undefined" && typeof GM.setValue === "function") return await GM.setValue(key, value);
-            if (typeof GM_setValue === "function") return await Promise.resolve(GM_setValue(key, value));
+            if (typeof GM !== "undefined" && typeof GM.setValue === "function") {
+                await GM.setValue(key, value);
+                return true;
+            }
+            if (typeof GM_setValue === "function") {
+                await Promise.resolve(GM_setValue(key, value));
+                return true;
+            }
         } catch (e) {
             warnLog("GM storage write failed", { error: safeErrorMessage(e) });
         }
-        return undefined;
+        return false;
     };
-    const pdaSetValues = async (values) => {
-        const stored = await loadPdaStorage();
-        if (!stored || !hasPdaStorage()) {
-            await Promise.all(Object.entries(values).map(([key, value]) => legacySetValue(key, value)));
-            return;
+    const legacyDeleteValue = async (key) => {
+        try {
+            if (typeof GM !== "undefined" && typeof GM.deleteValue === "function") {
+                await GM.deleteValue(key);
+                return true;
+            }
+            if (typeof GM_deleteValue === "function") {
+                await Promise.resolve(GM_deleteValue(key));
+                return true;
+            }
+        } catch (e) {
+            warnLog("GM storage delete failed", { error: safeErrorMessage(e) });
         }
+        return false;
+    };
+    const writeLegacyValues = async (values) => {
+        const entries = Object.entries(values);
+        if (!entries.length) return true;
+        const results = await Promise.all(entries.map(([key, value]) => legacySetValue(key, value)));
+        return results.every(Boolean);
+    };
+    const writePdaValuesNow = async (values) => {
+        const stored = await loadPdaStorage();
+        if (!stored || !hasPdaStorage()) return false;
         try {
             await PDA_storage.setMany(values);
             Object.assign(stored, values);
+            return true;
         } catch (error) {
-            warnLog(error?.code === "QuotaExceeded" ? "PDA_storage quota exceeded; using GM compatibility storage" : "PDA_storage write failed; using GM compatibility storage", { error: safeErrorMessage(error) });
-            await Promise.all(Object.entries(values).map(([key, value]) => legacySetValue(key, value)));
+            warnLog(error?.code === "QuotaExceeded" ? "PDA_storage quota exceeded" : "PDA_storage write failed", { error: safeErrorMessage(error) });
+            return false;
         }
     };
-    const gmGetValue = async (key, fallback) => {
+    function createPdaWriteQueue(writeNative, writeLegacy, debounceMs = PDA_WRITE_DEBOUNCE_MS) {
+        let pending = {};
+        let timer = null;
+        let waiters = [];
+        let activeFlush = null;
+        const flush = () => {
+            if (activeFlush) return activeFlush;
+            activeFlush = (async () => {
+                if (timer) clearTimeout(timer);
+                timer = null;
+                const values = pending;
+                const resolvers = waiters;
+                pending = {};
+                waiters = [];
+                if (!Object.keys(values).length) {
+                    resolvers.forEach(({ resolve }) => resolve(true));
+                    return true;
+                }
+                let saved = await writeNative(values);
+                if (!saved) {
+                    warnLog("PDA_storage unavailable; using GM compatibility storage", { keyCount: Object.keys(values).length });
+                    saved = await writeLegacy(values);
+                }
+                resolvers.forEach(({ resolve }) => resolve(saved));
+                return saved;
+            })().finally(() => { activeFlush = null; });
+            return activeFlush;
+        };
+        return {
+            enqueue(values) {
+                Object.assign(pending, values || {});
+                const result = new Promise((resolve) => waiters.push({ resolve }));
+                if (!timer) timer = setTimeout(() => { void flush(); }, debounceMs);
+                return result;
+            },
+            flush
+        };
+    }
+    const PDA_WRITE_QUEUE = createPdaWriteQueue(writePdaValuesNow, writeLegacyValues);
+    const pdaSetValues = async (values) => PDA_WRITE_QUEUE.enqueue(values);
+    const readPdaValue = async (key) => {
         const stored = await loadPdaStorage();
-        if (stored && Object.prototype.hasOwnProperty.call(stored, key)) return stored[key];
-        const value = await legacyGetValue(key, fallback);
-        if (stored) await pdaSetValues({ [key]: value });
-        return value;
+        return stored && Object.prototype.hasOwnProperty.call(stored, key)
+            ? { found: true, value: stored[key] }
+            : { found: false, value: undefined };
     };
-    const gmSetValue = async (key, value) => pdaSetValues({ [key]: value });
+    const readLegacyValue = async (key) => {
+        const value = await legacyGetValue(key, STORAGE_MISSING);
+        return value === STORAGE_MISSING
+            ? { found: false, value: undefined }
+            : { found: true, value };
+    };
+    const deleteStoredValue = async (key) => {
+        // Finish an earlier debounced write first so a stale queued value cannot
+        // reappear after this explicit deletion.
+        await PDA_WRITE_QUEUE.flush();
+        let nativeDeleted = false;
+        if (hasPdaStorage() && typeof PDA_storage.delete === "function") {
+            try {
+                await PDA_storage.delete(key);
+                if (PDA_STORE.values) delete PDA_STORE.values[key];
+                nativeDeleted = true;
+            } catch (error) {
+                warnLog("PDA_storage delete failed", { error: safeErrorMessage(error) });
+            }
+        }
+        const legacyDeleted = await legacyDeleteValue(key);
+        let localDeleted = false;
+        if (!nativeDeleted && !legacyDeleted) {
+            try {
+                localStorage.removeItem(key);
+                localDeleted = true;
+            } catch (error) { /* Storage can be unavailable in private contexts. */ }
+        }
+        return nativeDeleted || legacyDeleted || localDeleted;
+    };
+    const normalizeStoragePreference = (value) => {
+        if (typeof value === "boolean") return { useLegacyGMStorage: value, updatedAt: 0 };
+        if (!value || typeof value !== "object" || typeof value.useLegacyGMStorage !== "boolean") return null;
+        return {
+            useLegacyGMStorage: value.useLegacyGMStorage,
+            updatedAt: Math.max(0, Number(value.updatedAt) || 0)
+        };
+    };
+    const loadStoragePreference = async () => {
+        const [nativePreference, legacyPreference] = await Promise.all([
+            readPdaValue(APP_STORAGE.storagePreference),
+            readLegacyValue(APP_STORAGE.storagePreference)
+        ]);
+        const candidates = [nativePreference, legacyPreference]
+            .filter((entry) => entry.found)
+            .map((entry) => normalizeStoragePreference(entry.value))
+            .filter(Boolean);
+        const preference = candidates.reduce((selected, candidate) => (
+            candidate.updatedAt > selected.updatedAt ? candidate : selected
+        ), { useLegacyGMStorage: false, updatedAt: 0 });
+        state.useLegacyGMStorage = preference.useLegacyGMStorage;
+        debugLog("Storage preference restored", {
+            primary: state.useLegacyGMStorage ? "legacy GM storage" : "PDA_storage",
+            pdaStorageAvailable: !!(await loadPdaStorage()),
+            legacyGMAvailable: hasLegacyGMStorage()
+        });
+        return preference;
+    };
+    const copyManagedStorageValues = async (source) => {
+        const values = {};
+        for (const key of getManagedStorageKeys()) {
+            const entry = source === "pda-to-gm" ? await readPdaValue(key) : await readLegacyValue(key);
+            if (entry.found) values[key] = entry.value;
+        }
+        const keys = Object.keys(values);
+        if (!keys.length) return 0;
+        const saved = source === "pda-to-gm"
+            ? await writeLegacyValues(values)
+            : await writePdaValuesNow(values);
+        return saved ? keys.length : 0;
+    };
+    const writeStoragePreference = async (preference, requireLegacyGM = false) => {
+        const values = { [APP_STORAGE.storagePreference]: preference };
+        const legacySaved = await writeLegacyValues(values);
+        if (requireLegacyGM && !legacySaved) {
+            throw new Error("Legacy GM storage could not save the preference.");
+        }
+        const pdaSaved = await writePdaValuesNow(values);
+        if (!pdaSaved && !legacySaved) throw new Error("No supported storage backend is available.");
+        return { pdaSaved, legacySaved };
+    };
+    const setUseLegacyGMStorage = async (enabled) => {
+        const nextUseLegacyGMStorage = Boolean(enabled);
+        if (state.storageSwitchInFlight) return { useLegacyGMStorage: state.useLegacyGMStorage, migratedKeys: 0 };
+        if (nextUseLegacyGMStorage && !hasLegacyGMStorage()) {
+            throw new Error("Legacy GM storage is unavailable in this runtime.");
+        }
+        state.storageSwitchInFlight = true;
+        try {
+            const migratedKeys = await copyManagedStorageValues(nextUseLegacyGMStorage ? "pda-to-gm" : "gm-to-pda");
+            const preference = { useLegacyGMStorage: nextUseLegacyGMStorage, updatedAt: Date.now() };
+            const saved = await writeStoragePreference(preference, nextUseLegacyGMStorage);
+            state.useLegacyGMStorage = nextUseLegacyGMStorage;
+            debugLog("Storage preference changed", {
+                primary: nextUseLegacyGMStorage ? "legacy GM storage" : "PDA_storage",
+                migratedKeys,
+                pdaSaved: saved.pdaSaved,
+                legacyGMSaved: saved.legacySaved
+            });
+            return { useLegacyGMStorage: nextUseLegacyGMStorage, migratedKeys };
+        } finally {
+            state.storageSwitchInFlight = false;
+        }
+    };
+    const getStorageMethodLabel = () => {
+        const pdaAvailable = hasPdaStorage() && PDA_STORE.values !== null;
+        if (state.useLegacyGMStorage) {
+            return hasLegacyGMStorage()
+                ? `Legacy GM storage (primary)${pdaAvailable ? " · PDA_storage fallback" : ""}`
+                : "PDA_storage fallback (legacy GM unavailable)";
+        }
+        return pdaAvailable
+            ? "PDA_storage (primary) · Legacy GM fallback"
+            : "Legacy GM storage (PDA_storage unavailable)";
+    };
+    const gmGetValue = async (key, fallback) => {
+        if (state.useLegacyGMStorage) {
+            const legacy = await readLegacyValue(key);
+            if (legacy.found) return legacy.value;
+            const native = await readPdaValue(key);
+            if (native.found) {
+                await writeLegacyValues({ [key]: native.value });
+                return native.value;
+            }
+            return fallback;
+        }
 
-    const getStoredKey = () => state.apiKey || "";
+        const native = await readPdaValue(key);
+        if (native.found) return native.value;
+        const legacy = await readLegacyValue(key);
+        if (legacy.found) {
+            await pdaSetValues({ [key]: legacy.value });
+            return legacy.value;
+        }
+        return fallback;
+    };
+    const gmSetValue = async (key, value) => {
+        if (state.useLegacyGMStorage) {
+            if (await writeLegacyValues({ [key]: value })) return true;
+            warnLog("Legacy GM storage unavailable; using PDA_storage fallback", { keyCount: 1 });
+        }
+        return pdaSetValues({ [key]: value });
+    };
+
+    const getBackupSecretStorageKeys = () => [APP_STORAGE.key, APP_STORAGE.ffscouterKey];
+    const isBackupRecord = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+    const cloneBackupPayload = (value) => JSON.parse(JSON.stringify(value));
+    async function createLocalBackupPayload(includeApiKeys) {
+        await PDA_WRITE_QUEUE.flush();
+        const values = {};
+        const secretKeys = new Set(getBackupSecretStorageKeys());
+        for (const key of getManagedStorageKeys()) {
+            if (!includeApiKeys && secretKeys.has(key)) continue;
+            const value = await gmGetValue(key, STORAGE_MISSING);
+            if (value !== STORAGE_MISSING) values[key] = value;
+        }
+        values[APP_STORAGE.migrated] = true;
+        values[APP_STORAGE.storagePreference] = { useLegacyGMStorage: state.useLegacyGMStorage, updatedAt: Date.now() };
+        values[APP_STORAGE.dashboard] = getStoredDashboardState();
+        values[APP_STORAGE.position] = state.widgetPosition;
+        values[APP_STORAGE.companyStockHistory] = state.companyStockHistory;
+        values[APP_STORAGE.networthTracking] = state.networthTracking;
+        Object.entries(APP_STORAGE.sections).forEach(([name, key]) => {
+            if (state.caches[name] !== null) values[key] = {
+                data: state.caches[name],
+                lastRefresh: state.lastRefreshBySection[name] || 0,
+                status: state.sectionStatus[name]
+            };
+        });
+        const includeSecrets = Boolean(includeApiKeys);
+        if (includeSecrets && !state.injectedApiKeyActive && state.apiKey) values[APP_STORAGE.key] = state.apiKey;
+        if (includeSecrets && state.ffscouterKey) values[APP_STORAGE.ffscouterKey] = state.ffscouterKey;
+        if (!includeSecrets || state.injectedApiKeyActive) delete values[APP_STORAGE.key];
+        if (!includeSecrets) delete values[APP_STORAGE.ffscouterKey];
+        return {
+            schema: BACKUP_SCHEMA,
+            schemaVersion: BACKUP_SCHEMA_VERSION,
+            namespace: BACKUP_STORAGE_NAMESPACE,
+            createdAt: new Date().toISOString(),
+            scriptVersion: SCRIPT_VERSION,
+            includesApiKeys: getBackupSecretStorageKeys().some((key) => Object.prototype.hasOwnProperty.call(values, key)),
+            values
+        };
+    }
+
+    function validateLocalBackupPayload(raw) {
+        if (!isBackupRecord(raw)) throw new Error("Backup must be a JSON object.");
+        const allowedFields = new Set(["schema", "schemaVersion", "namespace", "createdAt", "scriptVersion", "includesApiKeys", "values"]);
+        if (Object.keys(raw).some((key) => !allowedFields.has(key))) throw new Error("Backup has unsupported fields.");
+        if (raw.schema !== BACKUP_SCHEMA || raw.namespace !== BACKUP_STORAGE_NAMESPACE) throw new Error("This backup belongs to a different companion.");
+        if (raw.schemaVersion !== BACKUP_SCHEMA_VERSION) throw new Error("This backup schema version is not supported.");
+        if (typeof raw.createdAt !== "string" || Number.isNaN(Date.parse(raw.createdAt))) throw new Error("Backup creation time is invalid.");
+        if (typeof raw.scriptVersion !== "string" || !raw.scriptVersion.trim()) throw new Error("Backup script version is invalid.");
+        if (typeof raw.includesApiKeys !== "boolean" || !isBackupRecord(raw.values)) throw new Error("Backup payload is invalid.");
+        const managed = new Set(getManagedStorageKeys());
+        const secrets = new Set(getBackupSecretStorageKeys());
+        const keys = Object.keys(raw.values);
+        if (keys.some((key) => !managed.has(key) || key === "__proto__" || key === "constructor" || key === "prototype")) throw new Error("Backup contains unsupported storage keys.");
+        if (!raw.includesApiKeys && keys.some((key) => secrets.has(key))) throw new Error("Backup has API keys without the API-key flag.");
+        return cloneBackupPayload(raw);
+    }
+
+    function readLocalBackupFile(file) {
+        if (typeof file?.text === "function") return file.text();
+        return new Promise((resolve, reject) => {
+            if (typeof FileReader === "undefined") {
+                reject(new Error("This runtime cannot read local backup files."));
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ""));
+            reader.onerror = () => reject(new Error("Unable to read the selected backup file."));
+            reader.readAsText(file);
+        });
+    }
+
+    async function stageLocalBackupRestore(file) {
+        if (!file) return false;
+        if (Number(file.size || 0) > BACKUP_MAX_BYTES) throw new Error(`Backup files must be ${formatInteger(BACKUP_MAX_BYTES / (1024 * 1024))} MB or smaller.`);
+        const backup = validateLocalBackupPayload(JSON.parse(await readLocalBackupFile(file)));
+        state.pendingBackupRestore = { backup, fileName: String(file.name || "backup.json").slice(0, 160) };
+        state.sectionStatus.settings = "Backup validated. Review and confirm restore below.";
+        return true;
+    }
+
+    async function restoreLocalBackupPayload(raw, { restoreApiKeys = false } = {}) {
+        const backup = validateLocalBackupPayload(raw);
+        const currentSecrets = {};
+        for (const key of getBackupSecretStorageKeys()) {
+            const value = await gmGetValue(key, STORAGE_MISSING);
+            if (value !== STORAGE_MISSING) currentSecrets[key] = value;
+        }
+        const values = cloneBackupPayload(backup.values);
+        const includeSecrets = Boolean(restoreApiKeys && backup.includesApiKeys);
+        if (!includeSecrets) {
+            getBackupSecretStorageKeys().forEach((key) => {
+                if (Object.prototype.hasOwnProperty.call(currentSecrets, key)) values[key] = currentSecrets[key];
+                else delete values[key];
+            });
+        }
+        values[APP_STORAGE.storagePreference] = { useLegacyGMStorage: state.useLegacyGMStorage, updatedAt: Date.now() };
+        values[APP_STORAGE.migrated] = true;
+        await PDA_WRITE_QUEUE.flush();
+        const restoredKeys = new Set(Object.keys(values));
+        for (const key of getManagedStorageKeys()) {
+            if (!restoredKeys.has(key)) await deleteStoredValue(key);
+        }
+        let saved;
+        if (state.useLegacyGMStorage) {
+            saved = (await writeLegacyValues(values)) || await writePdaValuesNow(values);
+            if (saved) await writePdaValuesNow(values);
+        } else {
+            saved = (await writePdaValuesNow(values)) || await writeLegacyValues(values);
+            if (saved) await writeLegacyValues(values);
+        }
+        if (!saved) throw new Error("No storage backend accepted the backup data.");
+        await loadPersistedState({ skipLegacyMigration: true });
+        state.currentTab = "settings";
+        state.settingsSubTab = "export";
+        state.pendingBackupRestore = null;
+        scheduleAutoRefresh();
+        startFactionLiveRefreshTimer();
+        startWarTargetsRefreshTimer();
+        return { restoredKeys: restoredKeys.size, restoredApiKeys: includeSecrets };
+    }
+    async function downloadLocalBackup(includeApiKeys) {
+        const payload = await createLocalBackupPayload(includeApiKeys);
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `naughty-faction-companion-backup-v${BACKUP_SCHEMA_VERSION}-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+        debugLog("Local backup downloaded", { includesApiKeys: payload.includesApiKeys, keyCount: Object.keys(payload.values).length });
+        return { includesApiKeys: payload.includesApiKeys, keyCount: Object.keys(payload.values).length };
+    }
+
+    const getStoredKey = () => getInjectedTornPDAApiKey() || state.apiKey || "";
     const setStoredKey = (key) => {
         state.apiKey = String(key || "").trim();
-        void gmSetValue(APP_STORAGE.key, state.apiKey);
+        if (state.apiKey) void gmSetValue(APP_STORAGE.key, state.apiKey);
+        else void deleteStoredValue(APP_STORAGE.key);
     };
 
     const getStoredFFScouterKey = () => state.ffscouterKey || "";
     const setStoredFFScouterKey = (key) => {
         state.ffscouterKey = String(key || "").trim();
         state.ffscouterStatus = state.ffscouterKey ? "Saved · Not verified" : "Not configured";
-        void gmSetValue(APP_STORAGE.ffscouterKey, state.ffscouterKey);
+        if (state.ffscouterKey) void gmSetValue(APP_STORAGE.ffscouterKey, state.ffscouterKey);
+        else void deleteStoredValue(APP_STORAGE.ffscouterKey);
     };
 
     const getStoredPosition = () => state.widgetPosition || null;
@@ -606,7 +992,9 @@
         warTargetFilters: state.warTargetFilters,
         warTargetFFRange: state.warTargetFFRange,
         warTargetSort: state.warTargetSort,
-        autoRefreshSettings: state.autoRefreshSettings
+        autoRefreshSettings: state.autoRefreshSettings,
+        nativeReminderMinutes: state.nativeReminderMinutes,
+        nativeReminderAt: state.nativeReminderAt
     });
     const setStoredDashboardState = (payload) => {
         if (payload && payload.currentTab) state.currentTab = payload.currentTab;
@@ -646,6 +1034,12 @@
                 key: allowedSortKeys.includes(payload.warTargetSort.key) ? payload.warTargetSort.key : "status",
                 direction: payload.warTargetSort.direction === "desc" ? "desc" : "asc"
             };
+        }
+        if (payload && payload.nativeReminderMinutes !== undefined) {
+            state.nativeReminderMinutes = Math.max(1, Math.min(1440, Number(payload.nativeReminderMinutes) || state.nativeReminderMinutes));
+        }
+        if (payload && payload.nativeReminderAt !== undefined) {
+            state.nativeReminderAt = Math.max(0, Number(payload.nativeReminderAt) || 0);
         }
         void gmSetValue(APP_STORAGE.dashboard, getStoredDashboardState());
     };
@@ -778,8 +1172,11 @@
     // One-time migration from the old localStorage keys into GM storage, then loads
     // everything (api key, position, dashboard state, all six section caches) into
     // the in-memory state before the dashboard renders for the first time.
-    async function loadPersistedState() {
+    async function loadPersistedState(options = {}) {
+        const skipLegacyMigration = options.skipLegacyMigration === true;
         await loadPdaStorage();
+        await loadStoragePreference();
+        if (!skipLegacyMigration) {
         try {
             const alreadyMigrated = await gmGetValue(APP_STORAGE.migrated, false);
             if (!alreadyMigrated) {
@@ -810,8 +1207,10 @@
         } catch (e) {
             debugLog("Legacy migration check failed", e);
         }
+        }
 
         state.apiKey = (await gmGetValue(APP_STORAGE.key, "")) || "";
+        state.injectedApiKeyActive = Boolean(getInjectedTornPDAApiKey());
         state.ffscouterKey = (await gmGetValue(APP_STORAGE.ffscouterKey, "")) || "";
         state.ffscouterStatus = state.ffscouterKey ? "Saved · Not verified" : "Not configured";
         state.widgetPosition = await gmGetValue(APP_STORAGE.position, null);
@@ -827,11 +1226,23 @@
                 seconds: Math.max(5, Math.min(86400, Number(saved.seconds) || target.defaultSeconds))
             }];
         }));
+        state.nativeReminderMinutes = Math.max(1, Math.min(1440, Number(dashboardState.nativeReminderMinutes) || state.nativeReminderMinutes));
+        state.nativeReminderAt = Math.max(0, Number(dashboardState.nativeReminderAt) || 0);
         state.theme = ["light", "dark"].includes(dashboardState.theme) ? dashboardState.theme : state.theme;
         state.isMinimized = dashboardState.isMinimized === true;
         state.windowSizes = dashboardState.windowSizes && typeof dashboardState.windowSizes === "object"
             ? dashboardState.windowSizes
             : {};
+        const [savedCompanyStockHistory, savedNetworthTracking] = await Promise.all([
+            gmGetValue(APP_STORAGE.companyStockHistory, {}),
+            gmGetValue(APP_STORAGE.networthTracking, { official: null, history: [] })
+        ]);
+        state.companyStockHistory = savedCompanyStockHistory && typeof savedCompanyStockHistory === "object"
+            ? savedCompanyStockHistory
+            : {};
+        state.networthTracking = savedNetworthTracking && typeof savedNetworthTracking === "object"
+            ? savedNetworthTracking
+            : { official: null, history: [] };
 
         // First-run default for confirmed (or native-check-pending) TornPDA: start
         // minimized and snapped to the top-right rather than covering Torn's page.
@@ -873,6 +1284,11 @@
         };
 
         const sectionNames = Object.keys(APP_STORAGE.sections);
+        sectionNames.forEach((name) => {
+            state.caches[name] = null;
+            state.lastRefreshBySection[name] = 0;
+            state.sectionStatus[name] = "Not loaded";
+        });
         await Promise.all(sectionNames.map(async (name) => {
             const bundle = await gmGetValue(APP_STORAGE.sections[name], null);
             if (bundle && bundle.data) {
@@ -883,7 +1299,8 @@
         }));
 
         debugLog("Persisted state restored", {
-            hasKey: !!state.apiKey,
+            hasKey: !!getStoredKey(),
+            usingInjectedPdaKey: state.injectedApiKeyActive,
             hasFFScouterKey: !!state.ffscouterKey,
             restoredSections: sectionNames.filter((n) => !!state.caches[n])
         });
@@ -916,6 +1333,61 @@
                 });
             }, { once: true });
         });
+    }
+
+    const NATIVE_TOAST_COLORS = {
+        info: { a: 255, r: 47, g: 91, b: 138 },
+        success: { a: 255, r: 47, g: 111, b: 80 },
+        error: { a: 255, r: 143, g: 52, b: 52 }
+    };
+    const canUseNativePdaFeatures = () => isTornPDAEnvironment() && !!getTornPDABridge();
+    async function showNativeToast(text, tone = "info") {
+        const message = String(text || "").trim();
+        if (!message || !canUseNativePdaFeatures()) return false;
+        try {
+            await pdaHandler("showToast", {
+                text: message,
+                clickClose: true,
+                seconds: 3,
+                bgColor: NATIVE_TOAST_COLORS[tone] || NATIVE_TOAST_COLORS.info,
+                textColor: { a: 255, r: 255, g: 255, b: 255 }
+            });
+            return true;
+        } catch (error) {
+            warnLog("Native toast unavailable", { error: safeErrorMessage(error) });
+            return false;
+        }
+    }
+    function setUserStatus(statusEl, message, tone = "info") {
+        if (statusEl) statusEl.textContent = message;
+        void showNativeToast(message, tone);
+    }
+    async function scheduleNativeReminder(minutes) {
+        if (!canUseNativePdaFeatures()) throw new Error("Native reminders are available in TornPDA.");
+        const safeMinutes = Math.max(1, Math.min(1440, Math.round(Number(minutes) || 0)));
+        const timestamp = Date.now() + (safeMinutes * 60 * 1000);
+        const response = await pdaHandler("scheduleNotification", {
+            title: "Naughty Faction Companion",
+            subtitle: `Faction reminder in ${formatInteger(safeMinutes)} minutes`,
+            id: NATIVE_REMINDER_ID,
+            timestamp,
+            overwriteID: true,
+            launchNativeToast: false,
+            urlCallback: "https://www.torn.com/factions.php"
+        });
+        if (response?.status === "error") throw new Error(response.message || "TornPDA could not schedule the reminder.");
+        state.nativeReminderMinutes = safeMinutes;
+        state.nativeReminderAt = timestamp;
+        setStoredDashboardState({ nativeReminderMinutes: safeMinutes, nativeReminderAt: timestamp });
+        return { minutes: safeMinutes, timestamp };
+    }
+    async function cancelNativeReminder() {
+        if (!canUseNativePdaFeatures()) throw new Error("Native reminders are available in TornPDA.");
+        const response = await pdaHandler("cancelNotification", { id: NATIVE_REMINDER_ID });
+        if (response?.status === "error") throw new Error(response.message || "TornPDA could not cancel the reminder.");
+        state.nativeReminderAt = 0;
+        setStoredDashboardState({ nativeReminderAt: 0 });
+        return true;
     }
 
     function getCrossOriginTransport() {
@@ -1415,12 +1887,12 @@
                 <td style="padding: 4px; color: #fff; font-weight: bold; text-transform: capitalize; font-size: 11px;">
                     <span style="display: inline-block; width: 12px;">${isExpanded ? "▼" : "▶"}</span>${escapeHtml(group.category)}
                 </td>
-                <td style="padding: 4px; color: #888; font-size: 10px; font-style: italic;">${group.items.length} item${group.items.length === 1 ? "" : "s"}</td>
-                <td style="padding: 4px; text-align: center; color: #ccc; font-size: 11px; font-weight: bold;">${group.quantity.toLocaleString()}</td>
+                <td style="padding: 4px; color: #888; font-size: 10px; font-style: italic;">${formatInteger(group.items.length)} item${group.items.length === 1 ? "" : "s"}</td>
+                <td style="padding: 4px; text-align: center; color: #ccc; font-size: 11px; font-weight: bold;">${formatInteger(group.quantity)}</td>
                 <td style="padding: 4px; text-align: right; color: #85bb65; font-size: 11px; font-weight: bold;">${formatMoney(group.value)}</td>
                 <td style="padding: 4px; text-align: center; color: #444; font-size: 10px;"></td>
                 <td style="padding: 4px; text-align: center; color: #444; font-size: 10px;"></td>
-                <td style="padding: 4px; text-align: center; color: #888; font-size: 10px;">${isLoanable ? (loanedCount > 0 ? String(loanedCount) : "—") : "—"}</td>
+                <td style="padding: 4px; text-align: center; color: #888; font-size: 10px;">${isLoanable ? (loanedCount > 0 ? formatInteger(loanedCount) : "—") : "—"}</td>
             `;
             catRow.addEventListener("click", () => {
                 if (state.expandedCategories.has(group.category)) {
@@ -1447,7 +1919,7 @@
                 itemRow.innerHTML = `
                     <td style="padding: 4px 4px 4px 22px; color: #666; font-size: 10px;">↳</td>
                     <td style="padding: 4px; color: #ddd; font-size: 11px; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(item.name)}</td>
-                    <td style="padding: 4px; text-align: center; color: #999; font-size: 11px;">${item.quantity.toLocaleString()}</td>
+                    <td style="padding: 4px; text-align: center; color: #999; font-size: 11px;">${formatInteger(item.quantity)}</td>
                     <td style="padding: 4px; text-align: right; color: #6fa356; font-size: 11px;">${formatMoney(item.price)}</td>
                     <td style="padding: 4px; text-align: center; color: #9dd8ff; font-size: 10px;">${bonusText ? escapeHtml(bonusText) : "—"}</td>
                     <td style="padding: 4px; text-align: center; color: #c9a0ff; font-size: 10px;">${modsText ? escapeHtml(modsText) : "—"}</td>
@@ -1525,7 +1997,7 @@
             state.caches.inventory = result;
             setSectionStatus("inventory", "Updated");
             markSectionRefreshed("inventory");
-            if (statusEl) statusEl.innerText = `Inventory updated. Items: ${totalCountOverall.toLocaleString()} | Value: ${formatMoney(totalValueOverall)}`;
+            if (statusEl) statusEl.innerText = `Inventory updated. Items: ${formatInteger(totalCountOverall)} | Value: ${formatMoney(totalValueOverall)}`;
             return result;
         } catch (error) {
             setSectionStatus("inventory", `Failed: ${error.message}`);
@@ -1670,7 +2142,7 @@
                 return {
                     id: entry.id,
                     timestamp: Number(entry.timestamp || 0),
-                    name: info.name || `${itemLabel} #${entry.id}`,
+                    name: info.name || `${itemLabel} #${formatInteger(entry.id)}`,
                     rarity: info.rarity || "Unknown",
                     description: info.description || ""
                 };
@@ -2262,10 +2734,11 @@
 
     function buildCountdownStatCard(title, value, label, seconds, fetchedAt, color = "#8ec7ff") {
         const remaining = getCountdownRemaining(seconds, fetchedAt, 0);
+        const displayValue = typeof value === "number" ? formatInteger(value) : String(value ?? "0");
         return `
             <div style="background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border: 1px solid #333; border-radius: 8px; padding: 10px; min-height: 90px; box-sizing: border-box;">
                 <div style="color: #d4d4d4; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px;">${escapeHtml(title)}</div>
-                <div style="color: ${color}; font-size: 22px; font-weight: 700; line-height: 1.1;">${escapeHtml(String(value ?? "0"))}</div>
+                <div style="color: ${color}; font-size: 22px; font-weight: 700; line-height: 1.1;">${escapeHtml(displayValue)}</div>
                 <div style="color: #d0d0d0; font-size: 12px; font-weight: 600; line-height: 1.35; margin-top: 7px;">${escapeHtml(label)} <span data-countdown-type="duration" data-seconds="${Number(seconds || 0)}" data-fetched-at="${Number(fetchedAt || Date.now())}">${formatDuration(Math.ceil(remaining))}</span></div>
             </div>
         `;
@@ -2359,7 +2832,7 @@
                 <div style="border: 1px solid #2f3540; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7);">
                     <div style="display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; margin-bottom: 5px;">
                         <div style="color: #fff; font-size: 12px; line-height: 1.3; font-weight: 800; overflow-wrap: anywhere;">${escapeHtml(String(icon?.title || "Untitled Status"))}</div>
-                        <div style="color: #9dd8ff; border: 1px solid #35445a; border-radius: 999px; padding: 2px 6px; font-size: 9px; font-weight: 800; white-space: nowrap;">ID ${escapeHtml(String(icon?.id ?? "—"))}</div>
+                        <div style="color: #9dd8ff; border: 1px solid #35445a; border-radius: 999px; padding: 2px 6px; font-size: 9px; font-weight: 800; white-space: nowrap;">ID ${icon?.id === undefined || icon?.id === null ? "—" : formatInteger(icon.id)}</div>
                     </div>
                     <div style="color: #d0d0d0; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; white-space: normal;">${formatStatusIconDescription(icon?.description)}</div>
                     <div style="color: ${expiryColor}; font-size: 9px; line-height: 1.35; margin-top: 7px; overflow-wrap: anywhere;">${expiry}</div>
@@ -2370,7 +2843,7 @@
         return `
             <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px;">
                 <div style="color: #fff; font-size: 12px; font-weight: 800;">Active Statuses</div>
-                <div style="color: #9dd8ff; font-size: 10px; font-weight: 700;">${entries.length} total</div>
+                <div style="color: #9dd8ff; font-size: 10px; font-weight: 700;">${formatInteger(entries.length)} total</div>
             </div>
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px;">${rows}</div>
         `;
@@ -2409,7 +2882,7 @@
             : `${formatSignedMoney(networthChange)} vs Torn daily`;
 
         const summaryCards = [
-            buildStatCard("Player", playerName, `Level ${level}`),
+            buildStatCard("Player", playerName, `Level ${level === "-" ? level : formatInteger(level)}`),
             buildStatCard("Cash", formatMoney(cash), "Current money"),
             buildStatCard("Total Net Worth", formatMoney(net), networthSubtext, networthChange < 0 ? "#e05959" : "#7fe18d"),
             buildStatCard("Faction", factionName, "Current faction"),
@@ -2618,7 +3091,7 @@
         const rowsHtml = list.map((skill) => `
             <div style="display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #222;">
                 <span style="color: #d0d0d0; font-size: 12px; font-weight: 600; text-transform: capitalize;">${escapeHtml(String(skill.name || skill.slug || "Unknown").replace(/_/g, " "))}</span>
-                <span style="color: #9dd8ff; font-size: 12px; font-weight: 700;">${Number(skill.level || 0).toFixed(2)}</span>
+                <span style="color: #9dd8ff; font-size: 12px; font-weight: 700;">${formatInteger(skill.level || 0)}</span>
             </div>
         `).join("");
         return `
@@ -2632,7 +3105,7 @@
     function renderEducationLine(education, currentCourseName) {
         const completedCount = Array.isArray(education.complete) ? education.complete.length : 0;
         const current = education.current || null;
-        const courseLabel = current ? (currentCourseName ? escapeHtml(currentCourseName) : `Course #${escapeHtml(current.id)}`) : "";
+        const courseLabel = current ? (currentCourseName ? escapeHtml(currentCourseName) : `Course #${formatInteger(current.id)}`) : "";
         const courseUntilMs = Number(current?.until || 0) * 1000;
         const courseRemaining = getCountdownRemaining(0, 0, courseUntilMs);
         const inProgressText = current
@@ -2641,7 +3114,7 @@
         const total = completedCount + (current ? 1 : 0);
         return `
             <div style="border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7); margin-bottom: 10px; font-size: 11px; color: #ccc;">
-                <span style="color: #fff; font-weight: 700;">Education —</span> In Progress: ${inProgressText} · Completed: ${completedCount} · Total: ${total}
+                <span style="color: #fff; font-weight: 700;">Education —</span> In Progress: ${inProgressText} · Completed: ${formatInteger(completedCount)} · Total: ${formatInteger(total)}
             </div>
         `;
     }
@@ -2712,7 +3185,7 @@
         const breakdownHtml = breakdownEntries.length ? `
             <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px;">
                 ${breakdownEntries.map(([rarity, count]) => `
-                    <span style="font-size: 10px; color: ${MEDAL_RARITY_COLORS[rarity] || "#ccc"}; border: 1px solid #333; border-radius: 4px; padding: 2px 6px;">${escapeHtml(rarity)}: ${count}</span>
+                    <span style="font-size: 10px; color: ${MEDAL_RARITY_COLORS[rarity] || "#ccc"}; border: 1px solid #333; border-radius: 4px; padding: 2px 6px;">${escapeHtml(rarity)}: ${formatInteger(count)}</span>
                 `).join("")}
             </div>
         ` : "";
@@ -2820,7 +3293,7 @@
         const points = Number(money.points ?? 0);
 
         const topCards = [
-            buildStatCard("Player", profile.name || "Unknown", `Player ID ${playerId}`),
+            buildStatCard("Player", profile.name || "Unknown", `Player ID ${formatInteger(playerId)}`),
             buildStatCard("Level", profile.level || "-", "Current level", "#7fe18d"),
             buildStatCard("Job", jobName, jobSubtext)
         ].join("");
@@ -3203,7 +3676,7 @@
     function renderWarTargetCell(key, target, display) {
         switch (key) {
             case "player":
-                return `<td class="nfc-war-target-cell nfc-war-target-player" style="padding:8px 7px;overflow:hidden;"><a href="https://www.torn.com/profiles.php?XID=${target.id}" target="_blank" rel="noopener noreferrer" style="color:#9dd8ff;font-weight:800;text-decoration:none;overflow-wrap:anywhere;">${escapeHtml(target.name)}</a><div style="color:#7f8996;font-size:9px;white-space:nowrap;">ID ${target.id} · Level ${formatInteger(target.level)}</div></td>`;
+                return `<td class="nfc-war-target-cell nfc-war-target-player" style="padding:8px 7px;overflow:hidden;"><a href="https://www.torn.com/profiles.php?XID=${target.id}" target="_blank" rel="noopener noreferrer" style="color:#9dd8ff;font-weight:800;text-decoration:none;overflow-wrap:anywhere;">${escapeHtml(target.name)}</a><div style="color:#7f8996;font-size:9px;white-space:nowrap;">ID ${formatInteger(target.id)} · Level ${formatInteger(target.level)}</div></td>`;
             case "online":
                 return `<td class="nfc-war-target-cell nfc-war-target-online nfc-online-${escapeHtml(String(display.online || "unknown").toLowerCase())}" style="padding:8px 7px;color:${display.onlineColor};font-weight:800;overflow:hidden;">${escapeHtml(display.online)}<div style="color:#7f8996;font-size:9px;font-weight:500;overflow-wrap:anywhere;">${escapeHtml(target.lastAction?.relative || "")}</div></td>`;
             case "status":
@@ -3274,7 +3747,7 @@
             const estimate = target.noEstimate || !target.battleStats
                 ? "No estimate"
                 : (target.battleStatsHuman || formatInteger(target.battleStats));
-            const ff = target.fairFight > 0 ? Number(target.fairFight).toFixed(2) : "—";
+            const ff = target.fairFight > 0 ? formatInteger(target.fairFight) : "—";
             const estimateAge = target.estimateUpdatedAt ? formatRelativeTime(target.estimateUpdatedAt) : "—";
             const display = { online, onlineColor, statusColor, statusDisplay, estimate, ff, estimateAge };
             return `
@@ -3289,7 +3762,7 @@
                 <div class="ntc-ffscouter-summary-viewport" style="flex:0 0 auto;min-height:0;overflow:hidden;">
                     <div class="ntc-ffscouter-summary nfc-ffscouter-summary" style="display:grid;gap:8px;">
                         <div class="nfc-ffscouter-header-row" style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap;">
-                            <div class="nfc-ffscouter-heading"><div class="nfc-ffscouter-title">${escapeHtml(war.oppTag)} War Targets</div><div class="nfc-ffscouter-subtitle">${targets.length} shown / ${allTargets.length} members · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div><div class="nfc-ffscouter-guidance">Availability: Okay → Hospital (soonest first) → Traveling/Abroad · click headers to sort within groups</div><div class="nfc-ffscouter-guidance">Drag ⠿ to reorder columns · drag a header's right edge to resize</div></div>
+                            <div class="nfc-ffscouter-heading"><div class="nfc-ffscouter-title">${escapeHtml(war.oppTag)} War Targets</div><div class="nfc-ffscouter-subtitle">${formatInteger(targets.length)} shown / ${formatInteger(allTargets.length)} members · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div><div class="nfc-ffscouter-guidance">Availability: Okay → Hospital (soonest first) → Traveling/Abroad · click headers to sort within groups</div><div class="nfc-ffscouter-guidance">Drag ⠿ to reorder columns · drag a header's right edge to resize</div></div>
                             <div class="nfc-ffscouter-actions" style="display:flex;gap:6px;flex-wrap:wrap;"><button id="refresh-war-live-btn" class="nfc-primary-action">Refresh Live Status</button></div>
                         </div>
                         <div class="ntc-war-target-filter-panel nfc-ffscouter-filter-panel" style="display:flex;align-items:center;gap:7px 12px;flex-wrap:wrap;">
@@ -3321,7 +3794,7 @@
         const membersCount = Number(factionBasic.members ?? members.length ?? 0);
         const respect = Number(factionBasic.respect ?? getStatValue(factionStats, "respect") ?? 0);
         const cards = [
-            buildStatCard("Faction", factionBasic.name || userFaction.name || userFaction.faction_name || "Unknown", `ID ${factionBasic.id || userFaction.id || userFaction.faction_id || "-"}`),
+            buildStatCard("Faction", factionBasic.name || userFaction.name || userFaction.faction_name || "Unknown", `ID ${factionBasic.id || userFaction.id || userFaction.faction_id ? formatInteger(factionBasic.id || userFaction.id || userFaction.faction_id) : "-"}`),
             buildStatCard("Members", membersCount, "Current member count"),
             buildStatCard("Respect", respect, "Faction respect")
         ].join("");
@@ -3386,8 +3859,8 @@
         const weeklyIncome = Number(income.weekly || 0);
         const financialNote = "Estimated using current ads budget and wages — actual profit may differ if these were changed during the week.";
         const cards = [
-            buildStatCard("Company", profile.name || "Unknown", `ID ${profile.id || "-"}`),
-            buildStatCard("Type & Rating", companyType, rating ? `${rating}★ rating` : "No rating available"),
+            buildStatCard("Company", profile.name || "Unknown", `ID ${profile.id ? formatInteger(profile.id) : "-"}`),
+            buildStatCard("Type & Rating", companyType, rating ? `${formatInteger(rating)}★ rating` : "No rating available"),
             buildStatCard("Employees", `${formatInteger(currentRoster)} / ${formatInteger(maxRoster)}`, "Current roster / max roster"),
             buildStatCard("Stock", stockTotal, "Total stock quantity"),
             buildStatCard("Applications", pendingApplications === null ? "—" : pendingApplications, pendingApplications === null ? "Requires manager access" : "Pending applications"),
@@ -3526,11 +3999,11 @@
             }
 
             renderTabContent();
-            if (statusEl) statusEl.innerText = `${sectionKey.charAt(0).toUpperCase() + sectionKey.slice(1)} refreshed.`;
+            if (statusEl) setUserStatus(statusEl, `${sectionKey.charAt(0).toUpperCase() + sectionKey.slice(1)} refreshed.`, "success");
             debugLog("Manual section refresh complete", { sectionKey });
             return true;
         } catch (error) {
-            if (statusEl) statusEl.innerText = `Refresh failed: ${error.message}`;
+            if (statusEl) setUserStatus(statusEl, `Refresh failed: ${safeErrorMessage(error)}`, "error");
             debugLog("Manual section refresh failed", { sectionKey, error: error.message });
             return false;
         }
@@ -3561,7 +4034,18 @@
         const dialogMuted = state.theme === "light" ? "#536170" : "#aeb7c2";
         const runtimeViewport = state.runtime.viewport || getViewportMetrics();
         const runtimeLabel = state.runtime.isTornPDA ? "TornPDA" : (state.runtime.pdaCandidate && !state.runtime.nativeChecked ? "Checking TornPDA…" : compactRuntimeInfo().label);
-        const runtimeDetail = `${runtimeViewport.orientation} · ${runtimeViewport.width}×${runtimeViewport.height}`;
+        const runtimeDetail = `${runtimeViewport.orientation} · ${formatInteger(runtimeViewport.width)}×${formatInteger(runtimeViewport.height)}`;
+        const screenSize = `${formatInteger(runtimeViewport.width)} × ${formatInteger(runtimeViewport.height)} px`;
+        const storageMethod = getStorageMethodLabel();
+        const injectedApiKeyActive = state.injectedApiKeyActive || Boolean(getInjectedTornPDAApiKey());
+        const nativeReminderAvailable = canUseNativePdaFeatures();
+        const nativeReminderStatus = state.nativeReminderAt > Date.now()
+            ? `Scheduled ${formatTimeUntil(Math.floor(state.nativeReminderAt / 1000))}.`
+            : (nativeReminderAvailable ? "No native reminder scheduled." : "Native reminders are available in TornPDA.");
+        const storageDescription = state.useLegacyGMStorage
+            ? "Legacy GM storage is primary. PDA_storage remains a fallback where it is available."
+            : "PDA_storage is primary in TornPDA. Legacy GM storage remains the compatibility fallback.";
+        const legacyStorageUnavailable = !hasLegacyGMStorage();
         const exportMarkup = snapshotButtons.map(({ key, label }) => `
             <button data-export-section="${key}" style="background: #2f5d3d; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Download ${label} to .csv</button>
         `).join("");
@@ -3569,6 +4053,16 @@
         const refreshMarkup = snapshotButtons.map(({ key, label }) => `
             <button data-refresh-section="${key}" style="background: #6058b8; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Refresh ${label}</button>
         `).join("");
+        const pendingBackup = state.pendingBackupRestore;
+        const backupRestoreMarkup = `
+                <div style="border:1px solid #3d3d3d;border-radius:8px;padding:11px;display:grid;gap:8px;background:rgba(255,255,255,0.02);min-width:0;">
+                    <div style="color:#fff;font-weight:800;font-size:13px;">Local backup &amp; restore</div>
+                    <div style="color:#aaa;font-size:11px;line-height:1.45;">Download your local Faction data, preferences, layout, cached snapshot, stock/networth history, and refresh settings as a versioned JSON file. Restoring validates a Faction-only backup before replacing this companion’s local data.</div>
+                    <label style="display:flex;align-items:flex-start;gap:7px;color:#f1f3f5;font-size:11px;line-height:1.35;cursor:pointer;"><input id="backup-include-api-keys-input" type="checkbox"><span>Include saved API keys in this backup</span></label>
+                    <div style="display:flex;gap:7px;flex-wrap:wrap;"><button id="download-local-backup-btn" type="button" style="background:#2f5d3d;color:#fff;border:none;border-radius:6px;padding:8px 12px;font-size:11px;cursor:pointer;">Download Backup</button><button id="choose-local-backup-btn" type="button" style="background:#3b5998;color:#fff;border:none;border-radius:6px;padding:8px 12px;font-size:11px;cursor:pointer;">Load Backup</button><input id="local-backup-file-input" type="file" accept="application/json,.json" hidden></div>
+                    ${pendingBackup ? `<div style="display:grid;gap:7px;padding:9px;border:1px solid #4a657f;border-radius:7px;background:rgba(54,92,130,.15);"><div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;color:#d8e9ff;font-size:10px;"><span style="overflow-wrap:anywhere;">${escapeHtml(pendingBackup.fileName)}</span><span>${escapeHtml(new Date(pendingBackup.backup.createdAt).toLocaleString())}</span></div><div style="color:#bfc7d1;font-size:10px;">Schema v${formatInteger(pendingBackup.backup.schemaVersion)} · ${pendingBackup.backup.includesApiKeys ? "API keys included — restore remains opt-in" : "No API keys in this backup"}</div>${pendingBackup.backup.includesApiKeys ? '<label style="display:flex;align-items:flex-start;gap:7px;color:#f1f3f5;font-size:11px;line-height:1.35;cursor:pointer;"><input id="restore-backup-api-keys-input" type="checkbox"><span>Restore API keys from this backup</span></label>' : '<div style="color:#aaa;font-size:10px;">Existing locally stored API keys will be preserved.</div>'}<label style="display:flex;align-items:flex-start;gap:7px;color:#f1f3f5;font-size:11px;line-height:1.35;cursor:pointer;"><input id="confirm-local-backup-restore-input" type="checkbox"><span>I understand this replaces my current local Faction companion data.</span></label><div style="display:flex;gap:7px;flex-wrap:wrap;"><button id="restore-local-backup-btn" type="button" style="background:#a13b3b;color:#fff;border:none;border-radius:6px;padding:8px 12px;font-size:11px;cursor:pointer;">Restore Backup</button><button id="cancel-local-backup-restore-btn" type="button" style="background:#59616d;color:#fff;border:none;border-radius:6px;padding:8px 12px;font-size:11px;cursor:pointer;">Cancel</button></div></div>` : ""}
+                </div>
+            `;
 
         const subTabButtons = [
             { id: "controls", label: "Controls" },
@@ -3584,8 +4078,28 @@
                     <div style="border: 1px solid #3d3d3d; border-radius: 6px; padding: 10px; display: grid; gap: 7px;">
                         <div style="color: #fff; font-weight: 700; font-size: 12px;">Appearance</div>
                         <div style="color: #aaa; font-size: 11px;">Current mode: ${state.theme === "light" ? "Light" : "Dark"}</div>
-                        <div class="nfc-runtime-indicator" title="Runtime detection uses TornPDA's GM.info/native bridge signals, not touch or screen width."><span>Runtime</span><strong>${runtimeLabel}</strong><em>${escapeHtml(runtimeDetail)}</em></div>
                         <button id="theme-toggle-btn" style="background: #3b5998; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Switch to ${state.theme === "light" ? "Dark" : "Light"} Mode</button>
+                    </div>
+                    <div style="border: 1px solid #3d3d3d; border-radius: 6px; padding: 10px; display: grid; gap: 8px;">
+                        <div style="color: #fff; font-weight: 700; font-size: 12px;">Runtime &amp; Storage</div>
+                        <div class="nfc-runtime-indicator" title="Runtime detection uses TornPDA's GM.info/native bridge signals, not touch or screen width."><span>Runtime</span><strong>${escapeHtml(runtimeLabel)}</strong><em>${escapeHtml(runtimeDetail)}</em></div>
+                        <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;color:#bfc7d1;font-size:11px;"><span>Screen Size</span><strong style="color:#f1f3f5;text-align:right;">${escapeHtml(screenSize)}</strong></div>
+                        <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.5fr);gap:8px;align-items:center;color:#bfc7d1;font-size:11px;"><span>Storage Method</span><strong id="storage-method-value" style="color:#f1f3f5;text-align:right;overflow-wrap:anywhere;">${escapeHtml(storageMethod)}</strong></div>
+                        <label style="display:flex;align-items:flex-start;gap:7px;color:#f1f3f5;font-size:11px;line-height:1.35;cursor:${legacyStorageUnavailable ? "not-allowed" : "pointer"};">
+                            <input id="use-legacy-gm-storage-input" type="checkbox" ${state.useLegacyGMStorage ? "checked" : ""}${legacyStorageUnavailable ? " disabled" : ""} />
+                            <span>Use legacy GM storage</span>
+                        </label>
+                        <div id="storage-method-detail" style="color:#aaa;font-size:10px;line-height:1.4;">${escapeHtml(legacyStorageUnavailable ? "Legacy GM storage is unavailable in this runtime." : storageDescription)}</div>
+                    </div>
+                    <div style="border: 1px solid #3d3d3d; border-radius: 6px; padding: 10px; display: grid; gap: 7px;">
+                        <div style="color: #fff; font-weight: 700; font-size: 12px;">Native Reminder</div>
+                        <div style="display:flex;gap:7px;flex-wrap:wrap;align-items:center;">
+                            <input id="native-reminder-minutes-input" type="number" min="1" max="1440" step="1" value="${state.nativeReminderMinutes}" aria-label="Reminder delay in minutes" style="width:76px;background:#111;border:1px solid #444;border-radius:6px;color:#fff;padding:8px;font-size:11px;" ${nativeReminderAvailable ? "" : "disabled"} />
+                            <span style="color:#bfc7d1;font-size:11px;">minutes</span>
+                            <button id="schedule-native-reminder-btn" type="button" style="background:#2f5d3d;color:#fff;border:none;border-radius:6px;padding:8px 10px;font-size:11px;cursor:${nativeReminderAvailable ? "pointer" : "not-allowed"};" ${nativeReminderAvailable ? "" : "disabled"}>Set Reminder</button>
+                            <button id="cancel-native-reminder-btn" type="button" style="background:#59616d;color:#fff;border:none;border-radius:6px;padding:8px 10px;font-size:11px;cursor:${nativeReminderAvailable ? "pointer" : "not-allowed"};" ${nativeReminderAvailable ? "" : "disabled"}>Cancel</button>
+                        </div>
+                        <div id="native-reminder-status" style="color:#aaa;font-size:10px;line-height:1.4;">${escapeHtml(nativeReminderStatus)}</div>
                     </div>
                     <div style="border: 1px solid #3d3d3d; border-radius: 6px; padding: 10px; display: grid; gap: 7px;">
                         <div style="color: #fff; font-weight: 700; font-size: 12px;">Window</div>
@@ -3594,9 +4108,10 @@
                     </div>
                     <div style="color: #fff; font-weight: 700; font-size: 12px;">Naughty Faction Companion · Torn API Key</div>
                     <div style="display: flex; gap: 8px;">
-                        <input type="password" id="torn-api-key-input" value="${escapeHtml(getStoredKey())}" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 1; font-size: 11px;" placeholder="Enter Torn API key" />
-                        <button id="save-api-key-btn" style="background: #3b5998; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Save</button>
+                        <input type="password" id="torn-api-key-input" value="${injectedApiKeyActive ? "" : escapeHtml(getStoredKey())}" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 1; font-size: 11px;" placeholder="${injectedApiKeyActive ? "Using TornPDA's injected API key" : "Enter Torn API key"}" ${injectedApiKeyActive ? "disabled" : ""} />
+                        <button id="save-api-key-btn" style="background: #3b5998; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;" ${injectedApiKeyActive ? "disabled" : ""}>Save</button>
                     </div>
+                    ${injectedApiKeyActive ? '<div style="color:#7fe18d;font-size:10px;line-height:1.4;">Using TornPDA’s injected API key. Its value is not shown or saved by this companion.</div>' : ""}
                     <div style="display: grid; gap: 6px;">${refreshMarkup}</div>
                 </div>
             `;
@@ -3647,8 +4162,12 @@
                 </div>
             `;
         const exportContent = `
-                <div style="display: grid; gap: 6px;">
-                    ${exportMarkup}
+                <div style="display: grid; gap: 9px;">
+                    ${backupRestoreMarkup}
+                    <div style="display:grid;gap:6px;">
+                        <div style="color:#fff;font-weight:800;font-size:13px;">CSV exports</div>
+                        ${exportMarkup}
+                    </div>
                 </div>
             `;
         const content = currentSubTab === "refresh"
@@ -3761,6 +4280,19 @@
         const autoRefreshSecondsInputs = contentEl.querySelectorAll("[data-auto-refresh-seconds]");
         const saveAutoRefreshButton = document.getElementById("save-auto-refresh-settings-btn");
         const resetAutoRefreshButton = document.getElementById("reset-auto-refresh-settings-btn");
+        const legacyStorageToggle = document.getElementById("use-legacy-gm-storage-input");
+        const nativeReminderMinutesInput = document.getElementById("native-reminder-minutes-input");
+        const scheduleNativeReminderButton = document.getElementById("schedule-native-reminder-btn");
+        const cancelNativeReminderButton = document.getElementById("cancel-native-reminder-btn");
+        const nativeReminderStatus = document.getElementById("native-reminder-status");
+        const backupIncludeKeysInput = document.getElementById("backup-include-api-keys-input");
+        const downloadLocalBackupButton = document.getElementById("download-local-backup-btn");
+        const chooseLocalBackupButton = document.getElementById("choose-local-backup-btn");
+        const localBackupFileInput = document.getElementById("local-backup-file-input");
+        const confirmLocalBackupRestoreInput = document.getElementById("confirm-local-backup-restore-input");
+        const restoreBackupApiKeysInput = document.getElementById("restore-backup-api-keys-input");
+        const restoreLocalBackupButton = document.getElementById("restore-local-backup-btn");
+        const cancelLocalBackupRestoreButton = document.getElementById("cancel-local-backup-restore-btn");
 
         const setFFScouterStatus = (message, color = "#bfc7d1") => {
             state.ffscouterStatus = message;
@@ -3805,7 +4337,7 @@
                 const apiKey = apiKeyInput ? apiKeyInput.value : getStoredKey();
                 setStoredKey(apiKey);
                 debugLog("API key saved", { length: String(apiKey || "").length });
-                if (status) status.innerText = "🔑 API key saved locally.";
+                setUserStatus(status, "API key saved locally.", "success");
             };
         }
 
@@ -3816,7 +4348,7 @@
                     const key = validateFFScouterKey(ffscouterKeyInput?.value);
                     setStoredFFScouterKey(key);
                     setFFScouterStatus("Saved · Not verified");
-                    if (status) status.textContent = "FFScouter key saved separately.";
+                    setUserStatus(status, "FFScouter key saved separately.", "success");
                 } catch (error) {
                     setFFScouterStatus(error.message, "#e05959");
                 }
@@ -3842,7 +4374,7 @@
                         ? ` · Premium (${String(result.data.premium_entitlement_source || "active").replaceAll("_", " ")})`
                         : (Number(result.data?.premium_expires_at || 0) > 0 ? " · Premium expired" : " · Premium inactive");
                     const policy = result.data?.policy_update_required ? " · Policy update required" : "";
-                    const remaining = result.limits ? ` · ${result.limits.remaining}/${result.limits.limit} requests remaining` : "";
+                    const remaining = result.limits ? ` · ${formatInteger(result.limits.remaining)}/${formatInteger(result.limits.limit)} requests remaining` : "";
                     setFFScouterStatus(`Verified · Registered${premium}${policy}${remaining}`, result.data?.policy_update_required ? "#e0a25e" : "#7fe18d");
                     if (status) status.textContent = "FFScouter connection verified and key saved.";
                 } catch (error) {
@@ -3865,7 +4397,7 @@
                 setStoredFFScouterKey("");
                 if (ffscouterKeyInput) ffscouterKeyInput.value = "";
                 setFFScouterStatus("Not configured");
-                if (status) status.textContent = "FFScouter key cleared.";
+                setUserStatus(status, "FFScouter key cleared.", "success");
             };
         }
 
@@ -3876,6 +4408,156 @@
                 setStoredDashboardState({ theme });
                 applyDashboardTheme();
                 renderTabContent();
+            };
+        }
+
+        if (legacyStorageToggle && !legacyStorageToggle.dataset.bound) {
+            legacyStorageToggle.dataset.bound = "true";
+            legacyStorageToggle.onchange = async () => {
+                const previous = state.useLegacyGMStorage;
+                legacyStorageToggle.disabled = true;
+                try {
+                    const result = await setUseLegacyGMStorage(legacyStorageToggle.checked);
+                    state.sectionStatus.settings = result.useLegacyGMStorage
+                        ? `Legacy GM storage is now primary (${result.migratedKeys} saved values copied).`
+                        : `PDA_storage is now primary (${result.migratedKeys} saved values copied).`;
+                    void showNativeToast(state.sectionStatus.settings, "success");
+                    renderTabContent();
+                } catch (error) {
+                    legacyStorageToggle.checked = previous;
+                    const message = `Storage preference could not be saved: ${safeErrorMessage(error)}`;
+                    state.sectionStatus.settings = message;
+                    if (status) status.textContent = message;
+                    warnLog("Storage preference change failed", { error: safeErrorMessage(error) });
+                } finally {
+                    legacyStorageToggle.disabled = false;
+                }
+            };
+        }
+
+        if (scheduleNativeReminderButton && !scheduleNativeReminderButton.dataset.bound) {
+            scheduleNativeReminderButton.dataset.bound = "true";
+            scheduleNativeReminderButton.onclick = async () => {
+                scheduleNativeReminderButton.disabled = true;
+                try {
+                    const result = await scheduleNativeReminder(nativeReminderMinutesInput?.value);
+                    const message = `Faction reminder set for ${formatInteger(result.minutes)} minutes.`;
+                    setUserStatus(nativeReminderStatus, message, "success");
+                    state.sectionStatus.settings = message;
+                } catch (error) {
+                    const message = `Reminder could not be set: ${safeErrorMessage(error)}`;
+                    setUserStatus(nativeReminderStatus, message, "error");
+                    state.sectionStatus.settings = message;
+                } finally {
+                    scheduleNativeReminderButton.disabled = false;
+                }
+            };
+        }
+
+        if (cancelNativeReminderButton && !cancelNativeReminderButton.dataset.bound) {
+            cancelNativeReminderButton.dataset.bound = "true";
+            cancelNativeReminderButton.onclick = async () => {
+                cancelNativeReminderButton.disabled = true;
+                try {
+                    await cancelNativeReminder();
+                    const message = "Faction reminder cancelled.";
+                    setUserStatus(nativeReminderStatus, message, "success");
+                    state.sectionStatus.settings = message;
+                } catch (error) {
+                    const message = `Reminder could not be cancelled: ${safeErrorMessage(error)}`;
+                    setUserStatus(nativeReminderStatus, message, "error");
+                    state.sectionStatus.settings = message;
+                } finally {
+                    cancelNativeReminderButton.disabled = false;
+                }
+            };
+        }
+
+        if (downloadLocalBackupButton && !downloadLocalBackupButton.dataset.bound) {
+            downloadLocalBackupButton.dataset.bound = "true";
+            downloadLocalBackupButton.onclick = async () => {
+                downloadLocalBackupButton.disabled = true;
+                try {
+                    const result = await downloadLocalBackup(backupIncludeKeysInput?.checked === true);
+                    const message = result.includesApiKeys
+                        ? `Faction backup downloaded with ${formatInteger(result.keyCount)} saved values, including opted-in API keys.`
+                        : `Faction backup downloaded with ${formatInteger(result.keyCount)} saved values and no API keys.`;
+                    state.sectionStatus.settings = message;
+                    setUserStatus(status, message, "success");
+                    void showNativeToast("Faction backup downloaded.", "success");
+                } catch (error) {
+                    const message = `Backup download failed: ${safeErrorMessage(error)}`;
+                    state.sectionStatus.settings = message;
+                    setUserStatus(status, message, "error");
+                    warnLog("Backup download failed", { error: safeErrorMessage(error) });
+                } finally {
+                    downloadLocalBackupButton.disabled = false;
+                }
+            };
+        }
+
+        if (chooseLocalBackupButton && !chooseLocalBackupButton.dataset.bound) {
+            chooseLocalBackupButton.dataset.bound = "true";
+            chooseLocalBackupButton.onclick = () => localBackupFileInput?.click();
+        }
+
+        if (localBackupFileInput && !localBackupFileInput.dataset.bound) {
+            localBackupFileInput.dataset.bound = "true";
+            localBackupFileInput.onchange = async () => {
+                const file = localBackupFileInput.files?.[0];
+                localBackupFileInput.value = "";
+                if (!file) return;
+                try {
+                    await stageLocalBackupRestore(file);
+                    renderTabContent();
+                } catch (error) {
+                    state.pendingBackupRestore = null;
+                    const message = `Backup could not be validated: ${safeErrorMessage(error)}`;
+                    state.sectionStatus.settings = message;
+                    setUserStatus(status, message, "error");
+                    void showNativeToast("Faction backup could not be validated.", "error");
+                    warnLog("Backup validation failed", { error: safeErrorMessage(error) });
+                }
+            };
+        }
+
+        if (cancelLocalBackupRestoreButton && !cancelLocalBackupRestoreButton.dataset.bound) {
+            cancelLocalBackupRestoreButton.dataset.bound = "true";
+            cancelLocalBackupRestoreButton.onclick = () => {
+                state.pendingBackupRestore = null;
+                state.sectionStatus.settings = "Backup restore cancelled.";
+                renderTabContent();
+            };
+        }
+
+        if (restoreLocalBackupButton && !restoreLocalBackupButton.dataset.bound) {
+            restoreLocalBackupButton.dataset.bound = "true";
+            restoreLocalBackupButton.onclick = async () => {
+                const pending = state.pendingBackupRestore;
+                if (!pending?.backup) return;
+                if (!confirmLocalBackupRestoreInput?.checked) {
+                    setUserStatus(status, "Check the confirmation box before restoring the local backup.", "error");
+                    return;
+                }
+                if (!window.confirm("Replace this companion’s local Faction data with the validated backup? Existing local snapshots, layout, and refresh settings will be replaced.")) return;
+                restoreLocalBackupButton.disabled = true;
+                try {
+                    const result = await restoreLocalBackupPayload(pending.backup, { restoreApiKeys: restoreBackupApiKeysInput?.checked === true });
+                    const message = result.restoredApiKeys
+                        ? `Faction backup restored with ${formatInteger(result.restoredKeys)} saved values, including opted-in API keys.`
+                        : `Faction backup restored with ${formatInteger(result.restoredKeys)} saved values; existing API keys were preserved.`;
+                    state.sectionStatus.settings = message;
+                    renderTabContent();
+                    void showNativeToast("Faction backup restored.", "success");
+                } catch (error) {
+                    const message = `Backup restore failed: ${safeErrorMessage(error)}`;
+                    state.sectionStatus.settings = message;
+                    setUserStatus(status, message, "error");
+                    void showNativeToast("Faction backup restore failed.", "error");
+                    warnLog("Backup restore failed", { error: safeErrorMessage(error) });
+                } finally {
+                    restoreLocalBackupButton.disabled = false;
+                }
             };
         }
 
@@ -4210,11 +4892,11 @@
 
     function startWarTargetsRefreshTimer() {
         stopWarTargetsRefreshTimer();
-        if (state.isMinimized || state.currentTab !== "faction" || state.factionSubTab !== "ffscouter") return;
+        if (!isAutomaticRefreshAllowed() || state.currentTab !== "faction" || state.factionSubTab !== "ffscouter") return;
         const setting = getAutoRefreshSetting("faction:ffscouter");
         if (!setting.enabled) return;
         state.warTargetsRefreshTimer = setInterval(() => {
-            if (state.isMinimized || state.currentTab !== "faction" || state.factionSubTab !== "ffscouter") {
+            if (!isAutomaticRefreshAllowed() || state.currentTab !== "faction" || state.factionSubTab !== "ffscouter") {
                 stopWarTargetsRefreshTimer();
                 return;
             }
@@ -4474,8 +5156,76 @@
     // progress needs to feel closer to real-time than the general 5-min cadence).
     // Company updates once daily at a fixed UTC time (see isCompanyUpdateDue).
     // Inventory is fully manual-only. Activity has been removed entirely.
+    function isAutomaticRefreshAllowed() {
+        if (state.isMinimized || document.visibilityState === "hidden") return false;
+        if (!isTornPDAEnvironment()) return true;
+        return state.runtimeTabState.isActiveTab !== false && state.runtimeTabState.isWebViewVisible !== false;
+    }
+
+    function pauseAutomaticRefresh(reason) {
+        const changed = !state.autoRefreshSuspended;
+        state.autoRefreshSuspended = true;
+        if (state.autoRefreshTimer) clearTimeout(state.autoRefreshTimer);
+        state.autoRefreshTimer = null;
+        stopFactionLiveRefreshTimer();
+        stopWarTargetsRefreshTimer();
+        if (changed) debugLog("Automatic refresh paused", { reason });
+    }
+
+    function resumeAutomaticRefresh(reason) {
+        if (!isAutomaticRefreshAllowed()) {
+            pauseAutomaticRefresh(reason);
+            return;
+        }
+        const changed = state.autoRefreshSuspended;
+        state.autoRefreshSuspended = false;
+        scheduleAutoRefresh();
+        if (state.currentTab === "faction") {
+            startFactionLiveRefreshTimer();
+            if (state.factionSubTab === "ffscouter") startWarTargetsRefreshTimer();
+        }
+        if (changed) debugLog("Automatic refresh resumed", { reason });
+    }
+
+    function applyRuntimeActivityState(reason) {
+        if (!state.dashboard) return;
+        if (isAutomaticRefreshAllowed()) resumeAutomaticRefresh(reason);
+        else pauseAutomaticRefresh(reason);
+    }
+
+    async function refreshNativeTabState() {
+        if (!canUseNativePdaFeatures()) return;
+        try {
+            const tabState = await pdaHandler("PDA_getTabState");
+            if (tabState && typeof tabState === "object") {
+                state.runtimeTabState = {
+                    isActiveTab: tabState.isActiveTab !== false,
+                    isWebViewVisible: tabState.isWebViewVisible !== false
+                };
+                applyRuntimeActivityState("native-tab-state");
+            }
+        } catch (error) {
+            warnLog("Native tab state unavailable", { error: safeErrorMessage(error) });
+        }
+    }
+
+    function registerRuntimeActivityHandlers() {
+        document.addEventListener("visibilitychange", () => applyRuntimeActivityState("document-visibility"));
+        window.addEventListener("tornpda:tabState", (event) => {
+            const tabState = event?.detail;
+            if (!tabState || typeof tabState !== "object") return;
+            state.runtimeTabState = {
+                isActiveTab: tabState.isActiveTab !== false,
+                isWebViewVisible: tabState.isWebViewVisible !== false
+            };
+            applyRuntimeActivityState("native-tab-event");
+        });
+        window.addEventListener("flutterInAppWebViewPlatformReady", () => { void refreshNativeTabState(); }, { once: true });
+        void refreshNativeTabState();
+    }
+
     function performAutoRefreshCycle() {
-        if (state.isMinimized) {
+        if (!isAutomaticRefreshAllowed()) {
             state.autoRefreshTimer = null;
             return;
         }
@@ -4504,7 +5254,10 @@
         if (state.autoRefreshTimer) {
             clearTimeout(state.autoRefreshTimer);
         }
-
+        if (!isAutomaticRefreshAllowed()) {
+            state.autoRefreshTimer = null;
+            return;
+        }
         state.autoRefreshTimer = setTimeout(performAutoRefreshCycle, AUTO_REFRESH_POLL_MS);
     }
 
@@ -4527,11 +5280,11 @@
 
     function startFactionLiveRefreshTimer() {
         stopFactionLiveRefreshTimer();
-        if (state.isMinimized || state.currentTab !== "faction" || state.factionSubTab !== "general") return;
+        if (!isAutomaticRefreshAllowed() || state.currentTab !== "faction" || state.factionSubTab !== "general") return;
         const setting = getAutoRefreshSetting("faction:general");
         if (!setting.enabled) return;
         state.factionLiveRefreshTimer = setInterval(() => {
-            if (state.isMinimized || state.currentTab !== "faction" || state.factionSubTab !== "general") {
+            if (!isAutomaticRefreshAllowed() || state.currentTab !== "faction" || state.factionSubTab !== "general") {
                 stopFactionLiveRefreshTimer();
                 return;
             }
@@ -4726,15 +5479,12 @@
 
     function pauseWindowActivity() {
         stopChainCountdownTimer();
-        stopFactionLiveRefreshTimer();
-        stopWarTargetsRefreshTimer();
-        if (state.autoRefreshTimer) clearTimeout(state.autoRefreshTimer);
-        state.autoRefreshTimer = null;
+        pauseAutomaticRefresh("window-minimized");
     }
 
     function resumeWindowActivity() {
         if (state.isMinimized) return;
-        scheduleAutoRefresh();
+        resumeAutomaticRefresh("window-restored");
         if (state.currentTab !== "faction") return;
         startChainCountdownTimer();
         startFactionLiveRefreshTimer();
@@ -5905,7 +6655,6 @@
             resizeDirection = direction;
             document.body.style.userSelect = "none";
         }));
-
         document.addEventListener(interactionEvents.move, (e) => {
             if (!isResizing || !eventMatchesPointer(e, resizePointerId)) return;
             e.preventDefault();
@@ -6005,7 +6754,7 @@
         state.sectionStatus.settings = "Faction General and FFScouter auto-refresh settings are configurable in Settings › Auto Refresh.";
         renderTabContent();
 
-        if (state.apiKey) {
+        if (getStoredKey() && isAutomaticRefreshAllowed()) {
             const hasAnyCache = Object.values(state.caches).some((cache) => cache !== null);
             if (!hasAnyCache) {
                 // Fresh install: load only the faction data required by this helper.
@@ -6028,6 +6777,7 @@
         await loadPersistedState();
         initializeDOMDashboard();
         registerTornPDARuntimeDetection();
+        registerRuntimeActivityHandlers();
     }
 
     if (document.readyState === "complete" || document.readyState === "interactive") {

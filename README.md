@@ -27,7 +27,8 @@ Naughty Faction Companion is a standalone Torn faction-operations userscript for
 - Native TornPDA detection plus the same compact-viewport trigger as the other companions: effective width ≤700px, effective height ≤520px, or scale >1.1 at ≤960px. Compact mode follows safe areas and live viewport/orientation updates.
 - Hidden scrollbar tracks for every intentional scroll region without disabling desktop wheel/keyboard or TornPDA touch scrolling. General and Settings fit within the panel; the FFScouter player list remains the only in-panel vertical list.
 - Compact portrait and landscape reflow keeps controls, cards, statuses, filters, and tables inside the usable viewport. FFScouter fits all columns to its width and keeps only its results list vertically scrollable.
-- CSV export for cached sections.
+- User-triggered CSV download for cached sections and a complete local JSON backup/restore flow.
+- Native TornPDA toast feedback for successful saves, refreshes, reminder actions, and recoverable errors; desktop keeps its in-panel status feedback.
 
 ## Installation
 
@@ -47,10 +48,10 @@ Use the **FFScouter** sub-tab during a Ranked War to evaluate enemy targets. Cli
 
 ### Settings
 
-- **Controls** stores the primary Torn API key, chooses the theme, resets panel layout, and refreshes faction data.
+- **Controls** shows Runtime, Screen Size, and Storage Method; stores the primary Torn API key, chooses the theme, resets panel layout, refreshes faction data, and can schedule or cancel a TornPDA-native faction reminder. Desktop leaves native reminder controls disabled.
 - **Auto Refresh** separately controls Faction General and FFScouter refresh intervals.
 - **Integrations** stores, validates, and clears the FFScouter-linked key.
-- **Exports** downloads available cached sections as CSV.
+- **Exports** downloads available cached sections as CSV and can download or load a complete local JSON backup. Backups include local faction data, layout, refresh preferences, cached snapshot, and stock/networth history. API keys are excluded by default; including them at download and restoring them later both require separate explicit confirmation.
 
 ## Data sources and privacy
 
@@ -62,7 +63,11 @@ API keys are secrets. Revoke any key that may have been exposed.
 
 ## TornPDA compatibility and storage
 
-`PDA_storage` is the preferred durable store when the script is running in TornPDA. The companion loads its native namespace once during startup, writes related values in batches, and keeps an in-memory mirror for the interface. Existing GM/Tampermonkey values are migrated into native storage only when the native key is absent. If the native store cannot be read or written, including a quota failure, the same local GM compatibility storage remains active so saved keys, filters, layout, caches, and FFScouter settings are preserved.
+Settings → Controls displays the current runtime, usable screen size, and storage method. `PDA_storage` is the default durable store in TornPDA, with GM/Tampermonkey storage as its fallback. The optional unchecked **Use legacy GM storage** setting makes GM storage primary; switching modes copies the companion's saved values to the new primary store where available, while the other backend remains a fallback. Ordinary native writes are briefly debounced and merged into `setMany` batches; quota or native-write failures fall back to GM storage. Clearing a saved value uses TornPDA's `PDA_storage.delete(key)` plus the compatible GM/local fallback.
+
+Backup restore accepts only versioned `naughty-faction-companion-backup` files from this companion. The file is validated before its details are shown, then a second checkbox and browser confirmation are required before local data is replaced. Existing API keys are preserved unless a key-containing backup is explicitly opted into during restore. Restoring only changes this userscript’s local storage; it never changes Torn, TornPDA, or FFScouter data.
+
+When TornPDA injects its API-key marker, the companion automatically uses that key without rendering, persisting, or logging its value. The Settings field instead says that TornPDA’s injected key is active. Automatic refresh timers pause whenever the document is hidden or TornPDA reports that the webview/tab is inactive, then safely resume when it becomes active again.
 
 TornPDA is confirmed through its native `flutterInAppWebViewPlatformReady` bridge and the `isTornPDA` handler. Browser/manager hints and a narrow viewport can inform presentation, but they do not by themselves identify the runtime as native TornPDA. The compact interface reacts independently to the usable viewport; confirmed native sessions also use TornPDA's `PDA_httpGet` handler if the declared GM network request APIs are unavailable.
 
@@ -78,7 +83,7 @@ Reopen the raw userscript URL in your userscript manager to update.
 
 ```powershell
 node --check "Naughty Faction Companion.user.js"
-node --test ffscouter-regression.test.js
+node --test ffscouter-regression.test.js storage-adapter.test.js
 ```
 
 ## License

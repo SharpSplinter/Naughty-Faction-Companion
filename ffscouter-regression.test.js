@@ -14,9 +14,10 @@ const factionOnlyRefresh = section("async function refreshAllSections", "functio
 const navigation = section("const tabs =", "const navHtml");
 const resize = section("const resizeHandles = dashboard.querySelectorAll", "let viewportLayoutTimer");
 const scrollbarStyles = section("#nfc-faction-wrapper #nfc-main-body {", "#nfc-faction-wrapper .nfc-primary-nav");
+const responsiveColumns = section("function allocateColumnPixels", "function getWarTargetTableAvailableWidth");
 
-assert.match(source, /@version\s+1\.0\.22/, "userscript header version must be 1.0.22");
-assert.match(source, /const SCRIPT_VERSION = "1\.0\.22";/, "displayed version must match the userscript header");
+assert.match(source, /@version\s+1\.0\.23/, "userscript header version must be 1.0.23");
+assert.match(source, /const SCRIPT_VERSION = "1\.0\.23";/, "displayed version must match the userscript header");
 assert.match(source, /const CONSOLE_TAG = "\[Naughty Faction Companion\]";/, "diagnostics must use the script-specific console prefix");
 assert.match(source, /function redactSecretText\(value\)/, "diagnostics must redact secret-bearing text");
 assert.match(source, /function getSafeRequestTarget\(method, rawUrl\)/, "API diagnostics must build a query-free request target");
@@ -109,6 +110,36 @@ assert.doesNotMatch(source, /Math\.max\(0\.72, Math\.min\(1, availableHeight/, "
 assert.match(source, /ntc-ffscouter-summary-viewport/, "the FFScouter summary must reserve its own non-overlapping layout row");
 assert.match(source, /summaryViewport\.style\.flex = `0 0 \$\{reservedSummaryHeight\}px`/, "the table must begin below the reserved FFScouter summary height");
 assert.doesNotMatch(source, /faction\.factionNews/, "the General tab must not retain News-card data");
+assert.match(source, /function allocateColumnPixels\(maximums, availableWidth\)/, "responsive columns must allocate whole pixels without rounding overflow");
+assert.match(source, /const widths = allocateColumnPixels\(floors, availableWidth\)/, "extremely narrow tables must remain inside their container");
+assert.match(source, /const allocatedExtra = allocateColumnPixels\(reducibleWidths, additionalRoom\)/, "compact table widths must use exact remaining-space allocation");
+assert.match(source, /const maxWidth = Math\.max\(1, bounds\.maxRight - bounds\.minLeft\)/, "widget width limits must never exceed tiny safe viewports");
+assert.match(source, /#nfc-faction-wrapper \{[\s\S]*box-sizing: border-box;/, "widget borders must be included in viewport width limits");
+assert.match(source, /#nfc-faction-wrapper #nfc-content \[style\*="display:flex"\]/, "compact inline flex layouts must wrap even without a space after the colon");
+assert.match(source, /@container \(max-width: 360px\)[\s\S]*nfc-war-target-filter-group[\s\S]*flex:1 1 100% !important/, "narrow filter controls must stack instead of overflowing");
+assert.match(source, /ntc-inventory-table-wrap \{[\s\S]*overflow-x:hidden !important/, "latent table containers must not create horizontal scrolling");
+assert.match(source, /nfc-section-meta \{[\s\S]*flex-direction:column/, "compact section status must reflow into the available width");
+
+const testColumns = {
+    player: { minWidth: 104, hardFloor: 58 },
+    online: { minWidth: 50, hardFloor: 32 },
+    status: { minWidth: 76, hardFloor: 40 },
+    stats: { minWidth: 136, hardFloor: 64 },
+    ff: { minWidth: 38, hardFloor: 32 },
+    attack: { minWidth: 58, hardFloor: 52 }
+};
+const computeResponsiveColumnWidths = new Function(
+    "state",
+    "WAR_TARGET_COLUMNS",
+    `${responsiveColumns}\nreturn computeResponsiveColumnWidths;`
+)({ warTargetColumnWidths: {} }, testColumns);
+const responsiveOrder = ["player", "online", "status", "stats", "ff", "attack"];
+for (const width of [1, 88, 120, 174, 244, 318, 480, 720]) {
+    const widths = computeResponsiveColumnWidths(responsiveOrder, width);
+    const total = Object.values(widths).reduce((sum, value) => sum + value, 0);
+    assert.ok(total <= width, `FFScouter columns must fit ${width}px without horizontal overflow`);
+    assert.ok(Object.values(widths).every(Number.isInteger), `FFScouter columns must retain whole-pixel widths at ${width}px`);
+}
 
 const defaults = { okay: true, hospitalized: true, traveling: true, online: true, idle: true, offline: true };
 const targets = [
@@ -137,4 +168,4 @@ for (let mask = 0; mask < 64; mask += 1) {
     }
 }
 
-console.log("FFScouter regression checks passed: persistence, 384 filter/range combinations, cache race guards, hidden Estimates card, and wheel controls.");
+console.log("FFScouter regression checks passed: persistence, 384 filter/range combinations, cache race guards, responsive widths, hidden Estimates card, and wheel controls.");

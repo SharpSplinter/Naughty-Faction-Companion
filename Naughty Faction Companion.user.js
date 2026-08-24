@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/xf4k31tx/Naughty-Faction-Companion
-// @version      1.0.22
+// @version      1.0.23
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       sharpsplinter [315311]
 // @match        https://www.torn.com/factions.php*
@@ -25,7 +25,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.22";
+    const SCRIPT_VERSION = "1.0.23";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -3101,6 +3101,26 @@
     //   last column so the table still fills the container edge-to-edge.
     // - Not enough room -> shrink every column proportionally down toward its hardFloor
     //   (never below it) until the total exactly fits availableWidth.
+    function allocateColumnPixels(maximums, availableWidth) {
+        const target = Math.max(0, Math.floor(Number(availableWidth) || 0));
+        const total = maximums.reduce((sum, width) => sum + Math.max(0, Number(width) || 0), 0);
+        if (!maximums.length || target >= total) return maximums.map((width) => Math.max(0, Math.floor(Number(width) || 0)));
+        if (total <= 0) return maximums.map(() => 0);
+
+        const widths = maximums.map((width) => Math.floor(Math.max(0, Number(width) || 0) * target / total));
+        let remaining = target - widths.reduce((sum, width) => sum + width, 0);
+        let cursor = 0;
+        while (remaining > 0 && widths.length) {
+            const index = cursor % widths.length;
+            if (widths[index] < maximums[index]) {
+                widths[index] += 1;
+                remaining -= 1;
+            }
+            cursor += 1;
+        }
+        return widths;
+    }
+
     function computeResponsiveColumnWidths(columnOrder, availableWidth) {
         const cols = columnOrder.filter((key) => WAR_TARGET_COLUMNS[key]);
         const naturalWidths = cols.map((key) =>
@@ -3136,18 +3156,14 @@
             // Do not retain a fixed pixel minimum here: a six-column table at a very
             // narrow PDA width must stay inside its container, even if each cell has
             // to become extremely compact.
-            const scale = availableWidth / floorTotal;
-            return Object.fromEntries(cols.map((key, i) => [key, Math.max(1, Math.floor(floors[i] * scale))]));
+            const widths = allocateColumnPixels(floors, availableWidth);
+            return Object.fromEntries(cols.map((key, i) => [key, widths[i]]));
         }
 
-        const shrinkable = naturalTotal - floorTotal;
-        const extraToRemove = naturalTotal - availableWidth;
-        const shrinkRatio = extraToRemove / shrinkable;
-        return Object.fromEntries(cols.map((key, i) => {
-            const reducible = naturalWidths[i] - floors[i];
-            const width = Math.round(naturalWidths[i] - reducible * shrinkRatio);
-            return [key, Math.max(floors[i], width)];
-        }));
+        const additionalRoom = availableWidth - floorTotal;
+        const reducibleWidths = naturalWidths.map((width, index) => width - floors[index]);
+        const allocatedExtra = allocateColumnPixels(reducibleWidths, additionalRoom);
+        return Object.fromEntries(cols.map((key, i) => [key, floors[i] + allocatedExtra[i]]));
     }
 
     // Estimates the usable pixel width for the war-target table (widget width, minus
@@ -4536,8 +4552,8 @@
 
     const getWidgetSizeLimits = () => {
         const bounds = getWidgetViewportBounds();
-        const maxWidth = Math.max(120, bounds.maxRight - bounds.minLeft);
-        const maxHeight = Math.max(120, bounds.maxBottom - bounds.minTop);
+        const maxWidth = Math.max(1, bounds.maxRight - bounds.minLeft);
+        const maxHeight = Math.max(1, bounds.maxBottom - bounds.minTop);
         return {
             minWidth: Math.min(380, maxWidth),
             minHeight: Math.min(620, maxHeight),
@@ -4818,6 +4834,8 @@
         dashboard.innerHTML = `
             <style>
                 #nfc-faction-wrapper {
+                    box-sizing: border-box;
+                    max-inline-size: 100%;
                     color: #edf4ff;
                     background: rgba(18,23,32,.98);
                     border-color: #34445e;
@@ -4828,12 +4846,17 @@
                     justify-content: space-between;
                     gap: 8px;
                     padding: 9px 11px;
+                    box-sizing: border-box;
+                    min-inline-size: 0;
+                    max-inline-size: 100%;
                     background: linear-gradient(90deg, #182337, #223653);
                     border-bottom: 1px solid #435671;
                     cursor: move;
                     user-select: none;
                 }
                 #nfc-faction-wrapper #nfc-title {
+                    flex: 1 1 auto;
+                    min-inline-size: 0;
                     color: #f4f8ff;
                     font-size: 13px;
                     font-weight: 850;
@@ -4881,8 +4904,12 @@
                 #nfc-faction-wrapper .nfc-primary-nav {
                     display: flex;
                     align-items: center;
+                    flex-wrap: wrap;
                     gap: 5px;
                     width: 100%;
+                    min-inline-size: 0;
+                    max-inline-size: 100%;
+                    box-sizing: border-box;
                     padding: 5px;
                     margin-bottom: 10px;
                     border: 1px solid #34445e;
@@ -4891,6 +4918,9 @@
                 }
                 #nfc-faction-wrapper .nfc-tab,
                 #nfc-faction-wrapper .nfc-subtab {
+                    min-inline-size: 0;
+                    max-inline-size: 100%;
+                    overflow-wrap: anywhere;
                     border: 1px solid #455a78;
                     border-radius: 6px;
                     background: #202f45;
@@ -4918,6 +4948,9 @@
                     justify-content: space-between;
                     gap: 8px;
                     width: 100%;
+                    min-inline-size: 0;
+                    max-inline-size: 100%;
+                    box-sizing: border-box;
                     padding: 7px 9px;
                     margin-bottom: 8px;
                     border: 1px solid #34445e;
@@ -4926,8 +4959,8 @@
                     font-size: 10px;
                     line-height: 1.3;
                 }
-                #nfc-faction-wrapper .nfc-section-label { color:#9dd8ff; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }
-                #nfc-faction-wrapper .nfc-section-status { color:#b9c7d8; overflow:hidden; text-align:right; text-overflow:ellipsis; white-space:nowrap; }
+                #nfc-faction-wrapper .nfc-section-label { min-inline-size:0; color:#9dd8ff; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }
+                #nfc-faction-wrapper .nfc-section-status { min-inline-size:0; color:#b9c7d8; overflow:hidden; text-align:right; text-overflow:ellipsis; white-space:nowrap; }
                 #nfc-faction-wrapper .nfc-stat-card,
                 #nfc-faction-wrapper .nfc-panel-card {
                     position: relative;
@@ -5191,6 +5224,9 @@
                 #nfc-faction-wrapper #nfc-content [style*="display: flex"] {
                     flex-wrap: wrap !important;
                 }
+                #nfc-faction-wrapper #nfc-content [style*="display:flex"] {
+                    flex-wrap: wrap !important;
+                }
                 #nfc-faction-wrapper #nfc-content input,
                 #nfc-faction-wrapper #nfc-content select,
                 #nfc-faction-wrapper #nfc-content button {
@@ -5221,6 +5257,22 @@
                     width: 100% !important;
                     table-layout: fixed !important;
                 }
+                #nfc-faction-wrapper #nfc-content .ntc-inventory-table-wrap {
+                    width:100% !important;
+                    min-width:0 !important;
+                    max-width:100% !important;
+                    overflow-x:hidden !important;
+                }
+                #nfc-faction-wrapper #nfc-content .ntc-inventory-table-wrap table {
+                    width:100% !important;
+                    table-layout:fixed !important;
+                }
+                #nfc-faction-wrapper #nfc-content .ntc-inventory-table-wrap th,
+                #nfc-faction-wrapper #nfc-content .ntc-inventory-table-wrap td {
+                    min-width:0 !important;
+                    overflow-wrap:anywhere;
+                    word-break:break-word;
+                }
                 #nfc-faction-wrapper #nfc-content .ntc-attack-button {
                     min-width: 0 !important;
                     max-width: 100% !important;
@@ -5238,6 +5290,51 @@
                 @container (max-width: 430px) {
                     #nfc-faction-wrapper #nfc-content [style*="grid-template-columns"] {
                         grid-template-columns: minmax(0, 1fr) !important;
+                    }
+                    #nfc-faction-wrapper .nfc-primary-nav {
+                        gap:4px;
+                    }
+                    #nfc-faction-wrapper .nfc-primary-nav .nfc-tab {
+                        flex:1 1 100px;
+                        text-align:center;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-subtabs {
+                        display:grid;
+                        grid-template-columns:repeat(2,minmax(0,1fr));
+                        gap:5px;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-subtabs .nfc-subtab {
+                        width:100%;
+                        min-width:0;
+                        text-align:center;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-section-meta {
+                        align-items:flex-start;
+                        flex-direction:column;
+                        gap:3px;
+                        padding:6px 7px;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-section-status {
+                        width:100%;
+                        overflow:visible;
+                        text-align:left;
+                        text-overflow:clip;
+                        white-space:normal;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-info-row,
+                    #nfc-faction-wrapper #nfc-content .nfc-chain-heading,
+                    #nfc-faction-wrapper #nfc-content .nfc-chain-timers,
+                    #nfc-faction-wrapper #nfc-content .nfc-war-scoreline {
+                        flex-wrap:wrap;
+                        gap:4px;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-info-value {
+                        width:100%;
+                        text-align:left;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-runtime-indicator {
+                        width:100%;
+                        border-radius:8px;
                     }
                 }
                 @container (max-width: 330px) {
@@ -5468,6 +5565,23 @@
                     #nfc-faction-wrapper #nfc-content .nfc-war-target-table--compact .ntc-attack-button {
                         padding:3px 2px !important;
                         font-size:7px !important;
+                    }
+                }
+                @container (max-width: 360px) {
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-summary-grid,
+                    #nfc-faction-wrapper #nfc-content .nfc-faction-contribution-grid {
+                        grid-template-columns:repeat(2,minmax(0,1fr)) !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-ffscouter-header-row > .nfc-ffscouter-heading,
+                    #nfc-faction-wrapper #nfc-content .nfc-ffscouter-header-row > .nfc-ffscouter-actions,
+                    #nfc-faction-wrapper #nfc-content .nfc-war-target-filter-group,
+                    #nfc-faction-wrapper #nfc-content .ntc-war-ff-range {
+                        flex:1 1 100% !important;
+                        min-width:0 !important;
+                    }
+                    #nfc-faction-wrapper #nfc-content .nfc-ffscouter-actions,
+                    #nfc-faction-wrapper #nfc-content .nfc-ffscouter-actions .nfc-primary-action {
+                        width:100%;
                     }
                 }
                 /* A slate light theme keeps contrast without the white glare of the prior palette. */

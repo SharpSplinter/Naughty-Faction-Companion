@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "Naughty Faction Companion.user.js"), "utf8");
 const readme = fs.readFileSync(path.join(__dirname, "README.md"), "utf8");
@@ -22,12 +23,13 @@ const settingsControls = section("function bindSettingsControls", "function bind
 const hospitalAlerts = section("function getWarHospitalAlertNotificationId", "function getCrossOriginTransport");
 const targetFiltering = section("function getWarTargetStatus", "function getWarTargetSortValue");
 
-assert.match(source, /@version\s+1\.0\.34/, "userscript header version must be 1.0.34");
+assert.match(source, /@version\s+1\.0\.35/, "userscript header version must be 1.0.35");
 assert.match(source, /@license\s+MIT/, "metadata must declare the MIT license");
 assert.match(source, /https:\/\/github\.com\/SharpSplinter\/Naughty-Faction-Companion/, "metadata must use the renamed GitHub account");
-assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Faction-Companion\/refs\/heads\/main/, "metadata must update from the renamed account");
+assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Faction-Companion\/main/, "metadata must update from the renamed account");
+assert.doesNotMatch(source, /refs\/heads\/main/, "TornPDA update metadata must use the direct branch URL");
 assert.doesNotMatch(source + readme, /xf4k31tx/, "stale GitHub account links must not remain");
-assert.match(source, /const SCRIPT_VERSION = "1\.0\.34";/, "displayed version must match the userscript header");
+assert.match(source, /const SCRIPT_VERSION = "1\.0\.35";/, "displayed version must match the userscript header");
 assert.match(source, /const BOOT_TRACE_GLOBAL_KEY = "__NAUGHTY_FACTION_COMPANION_BOOT_TRACE__";/, "startup diagnostics must publish an inspectable native-safe trace");
 assert.match(source, /logBootPhase\("info", "source:evaluated", bootEnvironmentSnapshot\(\)\)/, "startup diagnostics must prove that the script source executed");
 assert.match(source, /"native:platform-ready"/, "startup diagnostics must record TornPDA platform readiness");
@@ -72,7 +74,9 @@ assert.match(source, /GM_deleteValue/, "GM delete compatibility must be granted 
 assert.match(storage, /PDA_storage\.delete\(key\)/, "native deletion must use TornPDA's documented delete API");
 assert.match(storage, /function createPdaWriteQueue/, "ordinary PDA writes must be debounced into setMany batches");
 assert.match(source, /TORN_PDA_INJECTED_API_KEY = "_###PDA-APIKEY###_"/, "TornPDA injected API keys must be detected without exposing their value");
-assert.match(settings, /Using TornPDA’s injected API key/, "injected key status must be visible without displaying the key");
+assert.match(settings, /Using TornPDA&#8217;s injected API key/, "injected key status must be visible without displaying the key");
+const tornPdaAdaptedSource = `(function() {const PDA_storage = window.__pdaStorageFactory && window.__pdaStorageFactory("faction");${source.replaceAll("###PDA-APIKEY###", "injected-demo-key").replace(/[“”]/g, '"').replace(/[‘’]/g, "'")} }());`;
+assert.doesNotThrow(() => new vm.Script(tornPdaAdaptedSource), "TornPDA's source adaptation must preserve valid JavaScript");
 assert.match(source, /function showNativeToast/, "TornPDA feedback must prefer native toasts");
 assert.match(source, /function scheduleNativeReminder/, "TornPDA native reminders must be supported");
 assert.match(source, /function getWarHospitalAlertCandidates/, "hospital alerts must derive candidates through the current FFScouter view");

@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.0.34
+// @version      1.0.35
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
 // @match        https://www.torn.com/factions.php*
-// @source       https://raw.githubusercontent.com/SharpSplinter/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
-// @updateURL    https://raw.githubusercontent.com/SharpSplinter/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
-// @downloadURL  https://raw.githubusercontent.com/SharpSplinter/Naughty-Faction-Companion/refs/heads/main/Naughty%20Faction%20Companion.user.js
+// @source       https://raw.githubusercontent.com/SharpSplinter/Naughty-Faction-Companion/main/Naughty%20Faction%20Companion.user.js
+// @updateURL    https://raw.githubusercontent.com/SharpSplinter/Naughty-Faction-Companion/main/Naughty%20Faction%20Companion.user.js
+// @downloadURL  https://raw.githubusercontent.com/SharpSplinter/Naughty-Faction-Companion/main/Naughty%20Faction%20Companion.user.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM.info
 // @grant        GM_info
@@ -31,7 +31,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.34";
+    const SCRIPT_VERSION = "1.0.35";
     const BOOT_TRACE_GLOBAL_KEY = "__NAUGHTY_FACTION_COMPANION_BOOT_TRACE__";
     const BOOT_TRACE_CONSOLE_TAG = "[Naughty Faction Companion] BOOT";
     const BOOT_TRACE_LIMIT = 100;
@@ -4765,7 +4765,7 @@
         const backupRestoreMarkup = `
                 <div style="border:1px solid #3d3d3d;border-radius:8px;padding:11px;display:grid;gap:8px;background:rgba(255,255,255,0.02);min-width:0;">
                     <div style="color:#fff;font-weight:800;font-size:13px;">Local backup &amp; restore</div>
-                    <div style="color:#aaa;font-size:11px;line-height:1.45;">Download your local Faction data, preferences, layout, cached snapshot, stock/networth history, and refresh settings as a versioned JSON file. Restoring validates a Faction-only backup before replacing this companion’s local data.</div>
+                    <div style="color:#aaa;font-size:11px;line-height:1.45;">Download your local Faction data, preferences, layout, cached snapshot, stock/networth history, and refresh settings as a versioned JSON file. Restoring validates a Faction-only backup before replacing this companion's local data.</div>
                     <label style="display:flex;align-items:flex-start;gap:7px;color:#f1f3f5;font-size:11px;line-height:1.35;cursor:pointer;"><input id="backup-include-api-keys-input" type="checkbox"><span>Include saved API keys in this backup</span></label>
                     <div style="display:flex;gap:7px;flex-wrap:wrap;"><button id="download-local-backup-btn" type="button" style="background:#2f5d3d;color:#fff;border:none;border-radius:6px;padding:8px 12px;font-size:11px;cursor:pointer;">Download Backup</button><button id="choose-local-backup-btn" type="button" style="background:#3b5998;color:#fff;border:none;border-radius:6px;padding:8px 12px;font-size:11px;cursor:pointer;">Load Backup</button><input id="local-backup-file-input" type="file" accept="application/json,.json" hidden></div>
                     ${pendingBackup ? `<div style="display:grid;gap:7px;padding:9px;border:1px solid #4a657f;border-radius:7px;background:rgba(54,92,130,.15);"><div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;color:#d8e9ff;font-size:10px;"><span style="overflow-wrap:anywhere;">${escapeHtml(pendingBackup.fileName)}</span><span>${escapeHtml(new Date(pendingBackup.backup.createdAt).toLocaleString())}</span></div><div style="color:#bfc7d1;font-size:10px;">Schema v${formatInteger(pendingBackup.backup.schemaVersion)} · ${pendingBackup.backup.includesApiKeys ? "API keys included — restore remains opt-in" : "No API keys in this backup"}</div>${pendingBackup.backup.includesApiKeys ? '<label style="display:flex;align-items:flex-start;gap:7px;color:#f1f3f5;font-size:11px;line-height:1.35;cursor:pointer;"><input id="restore-backup-api-keys-input" type="checkbox"><span>Restore API keys from this backup</span></label>' : '<div style="color:#aaa;font-size:10px;">Existing locally stored API keys will be preserved.</div>'}<label style="display:flex;align-items:flex-start;gap:7px;color:#f1f3f5;font-size:11px;line-height:1.35;cursor:pointer;"><input id="confirm-local-backup-restore-input" type="checkbox"><span>I understand this replaces my current local Faction companion data.</span></label><div style="display:flex;gap:7px;flex-wrap:wrap;"><button id="restore-local-backup-btn" type="button" style="background:#a13b3b;color:#fff;border:none;border-radius:6px;padding:8px 12px;font-size:11px;cursor:pointer;">Restore Backup</button><button id="cancel-local-backup-restore-btn" type="button" style="background:#59616d;color:#fff;border:none;border-radius:6px;padding:8px 12px;font-size:11px;cursor:pointer;">Cancel</button></div></div>` : ""}
@@ -4825,7 +4825,7 @@
                         <input type="password" id="torn-api-key-input" value="${injectedApiKeyActive ? "" : escapeHtml(getStoredKey())}" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 1; font-size: 11px;" placeholder="${injectedApiKeyActive ? "Using TornPDA's injected API key" : "Enter Torn API key"}" ${injectedApiKeyActive ? "disabled" : ""} />
                         <button id="save-api-key-btn" style="background: #3b5998; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;" ${injectedApiKeyActive ? "disabled" : ""}>Save</button>
                     </div>
-                    ${injectedApiKeyActive ? '<div style="color:#7fe18d;font-size:10px;line-height:1.4;">Using TornPDA’s injected API key. Its value is not shown or saved by this companion.</div>' : ""}
+                    ${injectedApiKeyActive ? '<div style="color:#7fe18d;font-size:10px;line-height:1.4;">Using TornPDA&#8217;s injected API key. Its value is not shown or saved by this companion.</div>' : ""}
                     <div style="display: grid; gap: 6px;">${refreshMarkup}</div>
                 </div>
             `;
@@ -5276,7 +5276,7 @@
                     setUserStatus(status, "Check the confirmation box before restoring the local backup.", "error");
                     return;
                 }
-                if (!window.confirm("Replace this companion’s local Faction data with the validated backup? Existing local snapshots, layout, and refresh settings will be replaced.")) return;
+                if (!window.confirm("Replace this companion's local Faction data with the validated backup? Existing local snapshots, layout, and refresh settings will be replaced.")) return;
                 restoreLocalBackupButton.disabled = true;
                 try {
                     const result = await restoreLocalBackupPayload(pending.backup, { restoreApiKeys: restoreBackupApiKeysInput?.checked === true });

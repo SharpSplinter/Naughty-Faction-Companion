@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.0.35
+// @version      1.0.36
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -20,7 +20,7 @@
 // @grant        GM.deleteValue
 // @grant        GM_notification
 // @grant        GM.notification
-// @run-at       document-end
+// @run-at       document-start
 // @connect      api.torn.com
 // @connect      ffscouter.com
 // ==/UserScript==
@@ -31,95 +31,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.35";
-    const BOOT_TRACE_GLOBAL_KEY = "__NAUGHTY_FACTION_COMPANION_BOOT_TRACE__";
-    const BOOT_TRACE_CONSOLE_TAG = "[Naughty Faction Companion] BOOT";
-    const BOOT_TRACE_LIMIT = 100;
-    const BOOT_TRACE_STARTED_AT = Date.now();
-    const bootTrace = {
-        script: "Naughty Faction Companion",
-        version: SCRIPT_VERSION,
-        startedAt: new Date(BOOT_TRACE_STARTED_AT).toISOString(),
-        completed: false,
-        events: []
-    };
-
-    function bootTraceDetails(details) {
-        if (!details || typeof details !== "object") return {};
-        const safe = {};
-        Object.keys(details).slice(0, 20).forEach((key) => {
-            const value = details[key];
-            if (value === null || value === undefined || typeof value === "boolean" || typeof value === "number") {
-                safe[key] = value;
-            } else if (typeof value === "string") {
-                safe[key] = value.length > 320 ? `${value.slice(0, 320)}…` : value;
-            } else {
-                safe[key] = Array.isArray(value) ? `[${value.length} items]` : typeof value;
-            }
-        });
-        return safe;
-    }
-
-    function logBootPhase(level, phase, details) {
-        const entry = {
-            sequence: bootTrace.events.length + 1,
-            elapsedMs: Date.now() - BOOT_TRACE_STARTED_AT,
-            phase,
-            ...bootTraceDetails(details)
-        };
-        bootTrace.events.push(entry);
-        if (bootTrace.events.length > BOOT_TRACE_LIMIT) bootTrace.events.splice(0, bootTrace.events.length - BOOT_TRACE_LIMIT);
-        try { window[BOOT_TRACE_GLOBAL_KEY] = bootTrace; } catch (error) { /* The global trace is optional. */ }
-        try {
-            const logger = typeof console !== "undefined" && typeof console[level] === "function"
-                ? console[level]
-                : (typeof console !== "undefined" ? console.log : null);
-            if (typeof logger === "function") logger.call(console, BOOT_TRACE_CONSOLE_TAG, entry);
-        } catch (error) { /* Console access must never block the companion. */ }
-        return entry;
-    }
-
-    function bootErrorDetails(error, fallback = "Unknown startup error") {
-        const message = String(error?.message || error || fallback)
-            .replace(/([?&](?:api[-_]?key|key|token|authorization|cookie|password|secret|session)=)[^&#\s]*/gi, "$1[redacted]")
-            .replace(/((?:authorization|cookie|x-api-key)\s*[:=]\s*)[^\s,;]+/gi, "$1[redacted]");
-        return {
-            name: String(error?.name || "Error"),
-            message: message.slice(0, 320)
-        };
-    }
-
-    function bootEnvironmentSnapshot() {
-        let bridgePresent = false;
-        let pdaStoragePresent = false;
-        try { bridgePresent = Boolean(window.flutter_inappwebview && typeof window.flutter_inappwebview.callHandler === "function"); } catch (error) { /* Optional native bridge. */ }
-        try { pdaStoragePresent = typeof PDA_storage !== "undefined"; } catch (error) { /* Optional native storage. */ }
-        return {
-            documentState: typeof document === "undefined" ? "unavailable" : document.readyState,
-            pathname: typeof location === "undefined" ? "unavailable" : String(location.pathname || ""),
-            bridgePresent,
-            pdaStoragePresent
-        };
-    }
-
-    function installBootFailureCapture() {
-        if (typeof window === "undefined" || typeof window.addEventListener !== "function") return;
-        window.addEventListener("error", (event) => {
-            if (bootTrace.completed) return;
-            logBootPhase("error", "window:error", {
-                ...bootErrorDetails(event?.error || event?.message, "Window error during startup"),
-                line: Number(event?.lineno) || 0,
-                column: Number(event?.colno) || 0
-            });
-        }, true);
-        window.addEventListener("unhandledrejection", (event) => {
-            if (bootTrace.completed) return;
-            logBootPhase("error", "window:unhandled-rejection", bootErrorDetails(event?.reason, "Unhandled startup promise rejection"));
-        });
-    }
-
-    logBootPhase("info", "source:evaluated", bootEnvironmentSnapshot());
-    installBootFailureCapture();
+    const SCRIPT_VERSION = "1.0.36";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -173,39 +85,27 @@
     let pdaBridgeReadyEventSeen = false;
     window.addEventListener("flutterInAppWebViewPlatformReady", () => {
         pdaBridgeReadyEventSeen = true;
-        logBootPhase("info", "native:platform-ready", bootEnvironmentSnapshot());
     }, { once: true });
 
     function waitForTornPDABridgeReady(timeoutMs = PDA_BRIDGE_READY_TIMEOUT_MS) {
         const readyBridge = getTornPDABridge();
         if (pdaBridgeReadyEventSeen && readyBridge) {
-            logBootPhase("info", "native:bridge-ready:cached", { bridgePresent: true, platformReady: true });
             return Promise.resolve(readyBridge);
         }
-        logBootPhase("info", "native:bridge-wait:start", {
-            bridgePresent: Boolean(readyBridge),
-            platformReady: pdaBridgeReadyEventSeen,
-            timeoutMs
-        });
         return new Promise((resolve) => {
             let settled = false;
             let timeoutId = null;
-            const complete = (source) => {
+            const complete = () => {
                 if (settled) return;
                 settled = true;
                 if (timeoutId !== null) window.clearTimeout(timeoutId);
                 window.removeEventListener("flutterInAppWebViewPlatformReady", onPlatformReady);
                 const bridge = getTornPDABridge();
-                logBootPhase(bridge ? "info" : "warn", "native:bridge-wait:complete", {
-                    source,
-                    bridgePresent: Boolean(bridge),
-                    platformReady: pdaBridgeReadyEventSeen
-                });
                 resolve(bridge);
             };
-            const onPlatformReady = () => complete("platform-ready-event");
+            const onPlatformReady = () => complete();
             window.addEventListener("flutterInAppWebViewPlatformReady", onPlatformReady, { once: true });
-            timeoutId = window.setTimeout(() => complete("timeout"), Math.max(0, Math.trunc(Number(timeoutMs) || 0)));
+            timeoutId = window.setTimeout(() => complete(), Math.max(0, Math.trunc(Number(timeoutMs) || 0)));
         });
     }
 
@@ -686,11 +586,6 @@
         if (state.runtime.nativeCheckInFlight || state.runtime.nativeChecked) return;
         if (!isTornPDACandidate() && !getTornPDABridge()) return;
         state.runtime.nativeCheckInFlight = true;
-        logBootPhase("info", "native:runtime-check:start", {
-            pdaCandidate: state.runtime.pdaCandidate,
-            bridgePresent: Boolean(getTornPDABridge()),
-            platformReady: pdaBridgeReadyEventSeen
-        });
         debugLog("TornPDA native check started", { bridgeAvailable: !!getTornPDABridge(), pdaCandidate: state.runtime.pdaCandidate });
         waitForTornPDABridgeReady()
             .then((bridge) => {
@@ -699,22 +594,15 @@
             })
             .then((response) => {
                 const confirmed = response === true || response?.isTornPDA === true || response?.is_torn_pda === true;
-                logBootPhase("info", "native:runtime-check:complete", { confirmed });
                 setRuntimePlatform(confirmed || state.runtime.isTornPDA, "native-handler", true);
             })
             .catch((error) => {
                 state.runtime.nativeCheckInFlight = false;
-                logBootPhase("warn", "native:runtime-check:failed", bootErrorDetails(error));
                 warnLog("TornPDA native check failed; retaining current runtime", { error: safeErrorMessage(error) });
             });
     }
 
     function registerTornPDARuntimeDetection() {
-        logBootPhase("info", "native:runtime-detection:register", {
-            pdaCandidate: state.runtime.pdaCandidate,
-            bridgePresent: Boolean(getTornPDABridge()),
-            platformReady: pdaBridgeReadyEventSeen
-        });
         const confirm = () => requestTornPDAConfirmation();
         window.addEventListener("flutterInAppWebViewPlatformReady", confirm, { once: true });
         // Do not call isTornPDA merely because its bridge object exists: on a cold
@@ -767,12 +655,10 @@
     function schedulePdaStorageRetryAfterBridgeReady() {
         if (pdaBridgeReadyEventSeen || PDA_STORE.retryScheduled) return;
         PDA_STORE.retryScheduled = true;
-        logBootPhase("info", "storage:native-retry:queued", { platformReady: false });
         window.addEventListener("flutterInAppWebViewPlatformReady", () => {
             PDA_STORE.retryScheduled = false;
             if (PDA_STORE.values !== null) return;
             PDA_STORE.loaded = null;
-            logBootPhase("info", "storage:native-retry:start", { pdaStoragePresent: hasPdaStorage() });
             void loadPdaStorage();
         }, { once: true });
     }
@@ -793,10 +679,6 @@
     ];
     const loadPdaStorage = async () => {
         if (!hasPdaStorage()) {
-            logBootPhase("warn", "storage:native:unavailable", {
-                bridgePresent: Boolean(getTornPDABridge()),
-                platformReady: pdaBridgeReadyEventSeen
-            });
             if (!PDA_STORE.fallbackLogged) {
                 PDA_STORE.fallbackLogged = true;
                 debugLog("Storage backend selected", { backend: "GM compatibility", reason: "PDA_storage unavailable" });
@@ -805,11 +687,6 @@
             return null;
         }
         if (!PDA_STORE.loaded) {
-            logBootPhase("info", "storage:native-load:start", {
-                bridgePresent: Boolean(getTornPDABridge()),
-                platformReady: pdaBridgeReadyEventSeen,
-                pdaCandidate: isTornPDACandidate()
-            });
             PDA_STORE.loaded = (async () => {
                 const bridge = await waitForPdaStorageBridgeReady();
                 if (!bridge && isTornPDACandidate()) {
@@ -819,11 +696,9 @@
                 // synchronously throw while TornPDA's bridge is still initializing.
                 const values = await Promise.resolve().then(() => PDA_storage.loadAll());
                 PDA_STORE.values = values && typeof values === "object" ? values : {};
-                logBootPhase("info", "storage:native-load:complete", { storedKeys: Object.keys(PDA_STORE.values).length });
                 debugLog("Storage backend selected", { backend: "PDA_storage", storedKeys: Object.keys(PDA_STORE.values).length });
                 return PDA_STORE.values;
             })().catch((error) => {
-                logBootPhase("warn", "storage:native-load:fallback", bootErrorDetails(error));
                 warnLog("PDA_storage load failed; using GM compatibility storage", { error: safeErrorMessage(error) });
                 PDA_STORE.values = null;
                 PDA_STORE.fallbackLogged = true;
@@ -1464,18 +1339,8 @@
     // the in-memory state before the dashboard renders for the first time.
     async function loadPersistedState(options = {}) {
         const skipLegacyMigration = options.skipLegacyMigration === true;
-        logBootPhase("info", "state:restore:start", {
-            skipLegacyMigration,
-            pdaStoragePresent: hasPdaStorage(),
-            bridgePresent: Boolean(getTornPDABridge()),
-            platformReady: pdaBridgeReadyEventSeen
-        });
         await loadPdaStorage();
         await loadStoragePreference();
-        logBootPhase("info", "state:storage-route:ready", {
-            useLegacyGMStorage: state.useLegacyGMStorage,
-            pdaStorageLoaded: PDA_STORE.values !== null
-        });
         if (!skipLegacyMigration) {
         try {
             const alreadyMigrated = await gmGetValue(APP_STORAGE.migrated, false);
@@ -1616,27 +1481,19 @@
             hasFFScouterKey: !!state.ffscouterKey,
             restoredSections: sectionNames.filter((n) => !!state.caches[n])
         });
-        logBootPhase("info", "state:restore:complete", {
-            restoredSectionCount: sectionNames.filter((name) => !!state.caches[name]).length,
-            currentTab: state.currentTab,
-            minimized: state.isMinimized
-        });
     }
 
     function pdaHandler(handler, ...args) {
-        logBootPhase("info", "native:handler:start", { handler, platformReady: pdaBridgeReadyEventSeen });
         debugLog("Native bridge waiting", { handler, timeoutMs: PDA_BRIDGE_READY_TIMEOUT_MS });
         return waitForTornPDABridgeReady()
             .then((bridge) => {
                 if (!bridge) throw new Error("TornPDA native bridge is unavailable.");
-                logBootPhase("info", "native:handler:invoke", { handler });
                 debugLog("Native bridge handler", { handler, state: "ready" });
                 // Defer the invocation so a synchronous bridge error is returned as
                 // a rejected promise instead of escaping the caller's startup path.
                 return Promise.resolve().then(() => bridge.callHandler(handler, ...args));
             })
             .catch((error) => {
-                logBootPhase("warn", "native:handler:failed", { handler, ...bootErrorDetails(error) });
                 warnLog("Native bridge handler failed", { handler, error: safeErrorMessage(error) });
                 throw error;
             });
@@ -6378,15 +6235,9 @@
 
     function initializeDOMDashboard() {
         if (document.getElementById("nfc-faction-wrapper")) {
-            logBootPhase("info", "dashboard:initialize:skipped-existing", { dashboardPresent: true });
             return;
         }
 
-        logBootPhase("info", "dashboard:initialize:start", {
-            bodyPresent: Boolean(document.body),
-            documentState: document.readyState,
-            runtimeCandidate: state.runtime.pdaCandidate
-        });
         debugLog("Initializing Torn Companion dashboard");
         const storedDashboardState = getStoredDashboardState();
         state.currentTab = storedDashboardState.currentTab === "settings" ? "settings" : "faction";
@@ -7366,7 +7217,6 @@
 
         document.body.appendChild(dashboard);
         state.dashboard = dashboard;
-        logBootPhase("info", "dashboard:attached", { dashboardPresent: Boolean(document.getElementById("nfc-faction-wrapper")) });
         publishRuntimeState();
         applyDashboardTheme();
         applyWidgetView();
@@ -7590,7 +7440,6 @@
 
         state.sectionStatus.settings = "Faction General and FFScouter auto-refresh settings are configurable in Settings › Auto Refresh.";
         renderTabContent();
-        logBootPhase("info", "dashboard:initial-render:complete", { activeTab: state.currentTab, minimized: state.isMinimized });
 
         if (getStoredKey() && isAutomaticRefreshAllowed()) {
             const hasAnyCache = Object.values(state.caches).some((cache) => cache !== null);
@@ -7612,7 +7461,6 @@
     }
 
     function recoverFromStartupStorageFailure(error) {
-        logBootPhase("warn", "bootstrap:state-recovery", bootErrorDetails(error));
         errorLog("Startup persistence failed; rendering with safe defaults", { error: safeErrorMessage(error) });
         state.currentTab = "faction";
         state.factionSubTab = "general";
@@ -7629,67 +7477,31 @@
         state.sectionStatus.settings = "Storage was unavailable during startup; running with safe defaults.";
     }
 
-    async function bootstrap(trigger = "unknown") {
-        logBootPhase("info", "bootstrap:start", { trigger, ...bootEnvironmentSnapshot() });
+    async function bootstrap() {
         try {
             await loadPersistedState();
-            logBootPhase("info", "bootstrap:state-restored", { pdaStorageLoaded: PDA_STORE.values !== null });
         } catch (error) {
             recoverFromStartupStorageFailure(error);
         }
         try {
-            logBootPhase("info", "bootstrap:dashboard:start", { bodyPresent: Boolean(document.body) });
             initializeDOMDashboard();
             registerTornPDARuntimeDetection();
             registerRuntimeActivityHandlers();
-            if (state.dashboard) {
-                bootTrace.completed = true;
-                logBootPhase("info", "bootstrap:ready", {
-                    dashboardPresent: true,
-                    runtime: state.runtime.platform,
-                    pdaCandidate: state.runtime.pdaCandidate
-                });
-            } else {
-                logBootPhase("error", "bootstrap:dashboard-missing", { dashboardPresent: false });
-            }
         } catch (error) {
-            logBootPhase("error", "bootstrap:dashboard-failed", bootErrorDetails(error));
             errorLog("Dashboard initialization failed", { error: safeErrorMessage(error) });
         }
     }
 
-    function beginBootstrap(trigger) {
-        return bootstrap(trigger).catch((error) => {
-            logBootPhase("error", "bootstrap:unhandled-failure", bootErrorDetails(error));
+    function beginBootstrap() {
+        return bootstrap().catch((error) => {
             errorLog("Unexpected bootstrap failure", { error: safeErrorMessage(error) });
         });
     }
-
-    function logBootWatchdog(delayMs) {
-        window.setTimeout(() => {
-            const dashboardPresent = Boolean(document.getElementById("nfc-faction-wrapper"));
-            logBootPhase(dashboardPresent ? "info" : "error", "bootstrap:watchdog", {
-                delayMs,
-                dashboardPresent,
-                completed: bootTrace.completed,
-                documentState: document.readyState,
-                bridgePresent: Boolean(getTornPDABridge()),
-                pdaStoragePresent: hasPdaStorage(),
-                platformReady: pdaBridgeReadyEventSeen
-            });
-        }, delayMs);
-    }
-
-    logBootWatchdog(2500);
-    logBootWatchdog(8000);
     if (document.readyState === "complete" || document.readyState === "interactive") {
-        logBootPhase("info", "bootstrap:queue", { trigger: "document-ready", documentState: document.readyState });
-        void beginBootstrap("document-ready");
+        void beginBootstrap();
     } else {
-        logBootPhase("info", "bootstrap:queue", { trigger: "DOMContentLoaded", documentState: document.readyState });
         window.addEventListener("DOMContentLoaded", () => {
-            logBootPhase("info", "bootstrap:DOMContentLoaded", { documentState: document.readyState });
-            void beginBootstrap("DOMContentLoaded");
+            void beginBootstrap();
         });
     }
 })();

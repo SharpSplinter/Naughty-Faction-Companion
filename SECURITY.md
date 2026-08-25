@@ -4,8 +4,8 @@
 
 | Version | Supported |
 | --- | --- |
-| Latest userscript on `main` | Yes |
-| Older installed versions | No |
+| Latest release on `main` | :white_check_mark: |
+| Earlier versions | :x: |
 
 ## Reporting a vulnerability
 

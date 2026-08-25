@@ -32,21 +32,21 @@ const makeNativeWrite = (loadPdaStorage, hasPdaStorage, PDA_storage) => new Func
     "loadPdaStorage", "hasPdaStorage", "PDA_storage", "warnLog", "safeErrorMessage",
     `${nativeWriteSource}\nreturn writePdaValuesNow;`
 )(loadPdaStorage, hasPdaStorage, PDA_storage, () => {}, (error) => String(error));
-const makeNativeLoad = ({ hasPdaStorage, PDA_storage, PDA_STORE, waitForPdaStorageBridgeReady, schedulePdaStorageRetryAfterBridgeReady = () => {}, isTornPDACandidate = () => true, pdaBridgeReadyEventSeen = true }) => new Function(
-    "hasPdaStorage", "PDA_storage", "PDA_STORE", "waitForPdaStorageBridgeReady", "schedulePdaStorageRetryAfterBridgeReady", "isTornPDACandidate", "pdaBridgeReadyEventSeen", "debugLog", "warnLog", "safeErrorMessage", "window",
+const makeNativeLoad = ({ hasPdaStorage, PDA_storage, PDA_STORE, waitForPdaStorageBridgeReady, schedulePdaStorageRetryAfterBridgeReady = () => {}, isTornPDACandidate = () => true, pdaBridgeReadyEventSeen = true, getTornPDABridge = () => null }) => new Function(
+    "hasPdaStorage", "PDA_storage", "PDA_STORE", "waitForPdaStorageBridgeReady", "schedulePdaStorageRetryAfterBridgeReady", "isTornPDACandidate", "pdaBridgeReadyEventSeen", "getTornPDABridge", "debugLog", "warnLog", "safeErrorMessage", "logBootPhase", "bootErrorDetails", "window",
     `${nativeLoadSource}\nreturn loadPdaStorage;`
-)(hasPdaStorage, PDA_storage, PDA_STORE, waitForPdaStorageBridgeReady, schedulePdaStorageRetryAfterBridgeReady, isTornPDACandidate, pdaBridgeReadyEventSeen, () => {}, () => {}, (error) => String(error), {
+)(hasPdaStorage, PDA_storage, PDA_STORE, waitForPdaStorageBridgeReady, schedulePdaStorageRetryAfterBridgeReady, isTornPDACandidate, pdaBridgeReadyEventSeen, getTornPDABridge, () => {}, () => {}, (error) => String(error), () => {}, (error) => ({ message: String(error) }), {
     addEventListener: () => {},
     removeEventListener: () => {}
 });
 const makeStorageRetry = (pdaBridgeReadyEventSeen, PDA_STORE, window, loadPdaStorage) => new Function(
-    "pdaBridgeReadyEventSeen", "PDA_STORE", "window", "loadPdaStorage",
+    "pdaBridgeReadyEventSeen", "PDA_STORE", "window", "loadPdaStorage", "hasPdaStorage", "logBootPhase",
     `${storageRetrySource}\nreturn schedulePdaStorageRetryAfterBridgeReady;`
-)(pdaBridgeReadyEventSeen, PDA_STORE, window, loadPdaStorage);
+)(pdaBridgeReadyEventSeen, PDA_STORE, window, loadPdaStorage, () => true, () => {});
 const makePdaHandler = (waitForTornPDABridgeReady) => new Function(
-    "waitForTornPDABridgeReady", "PDA_BRIDGE_READY_TIMEOUT_MS", "debugLog", "warnLog", "safeErrorMessage",
+    "waitForTornPDABridgeReady", "PDA_BRIDGE_READY_TIMEOUT_MS", "pdaBridgeReadyEventSeen", "debugLog", "warnLog", "safeErrorMessage", "logBootPhase", "bootErrorDetails",
     `${pdaHandlerSource}\nreturn pdaHandler;`
-)(waitForTornPDABridgeReady, 1, () => {}, () => {}, (error) => String(error));
+)(waitForTornPDABridgeReady, 1, true, () => {}, () => {}, (error) => String(error), () => {}, (error) => ({ message: String(error) }));
 const makeBackupValidator = new Function(
     "isBackupRecord", "cloneBackupPayload", "BACKUP_SCHEMA", "BACKUP_SCHEMA_VERSION", "BACKUP_STORAGE_NAMESPACE", "getManagedStorageKeys", "getBackupSecretStorageKeys",
     `${backupValidationSource}\nreturn validateLocalBackupPayload;`

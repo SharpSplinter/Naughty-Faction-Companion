@@ -22,12 +22,19 @@ const settingsControls = section("function bindSettingsControls", "function bind
 const hospitalAlerts = section("function getWarHospitalAlertNotificationId", "function getCrossOriginTransport");
 const targetFiltering = section("function getWarTargetStatus", "function getWarTargetSortValue");
 
-assert.match(source, /@version\s+1\.0\.33/, "userscript header version must be 1.0.33");
+assert.match(source, /@version\s+1\.0\.34/, "userscript header version must be 1.0.34");
 assert.match(source, /@license\s+MIT/, "metadata must declare the MIT license");
 assert.match(source, /https:\/\/github\.com\/SharpSplinter\/Naughty-Faction-Companion/, "metadata must use the renamed GitHub account");
 assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Faction-Companion\/refs\/heads\/main/, "metadata must update from the renamed account");
 assert.doesNotMatch(source + readme, /xf4k31tx/, "stale GitHub account links must not remain");
-assert.match(source, /const SCRIPT_VERSION = "1\.0\.33";/, "displayed version must match the userscript header");
+assert.match(source, /const SCRIPT_VERSION = "1\.0\.34";/, "displayed version must match the userscript header");
+assert.match(source, /const BOOT_TRACE_GLOBAL_KEY = "__NAUGHTY_FACTION_COMPANION_BOOT_TRACE__";/, "startup diagnostics must publish an inspectable native-safe trace");
+assert.match(source, /logBootPhase\("info", "source:evaluated", bootEnvironmentSnapshot\(\)\)/, "startup diagnostics must prove that the script source executed");
+assert.match(source, /"native:platform-ready"/, "startup diagnostics must record TornPDA platform readiness");
+assert.match(source, /"state:restore:start"/, "startup diagnostics must record persisted-state restoration");
+assert.match(source, /"dashboard:attached"/, "startup diagnostics must record when the dashboard reaches the DOM");
+assert.match(source, /"bootstrap:watchdog"/, "startup diagnostics must report a missing dashboard after bounded startup delays");
+assert.match(source, /"bootstrap:unhandled-failure"/, "startup diagnostics must retain unexpected bootstrap failures");
 assert.match(source, /^\/\/ @run-at\s+document-end$/m, "TornPDA storage startup must wait until document-end");
 assert.match(source, /@grant\s+GM_notification/, "desktop hospital alerts must request the legacy Tampermonkey notification grant");
 assert.match(source, /@grant\s+GM\.notification/, "desktop hospital alerts must request the modern Tampermonkey notification grant");

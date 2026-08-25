@@ -81,6 +81,8 @@ The Faction Companion intentionally has one page scope only: `https://www.torn.c
 
 Browser developer tools show concise diagnostics by default: startup and confirmed runtime state, native bridge and storage fallback decisions, plus each API request's method, host, path, status, and duration. Request queries, headers, bodies, API keys, and other credentials are deliberately omitted or redacted from these logs.
 
+On TornPDA, startup also emits ordered `[Naughty Faction Companion] BOOT` entries for source evaluation, DOM readiness, Flutter platform readiness, native-storage routing, persisted-state restoration, dashboard attachment, and two startup watchdogs. If `source:evaluated` is absent after reloading `factions.php`, TornPDA did not inject or parse the script; if it appears, the last BOOT entry identifies the blocked or failed phase. The same non-sensitive history is available from `window.__NAUGHTY_FACTION_COMPANION_BOOT_TRACE__` in TornPDA’s Console.
+
 ## Updating and verification
 
 Reopen the raw userscript URL in your userscript manager to update.

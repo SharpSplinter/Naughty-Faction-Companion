@@ -24,13 +24,13 @@ const hospitalAlerts = section("function getWarHospitalAlertNotificationId", "fu
 const targetFiltering = section("function getWarTargetStatus", "function getWarTargetSortValue");
 const minimizedInteraction = section('const dragHandle = document.getElementById("nfc-drag-handle")', "const resizeHandles = dashboard.querySelectorAll");
 
-assert.match(source, /@version\s+1\.0\.39/, "userscript header version must be 1.0.39");
+assert.match(source, /@version\s+1\.0\.41/, "userscript header version must be 1.0.41");
 assert.match(source, /@license\s+MIT/, "metadata must declare the MIT license");
 assert.match(source, /https:\/\/github\.com\/SharpSplinter\/Naughty-Faction-Companion/, "metadata must use the renamed GitHub account");
 assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Faction-Companion\/main/, "metadata must update from the renamed account");
 assert.doesNotMatch(source, /refs\/heads\/main/, "TornPDA update metadata must use the direct branch URL");
 assert.doesNotMatch(source + readme, /xf4k31tx/, "stale GitHub account links must not remain");
-assert.match(source, /const SCRIPT_VERSION = "1\.0\.39";/, "displayed version must match the userscript header");
+assert.match(source, /const SCRIPT_VERSION = "1\.0\.41";/, "displayed version must match the userscript header");
 assert.doesNotMatch(source, /BOOT_TRACE|logBootPhase|bootEnvironmentSnapshot|bootErrorDetails|logBootWatchdog/, "temporary boot-phase diagnostics must stay disabled");
 assert.match(source, /^\/\/ @run-at\s+document-start$/m, "Faction must execute at document-start");
 assert.match(source, /@grant\s+GM_notification/, "desktop hospital alerts must request the legacy Tampermonkey notification grant");
@@ -144,7 +144,7 @@ assert.doesNotMatch(source, /TORN_V1_BASE_URL/, "legacy Torn v1 profile batches 
 assert.match(source, /function pauseWindowActivity\(\)/, "minimizing must pause all refresh timers");
 assert.match(source, /function resumeWindowActivity\(\)/, "restoring must resume permitted refresh timers");
 assert.match(source, /if \(state\.isMinimized\) \{[\s\S]*return Promise\.reject/, "request wrappers must block API calls while minimized");
-assert.match(source, /if \(state\.isMinimized\) return false;/, "refresh entry points must pause while minimized");
+assert.match(source, /if \(!state\.pageScopeActive \|\| state\.isMinimized\) return false;/, "refresh entry points must pause while minimized");
 assert.doesNotMatch(renderer, /buildStatCard\("Estimates"/, "backend Estimates card must remain hidden");
 assert.match(controls, /input\.onwheel/, "FF range fields must support wheel stepping");
 assert.match(controls, /event\.preventDefault\(\)/, "FF wheel stepping must not scroll the page");
@@ -174,14 +174,19 @@ assert.match(source, /ffscouter-verification-dialog" class="nfc-scroll-region" t
 assert.match(source, /ntc-war-target-table-wrap[\s\S]*overflow-y:auto/, "war-target vertical scrolling must remain enabled");
 assert.match(source, /dialog id="ffscouter-verification-dialog"[\s\S]*overflow-y: auto/, "dialog vertical scrolling must remain enabled");
 assert.match(source, /resizeRenderTimer = setTimeout/, "FFScouter columns must recalculate while the window is being resized");
-assert.match(source, /widgetBody\.style\.overflowY = "hidden"/, "the script window itself must not vertically scroll");
+assert.match(source, /widgetBody\.style\.overflowY = useCompactScroll \? "auto" : "hidden"/, "compact runtimes must scroll the full companion window while desktop keeps its bounded layout");
 assert.match(source, /function fitCurrentContentToWidget\(\)/, "non-table panels must scale to fit the available window height");
 assert.match(source, /requestAnimationFrame\(fitCurrentContentToWidget\)/, "card fitting must run after renders and size changes");
-assert.match(source, /const useSettingsScroll = state\.currentTab === "settings" && isCompactRuntime\(\);/, "compact Settings must opt out of height-based content scaling");
+assert.match(source, /const useCompactScroll = isCompactRuntime\(\);/, "compact runtimes must opt out of height-based content scaling");
+assert.match(source, /content\.classList\.toggle\("nfc-compact-scroll", useCompactScroll\);/, "all compact tabs must use the shared scrollable content class");
+assert.match(source, /const useSettingsScroll = state\.currentTab === "settings" && useCompactScroll;/, "compact Settings must retain its dedicated scrollable content class");
 assert.match(source, /content\.classList\.toggle\("nfc-settings-scroll", useSettingsScroll\);/, "compact Settings must use a dedicated scrollable content class");
-assert.match(source, /if \(useSettingsScroll\) \{[\s\S]*content\.setAttribute\("tabindex", "0"\);[\s\S]*return;/, "compact Settings must remain keyboard and touch scrollable instead of shrinking vertically");
+assert.match(source, /if \(useCompactScroll\) \{[\s\S]*content\.setAttribute\("tabindex", "0"\);[\s\S]*return;/, "every compact tab must remain keyboard and touch scrollable instead of shrinking vertically");
 assert.match(source, /#nfc-faction-wrapper #nfc-content\.nfc-settings-scroll \{[\s\S]*overflow-x: hidden !important;[\s\S]*overflow-y: auto !important;[\s\S]*-webkit-overflow-scrolling: touch;[\s\S]*scrollbar-width: none;/, "compact Settings must fit horizontally while allowing hidden-scrollbar vertical touch scrolling");
 assert.match(source, /#nfc-faction-wrapper #nfc-content\.nfc-settings-scroll::\-webkit-scrollbar \{[\s\S]*display: none;/, "compact Settings must hide the WebKit scrollbar without disabling scrolling");
+assert.match(source, /#nfc-faction-wrapper\[data-runtime="tornpda"\] #nfc-main-body,[\s\S]*overflow-y:auto !important;[\s\S]*touch-action:pan-y pinch-zoom;[\s\S]*-webkit-overflow-scrolling:touch;/, "TornPDA must scroll the main Faction body vertically by touch");
+assert.match(source, /nfc-compact-scroll \.ntc-ffscouter-layout[\s\S]*flex-direction:column !important;/, "TornPDA FFScouter parameters and targets must stack vertically");
+assert.match(source, /nfc-compact-scroll \.ntc-war-target-table-wrap[\s\S]*overflow:visible !important;/, "TornPDA target rows must flow through the main vertical scroll region");
 assert.match(source, /min-height:210px;flex:1 1 auto;border:1px solid #343a43/, "the FFScouter table must retain room for roughly five readable target rows");
 assert.match(source, /ntc-ffscouter-summary/, "the FFScouter summary must have an independently responsive container");
 assert.match(source, /const preferredTableHeight = tableHeaderHeight \+ \(tableRowHeight \* 4\) \+ 4/, "FFScouter must reserve four readable player rows before summary scaling");

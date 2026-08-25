@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.0.40
+// @version      1.0.41
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -31,7 +31,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.40";
+    const SCRIPT_VERSION = "1.0.41";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -6375,12 +6375,14 @@
 
         content.style.zoom = "1";
         content.classList.toggle("nfc-faction-general-active", state.currentTab === "faction" && state.factionSubTab === "general");
-        const useSettingsScroll = state.currentTab === "settings" && isCompactRuntime();
+        const useCompactScroll = isCompactRuntime();
+        content.classList.toggle("nfc-compact-scroll", useCompactScroll);
+        const useSettingsScroll = state.currentTab === "settings" && useCompactScroll;
         content.classList.toggle("nfc-settings-scroll", useSettingsScroll);
-        if (useSettingsScroll) {
+        if (useCompactScroll) {
             content.setAttribute("tabindex", "0");
             content.setAttribute("role", "region");
-            content.setAttribute("aria-label", "Faction settings. Scroll for more options.");
+            content.setAttribute("aria-label", state.currentTab === "settings" ? "Faction settings. Scroll for more options." : "Faction companion content. Scroll for more options.");
             return;
         }
         content.removeAttribute("tabindex");
@@ -6489,7 +6491,10 @@
             widgetBody.style.flex = "1 1 auto";
             widgetBody.style.minHeight = "0";
             widgetBody.style.maxHeight = "none";
-            widgetBody.style.overflowY = "hidden";
+            const useCompactScroll = isCompactRuntime();
+            widgetBody.style.overflowX = "hidden";
+            widgetBody.style.overflowY = useCompactScroll ? "auto" : "hidden";
+            widgetBody.style.touchAction = useCompactScroll ? "pan-y pinch-zoom" : "";
             resizeHandles.forEach((handle) => { handle.style.display = "block"; });
             dragHandle.style.padding = "9px 11px";
             dragHandle.style.height = "auto";
@@ -7425,7 +7430,57 @@
                     font-size:21px;
                 }
                 #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-main-body,
-                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-main-body { padding:8px !important; overscroll-behavior:contain; }
+                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-main-body {
+                    padding:8px !important;
+                    overflow-x:hidden !important;
+                    overflow-y:auto !important;
+                    overscroll-behavior:contain;
+                    touch-action:pan-y pinch-zoom;
+                    -webkit-overflow-scrolling:touch;
+                    scrollbar-width:none;
+                    -ms-overflow-style:none;
+                }
+                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-main-body::-webkit-scrollbar,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-main-body::-webkit-scrollbar { display:none; width:0; height:0; }
+                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-content.nfc-compact-scroll,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-content.nfc-compact-scroll {
+                    flex:0 0 auto !important;
+                    min-height:auto !important;
+                    overflow:visible !important;
+                    width:100%;
+                }
+                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-content.nfc-compact-scroll.ntc-ffscouter-active,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-content.nfc-compact-scroll.ntc-ffscouter-active {
+                    grid-template-rows:none !important;
+                }
+                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-content.nfc-compact-scroll .ntc-ffscouter-layout,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-content.nfc-compact-scroll .ntc-ffscouter-layout {
+                    display:flex !important;
+                    flex-direction:column !important;
+                    align-items:stretch !important;
+                    height:auto !important;
+                    min-height:0 !important;
+                    width:100%;
+                }
+                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-content.nfc-compact-scroll .ntc-ffscouter-summary-viewport,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-content.nfc-compact-scroll .ntc-ffscouter-summary-viewport {
+                    height:auto !important;
+                    flex:0 0 auto !important;
+                    overflow:visible !important;
+                }
+                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-content.nfc-compact-scroll .ntc-war-target-table-wrap,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-content.nfc-compact-scroll .ntc-war-target-table-wrap {
+                    height:auto !important;
+                    min-height:0 !important;
+                    flex:0 0 auto !important;
+                    overflow:visible !important;
+                }
+                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-content.nfc-compact-scroll .nfc-war-target-filter-group,
+                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-content.nfc-compact-scroll .ntc-war-ff-range,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-content.nfc-compact-scroll .nfc-war-target-filter-group,
+                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-content.nfc-compact-scroll .ntc-war-ff-range {
+                    flex:1 1 100% !important;
+                }
                 #nfc-faction-wrapper[data-runtime="tornpda"] .nfc-primary-nav,
                 #nfc-faction-wrapper[data-runtime="pda-pending"] .nfc-primary-nav { gap:6px; padding:6px; margin-bottom:8px; }
                 #nfc-faction-wrapper[data-runtime="tornpda"] .nfc-tab,

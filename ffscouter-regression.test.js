@@ -24,13 +24,13 @@ const hospitalAlerts = section("function getWarHospitalAlertNotificationId", "fu
 const targetFiltering = section("function getWarTargetStatus", "function getWarTargetSortValue");
 const minimizedInteraction = section('const dragHandle = document.getElementById("nfc-drag-handle")', "const resizeHandles = dashboard.querySelectorAll");
 
-assert.match(source, /@version\s+1\.0\.37/, "userscript header version must be 1.0.37");
+assert.match(source, /@version\s+1\.0\.39/, "userscript header version must be 1.0.39");
 assert.match(source, /@license\s+MIT/, "metadata must declare the MIT license");
 assert.match(source, /https:\/\/github\.com\/SharpSplinter\/Naughty-Faction-Companion/, "metadata must use the renamed GitHub account");
 assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Faction-Companion\/main/, "metadata must update from the renamed account");
 assert.doesNotMatch(source, /refs\/heads\/main/, "TornPDA update metadata must use the direct branch URL");
 assert.doesNotMatch(source + readme, /xf4k31tx/, "stale GitHub account links must not remain");
-assert.match(source, /const SCRIPT_VERSION = "1\.0\.37";/, "displayed version must match the userscript header");
+assert.match(source, /const SCRIPT_VERSION = "1\.0\.39";/, "displayed version must match the userscript header");
 assert.doesNotMatch(source, /BOOT_TRACE|logBootPhase|bootEnvironmentSnapshot|bootErrorDetails|logBootWatchdog/, "temporary boot-phase diagnostics must stay disabled");
 assert.match(source, /^\/\/ @run-at\s+document-start$/m, "Faction must execute at document-start");
 assert.match(source, /@grant\s+GM_notification/, "desktop hospital alerts must request the legacy Tampermonkey notification grant");
@@ -81,8 +81,13 @@ assert.match(hospitalAlerts, /scheduleNotification/, "TornPDA hospital alerts mu
 assert.match(hospitalAlerts, /NATIVE_WAR_HOSPITAL_ALERT_ID_MIN/, "native hospital alert IDs must remain inside TornPDA's supported range");
 assert.match(hospitalAlerts, /cancelNotification/, "changing view eligibility must cancel stale TornPDA hospital alerts");
 assert.doesNotMatch(hospitalAlerts, /Promise\.allSettled/, "hospital alert cleanup must support older TornPDA WebViews");
-assert.match(renderer, /war-hospital-alert-toggle/, "FFScouter must expose the hospital-alert toggle");
-assert.match(renderer, /war-hospital-alert-time-dialog/, "first use must prompt for a hospital-alert threshold");
+assert.doesNotMatch(renderer, /\$\{hospitalAlertPanel\}/, "FFScouter must keep hospital-alert configuration out of the target view");
+assert.doesNotMatch(source, /id="war-hospital-alert-toggle"/, "legacy hospital-alert controls must not remain in FFScouter");
+assert.match(settings, /settings-war-hospital-alert-toggle/, "Settings must expose hospital-alert enablement");
+assert.match(settings, /settings-war-hospital-alert-threshold/, "Settings must expose the saved hospital-alert threshold");
+assert.match(settingsControls, /const getHospitalAlertThreshold =/, "Settings must validate the selected hospital-alert threshold");
+assert.match(settingsControls, /await enableWarHospitalAlerts\(selected\)/, "Settings must enable alerts using the selected threshold");
+assert.match(settingsControls, /await disableWarHospitalAlerts\(\{ resetPreference: true \}\)/, "Settings must be able to clear all hospital-alert settings");
 assert.match(settings, /reset-war-hospital-alerts-btn/, "Settings must offer a hospital-alert preference reset");
 assert.match(settingsControls, /disableWarHospitalAlerts\(\{ resetPreference: true \}\)/, "Settings reset must clear hospital-alert preference and schedules");
 assert.match(source, /const formatIdentifier =/, "identifier formatting must not reuse comma-separated integer formatting");
@@ -90,6 +95,14 @@ assert.doesNotMatch(source, /ID \$\{formatInteger\(/, "displayed IDs must remain
 assert.match(source, /tornpda:tabState/, "TornPDA tab state must pause automatic refresh while inactive");
 assert.match(source, /document\.addEventListener\("visibilitychange"/, "document visibility must pause automatic refresh while inactive");
 assert.match(source, /function isAutomaticRefreshAllowed/, "auto-refresh must centrally gate inactive states");
+assert.match(source, /function readViewportMetrics\(\)/, "keyboard detection must distinguish raw visual-viewport changes from stable panel geometry");
+assert.match(source, /const virtualKeyboardState = \{ active: false, baseline: null \}/, "keyboard state must retain the pre-keyboard viewport");
+assert.match(source, /function enableNativeKeyboardOverlay\(\)/, "supporting TornPDA webviews must be opted into native keyboard overlays");
+assert.match(source, /keyboard\.overlaysContent = true;/, "the native keyboard must overlay content rather than resize the viewport when the API is available");
+assert.match(source, /function beginVirtualKeyboardGuard\(target\)/, "focusing a widget input must arm the native keyboard overlay guard");
+assert.match(source, /const keyboardOpening = inputFocused && geometryMatches && heightLoss >= VIRTUAL_KEYBOARD_OPEN_DELTA_PX;/, "keyboard-height changes must be recognized without treating rotations as a keyboard");
+assert.match(source, /if \(keyboardOpen\) return;/, "keyboard viewport changes must not resize or reposition the panel");
+assert.match(source, /dashboard\.addEventListener\("focusin", \(event\) => beginVirtualKeyboardGuard\(event\.target\)\);/, "native keyboard protection must begin when any script input receives focus");
 assert.match(source, /const getStoredMinimizedPosition =/, "minimized icon positions must be restored from persisted state");
 assert.match(source, /const setStoredMinimizedPosition =/, "minimized icon positions must be saved independently from the expanded panel position");
 assert.match(source, /state\.isMinimized \? getStoredMinimizedPosition\(position\) : null/, "minimized view must prefer its saved coordinates");

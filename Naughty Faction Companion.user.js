@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.0.37
+// @version      1.0.39
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -31,7 +31,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.37";
+    const SCRIPT_VERSION = "1.0.39";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -71,6 +71,9 @@
     const TORN_PDA_HANDLER_PATTERN = /\btorn\s*pda\b/i;
     const MOBILE_TOP_OFFSET_PX = 12;
     const RUNTIME_GLOBAL_KEY = "__NAUGHTY_FACTION_COMPANION_RUNTIME__";
+    const VIRTUAL_KEYBOARD_OPEN_DELTA_PX = 32;
+    const VIRTUAL_KEYBOARD_WIDTH_TOLERANCE_PX = 24;
+    const virtualKeyboardState = { active: false, baseline: null };
 
     function getTornPDABridge() {
         const bridge = window.flutter_inappwebview;
@@ -119,7 +122,7 @@
         return "";
     }
 
-    function getViewportMetrics() {
+    function readViewportMetrics() {
         const visualViewport = window.visualViewport;
         const width = Math.max(1, Math.round(visualViewport?.width || window.innerWidth || document.documentElement?.clientWidth || 1));
         const height = Math.max(1, Math.round(visualViewport?.height || window.innerHeight || document.documentElement?.clientHeight || 1));
@@ -127,8 +130,83 @@
             width,
             height,
             aspectRatio: Number((width / height).toFixed(3)),
-            orientation: width >= height ? "landscape" : "portrait"
+            orientation: width >= height ? "landscape" : "portrait",
+            scale: Number(visualViewport?.scale) || 1
         };
+    }
+
+    function getViewportMetrics() {
+        const rawViewport = readViewportMetrics();
+        const viewport = virtualKeyboardState.active && virtualKeyboardState.baseline
+            ? virtualKeyboardState.baseline
+            : rawViewport;
+        return { ...viewport, keyboardOpen: virtualKeyboardState.active };
+    }
+
+    function isVirtualKeyboardInput(element) {
+        if (!(element instanceof Element)) return false;
+        if (element.matches("textarea, select, [contenteditable='true'], [contenteditable='']")) return true;
+        if (!element.matches("input")) return false;
+        return !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(String(element.type || "text").toLowerCase());
+    }
+
+    function isVirtualKeyboardGuardEnabled(rawViewport = readViewportMetrics()) {
+        return isTornPDAEnvironment() || isTornPDACandidate() || rawViewport.width <= 700;
+    }
+
+    function enableNativeKeyboardOverlay() {
+        if (!isVirtualKeyboardGuardEnabled()) return false;
+        try {
+            const keyboard = navigator.virtualKeyboard;
+            if (!keyboard || !("overlaysContent" in keyboard)) return false;
+            keyboard.overlaysContent = true;
+            return keyboard.overlaysContent === true;
+        } catch {
+            return false;
+        }
+    }
+
+    function hasFocusedWidgetInput() {
+        const focused = document.activeElement;
+        return !!state?.dashboard?.contains(focused) && isVirtualKeyboardInput(focused);
+    }
+
+    function beginVirtualKeyboardGuard(target) {
+        if (!state?.dashboard?.contains(target) || !isVirtualKeyboardInput(target)) return;
+        enableNativeKeyboardOverlay();
+        const rawViewport = readViewportMetrics();
+        if (!isVirtualKeyboardGuardEnabled(rawViewport)) return;
+        if (!virtualKeyboardState.active || !virtualKeyboardState.baseline || rawViewport.height >= virtualKeyboardState.baseline.height - 12) {
+            virtualKeyboardState.baseline = rawViewport;
+        }
+    }
+
+    function updateVirtualKeyboardState(rawViewport = readViewportMetrics()) {
+        if (!isVirtualKeyboardGuardEnabled(rawViewport)) {
+            virtualKeyboardState.active = false;
+            virtualKeyboardState.baseline = null;
+            return false;
+        }
+        const inputFocused = hasFocusedWidgetInput();
+        if (inputFocused && !virtualKeyboardState.baseline) virtualKeyboardState.baseline = rawViewport;
+        const baseline = virtualKeyboardState.baseline;
+        if (!baseline) return false;
+        const geometryMatches = Math.abs(rawViewport.width - baseline.width) <= VIRTUAL_KEYBOARD_WIDTH_TOLERANCE_PX
+            && Math.abs(rawViewport.scale - baseline.scale) < 0.01;
+        const heightLoss = baseline.height - rawViewport.height;
+        const keyboardOpening = inputFocused && geometryMatches && heightLoss >= VIRTUAL_KEYBOARD_OPEN_DELTA_PX;
+        if (keyboardOpening) {
+            virtualKeyboardState.active = true;
+            return true;
+        }
+        const viewportRecovered = rawViewport.height >= baseline.height - 12;
+        if (virtualKeyboardState.active && (!geometryMatches || viewportRecovered)) {
+            virtualKeyboardState.active = false;
+            virtualKeyboardState.baseline = inputFocused ? rawViewport : null;
+        } else if (!inputFocused && !virtualKeyboardState.active) {
+            virtualKeyboardState.baseline = null;
+        }
+        return virtualKeyboardState.active;
     }
 
     function createRuntimeState() {
@@ -536,6 +614,7 @@
             dashboard.dataset.runtime = compact ? "tornpda" : state.runtime.platform;
             dashboard.dataset.orientation = viewport.orientation;
             dashboard.dataset.minimized = String(state.isMinimized);
+            dashboard.dataset.keyboardOpen = String(!!viewport.keyboardOpen);
             dashboard.style.setProperty("--nfc-runtime-width", `${viewport.width}px`);
             dashboard.style.setProperty("--nfc-runtime-height", `${viewport.height}px`);
         }
@@ -547,6 +626,7 @@
             source: state.runtime.source,
             nativeChecked: state.runtime.nativeChecked,
             viewport,
+            keyboardOpen: !!viewport.keyboardOpen,
             scriptHandler: state.runtime.scriptHandler
         });
     }
@@ -4251,27 +4331,6 @@
                 <button id="clear-war-ff-range-btn" type="button" ${rangeActive ? "" : "disabled"} style="border:1px solid #3a424d;border-radius:5px;background:${rangeActive ? "#303944" : "#20262d"};color:${rangeActive ? "#d7dde5" : "#697582"};padding:4px 6px;font-size:9px;cursor:${rangeActive ? "pointer" : "default"};">${rangeActive ? "Clear" : "Off"}</button>
             </div>
         `;
-        const hospitalAlertSettings = state.warHospitalAlertSettings;
-        const hospitalAlertMinutes = hospitalAlertSettings.thresholdMinutes;
-        const hospitalAlertsEnabled = hospitalAlertSettings.enabled && WAR_HOSPITAL_ALERT_THRESHOLDS.includes(hospitalAlertMinutes);
-        const hospitalAlertSummary = hospitalAlertMinutes
-            ? `At ${formatInteger(hospitalAlertMinutes)} minute${hospitalAlertMinutes === 1 ? "" : "s"} left · matches this visible view`
-            : "Choose 1, 3, or 5 minutes when enabling";
-        const hospitalAlertPanel = `
-            <div class="ntc-war-hospital-alert-panel" style="display:flex;align-items:center;gap:6px;flex:1 1 260px;min-width:0;flex-wrap:wrap;padding:5px 6px;border:1px solid #3a546d;border-radius:7px;background:rgba(47,91,138,.12);">
-                <label style="display:inline-flex;align-items:center;gap:5px;color:#e4f0ff;font-size:9px;font-weight:800;cursor:pointer;white-space:nowrap;"><input id="war-hospital-alert-toggle" type="checkbox" ${hospitalAlertsEnabled ? "checked" : ""} style="margin:0;accent-color:#5ba7f7;cursor:pointer;">Hospital alerts</label>
-                <button id="war-hospital-alert-time-btn" type="button" ${hospitalAlertsEnabled ? "" : "disabled"} style="border:1px solid #4f7397;border-radius:5px;background:${hospitalAlertsEnabled ? "#294a6d" : "#20262d"};color:${hospitalAlertsEnabled ? "#e4f0ff" : "#697582"};padding:3px 6px;font-size:9px;font-weight:800;cursor:${hospitalAlertsEnabled ? "pointer" : "default"};">${hospitalAlertMinutes ? `${formatInteger(hospitalAlertMinutes)} min` : "Choose"}</button>
-                <span style="color:#9fb8d1;font-size:8px;line-height:1.3;overflow-wrap:anywhere;">${escapeHtml(hospitalAlertSummary)}</span>
-            </div>
-            <dialog id="war-hospital-alert-time-dialog" class="nfc-scroll-region" aria-label="Choose hospital alert time" style="width:min(340px,calc(100vw - 32px));max-width:calc(100vw - 32px);border:1px solid #4a657f;border-radius:10px;padding:0;background:#182337;color:#f4f8ff;box-shadow:0 18px 60px rgba(0,0,0,.58);">
-                <div style="display:grid;gap:10px;padding:14px;">
-                    <div style="font-size:13px;font-weight:900;">Hospital alert time</div>
-                    <div style="color:#b9c7d8;font-size:10px;line-height:1.45;">Notify when a visible hospitalized enemy has this much time left. Your current status, activity, FF/BS range, and other FFScouter filters still apply.</div>
-                    <div style="display:flex;gap:7px;flex-wrap:wrap;">${WAR_HOSPITAL_ALERT_THRESHOLDS.map((minutes) => `<button data-war-hospital-alert-threshold="${minutes}" type="button" style="background:#315987;color:#fff;border:1px solid #5c96dc;border-radius:6px;padding:7px 10px;font-size:10px;font-weight:800;cursor:pointer;">${formatInteger(minutes)} min</button>`).join("")}</div>
-                    <button id="cancel-war-hospital-alert-time-btn" type="button" style="justify-self:end;background:#59616d;color:#fff;border:none;border-radius:6px;padding:6px 10px;font-size:10px;font-weight:700;cursor:pointer;">Cancel</button>
-                </div>
-            </dialog>
-        `;
         const rows = targets.map((target) => {
             const online = String(target.lastAction?.status || "Unknown");
             const onlineColor = online === "Online" ? "#7fe18d" : online === "Idle" ? "#e0a25e" : "#9aa4b2";
@@ -4307,7 +4366,6 @@
                             <div class="nfc-ffscouter-sort-summary" style="display:grid;gap:1px;flex:0 0 auto;"><span class="ntc-war-filter-heading" style="color:#fff;font-size:10px;font-weight:900;">Sort &amp; View</span><span style="color:#697582;font-size:8px;white-space:nowrap;">${escapeHtml(activeSort.label)} · ${sortDirection}</span></div>
                             ${filterPanel}
                             ${rangePanel}
-                            ${hospitalAlertPanel}
                         </div>
                         <div class="nfc-ffscouter-stat-grid" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;">${buildStatCard("Online / Idle", onlineCount, "Live Torn status", "#7fe18d")}${buildStatCard("Healthy", okayCount, "Status: Okay", "#5ba7f7")}</div>
                         ${notices.map((notice) => `<div style="color:#e0a25e;font-size:10px;line-height:1.4;">⚠ ${escapeHtml(notice)}</div>`).join("")}
@@ -4646,6 +4704,20 @@
                     ${pendingBackup ? `<div style="display:grid;gap:7px;padding:9px;border:1px solid #4a657f;border-radius:7px;background:rgba(54,92,130,.15);"><div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;color:#d8e9ff;font-size:10px;"><span style="overflow-wrap:anywhere;">${escapeHtml(pendingBackup.fileName)}</span><span>${escapeHtml(new Date(pendingBackup.backup.createdAt).toLocaleString())}</span></div><div style="color:#bfc7d1;font-size:10px;">Schema v${formatInteger(pendingBackup.backup.schemaVersion)} · ${pendingBackup.backup.includesApiKeys ? "API keys included — restore remains opt-in" : "No API keys in this backup"}</div>${pendingBackup.backup.includesApiKeys ? '<label style="display:flex;align-items:flex-start;gap:7px;color:#f1f3f5;font-size:11px;line-height:1.35;cursor:pointer;"><input id="restore-backup-api-keys-input" type="checkbox"><span>Restore API keys from this backup</span></label>' : '<div style="color:#aaa;font-size:10px;">Existing locally stored API keys will be preserved.</div>'}<label style="display:flex;align-items:flex-start;gap:7px;color:#f1f3f5;font-size:11px;line-height:1.35;cursor:pointer;"><input id="confirm-local-backup-restore-input" type="checkbox"><span>I understand this replaces my current local Faction companion data.</span></label><div style="display:flex;gap:7px;flex-wrap:wrap;"><button id="restore-local-backup-btn" type="button" style="background:#a13b3b;color:#fff;border:none;border-radius:6px;padding:8px 12px;font-size:11px;cursor:pointer;">Restore Backup</button><button id="cancel-local-backup-restore-btn" type="button" style="background:#59616d;color:#fff;border:none;border-radius:6px;padding:8px 12px;font-size:11px;cursor:pointer;">Cancel</button></div></div>` : ""}
                 </div>
             `;
+        const hospitalAlertSettings = state.warHospitalAlertSettings;
+        const hospitalAlertMinutes = hospitalAlertSettings.thresholdMinutes;
+        const hospitalAlertsEnabled = hospitalAlertSettings.enabled && WAR_HOSPITAL_ALERT_THRESHOLDS.includes(hospitalAlertMinutes);
+        const scheduledHospitalAlertCount = Object.keys(hospitalAlertSettings.scheduledTargets || {}).length;
+        const hospitalAlertControlsMarkup = `
+                    <div style="border:1px solid #3d5875;border-radius:8px;padding:11px;display:grid;gap:9px;background:rgba(47,91,138,.12);">
+                        <div style="display:grid;gap:3px;"><div style="color:#f1f7ff;font-weight:800;font-size:13px;">FFScouter hospital alerts</div><div style="color:#b9c7d8;font-size:10px;line-height:1.45;">Notify for eligible enemy hospital releases. Eligibility always follows the current FFScouter Status, Activity, and FF/estimated-BS view filters.</div></div>
+                        <label style="display:flex;align-items:center;gap:8px;color:#f1f7ff;font-size:11px;font-weight:750;cursor:pointer;"><input id="settings-war-hospital-alert-toggle" type="checkbox" ${hospitalAlertsEnabled ? "checked" : ""} style="width:17px;height:17px;margin:0;accent-color:#5ba7f7;cursor:pointer;"><span>Enable hospital-release notifications</span></label>
+                        <label style="display:grid;grid-template-columns:minmax(0,1fr) minmax(112px,auto);gap:8px;align-items:center;color:#d3dfed;font-size:11px;font-weight:700;"><span>Notify when time remaining is</span><select id="settings-war-hospital-alert-threshold" aria-label="Hospital alert time remaining" style="width:100%;min-height:36px;background:#111820;border:1px solid #4f7397;border-radius:6px;color:#f1f7ff;padding:6px 8px;font-size:11px;">${[`<option value="">Choose a time</option>`, ...WAR_HOSPITAL_ALERT_THRESHOLDS.map((minutes) => `<option value="${minutes}" ${hospitalAlertMinutes === minutes ? "selected" : ""}>${formatInteger(minutes)} minute${minutes === 1 ? "" : "s"}</option>`)].join("")}</select></label>
+                        <div id="settings-war-hospital-alert-status" style="color:${hospitalAlertsEnabled ? "#8ee2b2" : "#b9c7d8"};font-size:10px;line-height:1.4;">${hospitalAlertsEnabled ? `Enabled at ${formatInteger(hospitalAlertMinutes)} minute${hospitalAlertMinutes === 1 ? "" : "s"} left · ${formatInteger(scheduledHospitalAlertCount)} currently scheduled.` : hospitalAlertMinutes ? `Time saved at ${formatInteger(hospitalAlertMinutes)} minute${hospitalAlertMinutes === 1 ? "" : "s"}; enable notifications when ready.` : "Choose 1, 3, or 5 minutes before enabling notifications."}</div>
+                        <div style="color:#7f99b5;font-size:10px;line-height:1.4;">TornPDA schedules native reminders after a fresh active scan. Desktop notifications are best effort while this page remains open.</div>
+                        <button id="reset-war-hospital-alerts-btn" type="button" style="justify-self:start;background:#59616d;color:#fff;border:none;border-radius:6px;padding:8px 10px;font-size:11px;cursor:pointer;">Reset hospital alert settings</button>
+                    </div>
+            `;
 
         const subTabButtons = [
             { id: "controls", label: "Controls" },
@@ -4684,12 +4756,7 @@
                         </div>
                         <div id="native-reminder-status" style="color:#aaa;font-size:10px;line-height:1.4;">${escapeHtml(nativeReminderStatus)}</div>
                     </div>
-                    <div style="border: 1px solid #3d3d3d; border-radius: 6px; padding: 10px; display: grid; gap: 7px;">
-                        <div style="color: #fff; font-weight: 700; font-size: 12px;">FFScouter hospital alerts</div>
-                        <div style="color:#aaa;font-size:11px;line-height:1.45;">${state.warHospitalAlertSettings.enabled ? `Enabled at ${formatInteger(state.warHospitalAlertSettings.thresholdMinutes)} minute${state.warHospitalAlertSettings.thresholdMinutes === 1 ? "" : "s"} left.` : "Disabled."} Alerts only use enemies currently included by the FFScouter view filters and FF/estimated-BS range.</div>
-                        <div style="color:#7f99b5;font-size:10px;line-height:1.4;">TornPDA queues native alerts from a fresh active scan; desktop alerts are best effort while this page remains open.</div>
-                        <button id="reset-war-hospital-alerts-btn" type="button" style="justify-self:start;background:#59616d;color:#fff;border:none;border-radius:6px;padding:8px 10px;font-size:11px;cursor:pointer;">Reset Hospital Alert Preference</button>
-                    </div>
+                    ${hospitalAlertControlsMarkup}
                     <div style="border: 1px solid #3d3d3d; border-radius: 6px; padding: 10px; display: grid; gap: 7px;">
                         <div style="color: #fff; font-weight: 700; font-size: 12px;">Window</div>
                         <div style="color: #aaa; font-size: 11px; line-height: 1.4;">Clears every saved size and position for every tab, then re-applies the default layout for this device (the safe visual viewport in TornPDA, a floating panel on desktop).</div>
@@ -4874,6 +4941,9 @@
         const scheduleNativeReminderButton = document.getElementById("schedule-native-reminder-btn");
         const cancelNativeReminderButton = document.getElementById("cancel-native-reminder-btn");
         const nativeReminderStatus = document.getElementById("native-reminder-status");
+        const warHospitalAlertToggle = document.getElementById("settings-war-hospital-alert-toggle");
+        const warHospitalAlertThreshold = document.getElementById("settings-war-hospital-alert-threshold");
+        const warHospitalAlertStatus = document.getElementById("settings-war-hospital-alert-status");
         const resetWarHospitalAlertsButton = document.getElementById("reset-war-hospital-alerts-btn");
         const backupIncludeKeysInput = document.getElementById("backup-include-api-keys-input");
         const downloadLocalBackupButton = document.getElementById("download-local-backup-btn");
@@ -5059,6 +5129,78 @@
                     state.sectionStatus.settings = message;
                 } finally {
                     cancelNativeReminderButton.disabled = false;
+                }
+            };
+        }
+
+        const getHospitalAlertThreshold = (value) => {
+            const selected = Math.round(Number(value));
+            return WAR_HOSPITAL_ALERT_THRESHOLDS.includes(selected) ? selected : null;
+        };
+        const setHospitalAlertStatus = (message, tone = "info") => {
+            state.sectionStatus.settings = message;
+            if (warHospitalAlertStatus) {
+                warHospitalAlertStatus.textContent = message;
+                warHospitalAlertStatus.style.color = tone === "success" ? "#8ee2b2" : tone === "error" ? "#ff9aa5" : "#b9c7d8";
+            }
+            setUserStatus(status, message, tone);
+        };
+        if (warHospitalAlertThreshold && !warHospitalAlertThreshold.dataset.bound) {
+            warHospitalAlertThreshold.dataset.bound = "true";
+            warHospitalAlertThreshold.onchange = async () => {
+                const selected = getHospitalAlertThreshold(warHospitalAlertThreshold.value);
+                warHospitalAlertThreshold.disabled = true;
+                try {
+                    if (!selected) {
+                        await disableWarHospitalAlerts({ resetPreference: true });
+                        setHospitalAlertStatus("Hospital alerts disabled and their time setting cleared.");
+                    } else if (state.warHospitalAlertSettings.enabled) {
+                        requestDesktopHospitalNotificationPermission();
+                        await enableWarHospitalAlerts(selected);
+                        setHospitalAlertStatus(`Hospital alerts enabled at ${formatInteger(selected)} minute${selected === 1 ? "" : "s"} left.`, "success");
+                    } else {
+                        state.warHospitalAlertSettings.thresholdMinutes = selected;
+                        persistWarHospitalAlertSettings();
+                        setHospitalAlertStatus(`Hospital alert time saved: ${formatInteger(selected)} minute${selected === 1 ? "" : "s"} left.`);
+                    }
+                    renderTabContent();
+                } catch (error) {
+                    const message = `Hospital alert time could not be saved: ${safeErrorMessage(error)}`;
+                    setHospitalAlertStatus(message, "error");
+                    warnLog("Hospital alert time save failed", { error: safeErrorMessage(error) });
+                } finally {
+                    warHospitalAlertThreshold.disabled = false;
+                }
+            };
+        }
+        if (warHospitalAlertToggle && !warHospitalAlertToggle.dataset.bound) {
+            warHospitalAlertToggle.dataset.bound = "true";
+            warHospitalAlertToggle.onchange = async () => {
+                warHospitalAlertToggle.disabled = true;
+                try {
+                    if (!warHospitalAlertToggle.checked) {
+                        await disableWarHospitalAlerts();
+                        setHospitalAlertStatus("Hospital alerts disabled.");
+                    } else {
+                        const selected = getHospitalAlertThreshold(warHospitalAlertThreshold?.value || state.warHospitalAlertSettings.thresholdMinutes);
+                        if (!selected) {
+                            warHospitalAlertToggle.checked = false;
+                            setHospitalAlertStatus("Choose 1, 3, or 5 minutes before enabling hospital alerts.", "error");
+                            warHospitalAlertThreshold?.focus();
+                            return;
+                        }
+                        requestDesktopHospitalNotificationPermission();
+                        await enableWarHospitalAlerts(selected);
+                        setHospitalAlertStatus(`Hospital alerts enabled at ${formatInteger(selected)} minute${selected === 1 ? "" : "s"} left.`, "success");
+                    }
+                    renderTabContent();
+                } catch (error) {
+                    warHospitalAlertToggle.checked = state.warHospitalAlertSettings.enabled;
+                    const message = `Hospital alerts could not be updated: ${safeErrorMessage(error)}`;
+                    setHospitalAlertStatus(message, "error");
+                    warnLog("Hospital alert update failed", { error: safeErrorMessage(error) });
+                } finally {
+                    warHospitalAlertToggle.disabled = false;
                 }
             };
         }
@@ -5370,11 +5512,6 @@
         const maxFFInput = document.getElementById("war-ff-max-input");
         const clearFFRangeButton = document.getElementById("clear-war-ff-range-btn");
         const rangeMetricSelect = document.getElementById("war-target-range-metric-select");
-        const hospitalAlertToggle = document.getElementById("war-hospital-alert-toggle");
-        const hospitalAlertTimeButton = document.getElementById("war-hospital-alert-time-btn");
-        const hospitalAlertTimeDialog = document.getElementById("war-hospital-alert-time-dialog");
-        const hospitalAlertThresholdButtons = contentEl.querySelectorAll("[data-war-hospital-alert-threshold]");
-        const cancelHospitalAlertTimeButton = document.getElementById("cancel-war-hospital-alert-time-btn");
         const saveWarTargetRange = () => {
             const metric = state.warTargetRangeMetric === "bs" ? "bs" : "ff";
             const normalizeRangeBound = (value) => {
@@ -5430,60 +5567,6 @@
             void refreshWarTargets();
         };
 
-        const chooseHospitalAlertThreshold = async (minutes) => {
-            const selected = Math.round(Number(minutes));
-            if (!WAR_HOSPITAL_ALERT_THRESHOLDS.includes(selected)) return;
-            hospitalAlertTimeDialog?.close();
-            requestDesktopHospitalNotificationPermission();
-            try {
-                await enableWarHospitalAlerts(selected);
-                state.sectionStatus.faction = `Hospital alerts enabled at ${formatInteger(selected)} minute${selected === 1 ? "" : "s"} left.`;
-                renderTabContent();
-            } catch (error) {
-                state.sectionStatus.faction = `Hospital alerts could not be enabled: ${safeErrorMessage(error)}`;
-                warnLog("Hospital alert enablement failed", { error: safeErrorMessage(error) });
-                renderTabContent();
-            }
-        };
-        const openHospitalAlertTimeDialog = (intent) => {
-            if (hospitalAlertTimeDialog?.showModal) {
-                hospitalAlertTimeDialog.dataset.intent = intent;
-                if (!hospitalAlertTimeDialog.open) hospitalAlertTimeDialog.showModal();
-                return;
-            }
-            const selected = Math.round(Number(window.prompt("Notify with how much hospital time left? Enter 1, 3, or 5.", String(state.warHospitalAlertSettings.thresholdMinutes || 3))));
-            if (WAR_HOSPITAL_ALERT_THRESHOLDS.includes(selected)) {
-                void chooseHospitalAlertThreshold(selected);
-            } else if (intent === "enable" && hospitalAlertToggle) {
-                hospitalAlertToggle.checked = false;
-            }
-        };
-        if (hospitalAlertToggle) hospitalAlertToggle.onchange = async () => {
-            if (!hospitalAlertToggle.checked) {
-                await disableWarHospitalAlerts();
-                state.sectionStatus.faction = "Hospital alerts disabled.";
-                renderTabContent();
-                return;
-            }
-            if (!WAR_HOSPITAL_ALERT_THRESHOLDS.includes(state.warHospitalAlertSettings.thresholdMinutes)) {
-                hospitalAlertToggle.checked = false;
-                openHospitalAlertTimeDialog("enable");
-                return;
-            }
-            requestDesktopHospitalNotificationPermission();
-            await enableWarHospitalAlerts(state.warHospitalAlertSettings.thresholdMinutes);
-            state.sectionStatus.faction = `Hospital alerts enabled at ${formatInteger(state.warHospitalAlertSettings.thresholdMinutes)} minute${state.warHospitalAlertSettings.thresholdMinutes === 1 ? "" : "s"} left.`;
-            renderTabContent();
-        };
-        if (hospitalAlertTimeButton) hospitalAlertTimeButton.onclick = () => openHospitalAlertTimeDialog("change");
-        hospitalAlertThresholdButtons.forEach((button) => {
-            button.onclick = () => void chooseHospitalAlertThreshold(button.getAttribute("data-war-hospital-alert-threshold"));
-        });
-        if (cancelHospitalAlertTimeButton) cancelHospitalAlertTimeButton.onclick = () => {
-            const intent = hospitalAlertTimeDialog?.dataset.intent;
-            hospitalAlertTimeDialog?.close();
-            if (intent === "enable" && hospitalAlertToggle) hospitalAlertToggle.checked = false;
-        };
         contentEl.querySelectorAll("[data-war-target-sort]").forEach((header) => {
             header.onclick = (event) => {
                 if (event.target.closest("[data-war-column-resize], [data-war-column-drag]")) return;
@@ -6025,8 +6108,8 @@
         const hasStoredWidth = Number.isFinite(width);
         const hasStoredHeight = Number.isFinite(height);
         // Desktop default: a modest 480px floating panel, ~80% of viewport height.
-        // TornPDA's first opening uses the safe visual viewport. A real stored size is
-        // still respected, but is clamped in real time on rotation/keyboard changes.
+        // TornPDA's first opening uses the safe visual viewport. Keyboard-driven visual
+        // viewport changes retain the pre-keyboard geometry; rotations still re-clamp.
         let defaultWidth = 480;
         let defaultHeight = Math.min(720, Math.round(getViewportMetrics().height * 0.8));
         if (isCompactRuntime() && (!hasStoredWidth || !hasStoredHeight)) {
@@ -7280,6 +7363,7 @@
 
         document.body.appendChild(dashboard);
         state.dashboard = dashboard;
+        enableNativeKeyboardOverlay();
         publishRuntimeState();
         applyDashboardTheme();
         applyWidgetView();
@@ -7474,11 +7558,14 @@
         let viewportRenderTimer = null;
         let lastViewport = getViewportMetrics();
         const syncViewportLayout = () => {
+            const rawViewport = readViewportMetrics();
+            const keyboardOpen = updateVirtualKeyboardState(rawViewport);
             const nextViewport = getViewportMetrics();
             const orientationChanged = nextViewport.orientation !== lastViewport.orientation;
             const widthChanged = Math.abs(nextViewport.width - lastViewport.width) > 24;
             lastViewport = nextViewport;
             publishRuntimeState();
+            if (keyboardOpen) return;
             if (state.isMinimized) {
                 clampWidgetTop();
                 return;
@@ -7487,7 +7574,6 @@
             clearTimeout(viewportRenderTimer);
             viewportRenderTimer = setTimeout(() => {
                 fitCurrentContentToWidget();
-                // A keyboard changes visual height but should not destroy a focused field.
                 // Rotations and substantive width changes do need a responsive re-render.
                 if (orientationChanged || widthChanged) renderTabContent();
             }, 90);
@@ -7500,6 +7586,13 @@
         window.addEventListener("orientationchange", scheduleViewportLayout);
         window.visualViewport?.addEventListener("resize", scheduleViewportLayout);
         window.visualViewport?.addEventListener("scroll", scheduleViewportLayout);
+        dashboard.addEventListener("focusin", (event) => beginVirtualKeyboardGuard(event.target));
+        dashboard.addEventListener("focusout", () => {
+            window.setTimeout(() => {
+                updateVirtualKeyboardState(readViewportMetrics());
+                scheduleViewportLayout();
+            }, 0);
+        });
 
         dashboard.querySelectorAll(".nfc-tab").forEach((button) => {
             button.addEventListener("click", () => {

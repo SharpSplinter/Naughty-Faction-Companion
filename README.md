@@ -22,13 +22,14 @@ This open-source userscript gives Torn factions a focused, local operations view
 - Torn live status: availability, online state, travel destination, and hospital/travel release timing.
 - Sortable target columns, persistent column order and widths, persistent status filters, and configurable Fair Fight ranges.
 - Target attack links that open Torn’s attack page.
+- Hospital-release notifications configured from **Settings → Controls**; they honor the current FFScouter status, activity, FF, and estimated-BS filters.
 - Separate, verifiable FFScouter-linked Torn key so it is never silently substituted for the companion’s regular Torn key.
 
 ### Interface
 
 - Dark and lower-glare light themes.
 - Desktop move, resize, snap, and minimize controls. The minimized launcher opens from any tap/click and can be dragged independently; its last launcher position is retained.
-- Native TornPDA detection plus the same compact-viewport trigger as the other companions: effective width ≤700px, effective height ≤520px, or scale >1.1 at ≤960px. Compact mode follows safe areas and live viewport/orientation updates.
+- Native TornPDA detection plus the same compact-viewport trigger as the other companions: effective width ≤700px, effective height ≤520px, or scale >1.1 at ≤960px. Compact mode follows safe areas and live viewport/orientation updates; when a script input is focused, supporting webviews use the native keyboard-overlay API and other webviews retain the pre-keyboard panel geometry rather than collapsing or repositioning it.
 - Hidden scrollbar tracks for every intentional scroll region without disabling desktop wheel/keyboard or TornPDA touch scrolling. In compact mode, Settings keeps readable horizontal sizing and vertically scrolls inside the panel; the FFScouter player list remains the other in-panel vertical list.
 - Compact portrait and landscape reflow keeps controls, cards, statuses, filters, and tables inside the usable viewport. FFScouter fits all columns to its width and keeps only its results list vertically scrollable.
 - User-triggered CSV export and JSON backup for cached local data: TornPDA opens its native share sheet through `shareFile({ base64Data, fileName })`, while desktop/Tampermonkey downloads the file locally. Android and iOS choose Files or another destination from that system sheet rather than a browser save-location picker. A native share failure is shown as an error instead of being mislabeled as a download, and simultaneous share requests are prevented.
@@ -52,7 +53,7 @@ Use the **FFScouter** sub-tab during a Ranked War to evaluate enemy targets. Cli
 
 ### Settings
 
-- **Controls** shows Runtime, Screen Size, and Storage Method; stores the primary Torn API key, chooses the theme, resets panel layout, refreshes faction data, and can schedule or cancel a TornPDA-native faction reminder. Desktop leaves native reminder controls disabled.
+- **Controls** shows Runtime, Screen Size, and Storage Method; stores the primary Torn API key, chooses the theme, enables/disables hospital-release alerts, selects the 1/3/5-minute threshold, resets alert settings, resets panel layout, refreshes faction data, and can schedule or cancel a TornPDA-native faction reminder. Desktop leaves native reminder controls disabled.
 - **Auto Refresh** separately controls Faction General and FFScouter refresh intervals.
 - **Integrations** stores, validates, and clears the FFScouter-linked key.
 - **Exports** saves available cached sections as CSV and can save or load a complete local JSON backup. Backups include local faction data, layout, refresh preferences, cached snapshot, and stock/networth history. API keys are excluded by default; including them at download and restoring them later both require separate explicit confirmation. TornPDA uses the system share sheet for both CSV and backup files.

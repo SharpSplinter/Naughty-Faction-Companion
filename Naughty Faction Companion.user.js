@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.0.32
+// @version      1.0.33
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -20,6 +20,7 @@
 // @grant        GM.deleteValue
 // @grant        GM_notification
 // @grant        GM.notification
+// @run-at       document-end
 // @connect      api.torn.com
 // @connect      ffscouter.com
 // ==/UserScript==
@@ -30,7 +31,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.32";
+    const SCRIPT_VERSION = "1.0.33";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -43,6 +44,7 @@
     const NATIVE_WAR_HOSPITAL_ALERT_ID_MAX = 9999;
     const WAR_HOSPITAL_ALERT_THRESHOLDS = Object.freeze([1, 3, 5]);
     const WAR_HOSPITAL_ALERT_MAX_TRACKED = 250;
+    const PDA_BRIDGE_READY_TIMEOUT_MS = 1800;
     const PDA_WRITE_DEBOUNCE_MS = 120;
     const BACKUP_SCHEMA = "naughty-faction-companion-backup";
     const BACKUP_SCHEMA_VERSION = 1;
@@ -73,6 +75,34 @@
     function getTornPDABridge() {
         const bridge = window.flutter_inappwebview;
         return bridge && typeof bridge.callHandler === "function" ? bridge : null;
+    }
+
+    // TornPDA can inject PDA_storage before the native WebView bridge is ready.
+    // Calling into it during that small window throws synchronously, which otherwise
+    // aborts bootstrap before the dashboard is created. Keep an event marker and
+    // always wait for readiness (or a short safe timeout) before the first native
+    // storage call.
+    let pdaBridgeReadyEventSeen = false;
+    window.addEventListener("flutterInAppWebViewPlatformReady", () => {
+        pdaBridgeReadyEventSeen = true;
+    }, { once: true });
+
+    function waitForTornPDABridgeReady(timeoutMs = PDA_BRIDGE_READY_TIMEOUT_MS) {
+        const readyBridge = getTornPDABridge();
+        if (pdaBridgeReadyEventSeen && readyBridge) return Promise.resolve(readyBridge);
+        return new Promise((resolve) => {
+            let settled = false;
+            let timeoutId = null;
+            const complete = () => {
+                if (settled) return;
+                settled = true;
+                if (timeoutId !== null) window.clearTimeout(timeoutId);
+                window.removeEventListener("flutterInAppWebViewPlatformReady", complete);
+                resolve(getTornPDABridge());
+            };
+            window.addEventListener("flutterInAppWebViewPlatformReady", complete, { once: true });
+            timeoutId = window.setTimeout(complete, Math.max(0, Math.trunc(Number(timeoutMs) || 0)));
+        });
     }
 
     function getScriptHandlerName() {
@@ -454,7 +484,7 @@
     const debugLog = (event, details) => consoleLog("log", event, details);
     const warnLog = (event, details) => consoleLog("warn", event, details);
     const errorLog = (event, details) => consoleLog("error", event, details);
-    const PDA_STORE = { loaded: null, values: null, fallbackLogged: false };
+    const PDA_STORE = { loaded: null, values: null, fallbackLogged: false, retryScheduled: false };
 
     let safeAreaProbe = null;
 
@@ -549,11 +579,15 @@
     }
 
     function requestTornPDAConfirmation() {
-        const bridge = getTornPDABridge();
-        if (!bridge || state.runtime.nativeCheckInFlight || state.runtime.nativeChecked) return;
+        if (state.runtime.nativeCheckInFlight || state.runtime.nativeChecked) return;
+        if (!isTornPDACandidate() && !getTornPDABridge()) return;
         state.runtime.nativeCheckInFlight = true;
-        debugLog("TornPDA native check started", { bridgeAvailable: true, pdaCandidate: state.runtime.pdaCandidate });
-        Promise.resolve(bridge.callHandler("isTornPDA"))
+        debugLog("TornPDA native check started", { bridgeAvailable: !!getTornPDABridge(), pdaCandidate: state.runtime.pdaCandidate });
+        waitForTornPDABridgeReady()
+            .then((bridge) => {
+                if (!bridge) throw new Error("TornPDA native bridge is unavailable.");
+                return Promise.resolve().then(() => bridge.callHandler("isTornPDA"));
+            })
             .then((response) => {
                 const confirmed = response === true || response?.isTornPDA === true || response?.is_torn_pda === true;
                 setRuntimePlatform(confirmed || state.runtime.isTornPDA, "native-handler", true);
@@ -567,7 +601,13 @@
     function registerTornPDARuntimeDetection() {
         const confirm = () => requestTornPDAConfirmation();
         window.addEventListener("flutterInAppWebViewPlatformReady", confirm, { once: true });
-        if (getTornPDABridge()) setTimeout(confirm, 0);
+        // Do not call isTornPDA merely because its bridge object exists: on a cold
+        // native launch it can appear just before its handlers are callable.
+        if (isTornPDACandidate() || getTornPDABridge()) {
+            void waitForTornPDABridgeReady().then((bridge) => {
+                if (bridge) confirm();
+            });
+        }
         publishRuntimeState();
         debugLog("Runtime bridge registered", {
             bridgeAvailable: !!getTornPDABridge(),
@@ -604,6 +644,20 @@
     // functions do not need to become async. The bootstrap load is the only async step.
     const STORAGE_MISSING = "__NFC_STORAGE_MISSING_V1__";
     const hasPdaStorage = () => typeof PDA_storage !== "undefined" && typeof PDA_storage.loadAll === "function";
+    const waitForPdaStorageBridgeReady = async () => {
+        if (!hasPdaStorage()) return null;
+        return waitForTornPDABridgeReady();
+    };
+    function schedulePdaStorageRetryAfterBridgeReady() {
+        if (pdaBridgeReadyEventSeen || PDA_STORE.retryScheduled) return;
+        PDA_STORE.retryScheduled = true;
+        window.addEventListener("flutterInAppWebViewPlatformReady", () => {
+            PDA_STORE.retryScheduled = false;
+            if (PDA_STORE.values !== null) return;
+            PDA_STORE.loaded = null;
+            void loadPdaStorage();
+        }, { once: true });
+    }
     const hasLegacyGMStorage = () => (
         (typeof GM !== "undefined" && typeof GM.getValue === "function" && typeof GM.setValue === "function")
         || (typeof GM_getValue === "function" && typeof GM_setValue === "function")
@@ -625,17 +679,29 @@
                 PDA_STORE.fallbackLogged = true;
                 debugLog("Storage backend selected", { backend: "GM compatibility", reason: "PDA_storage unavailable" });
             }
+            schedulePdaStorageRetryAfterBridgeReady();
             return null;
         }
         if (!PDA_STORE.loaded) {
-            PDA_STORE.loaded = Promise.resolve(PDA_storage.loadAll()).then((values) => {
+            PDA_STORE.loaded = (async () => {
+                const bridge = await waitForPdaStorageBridgeReady();
+                if (!bridge && isTornPDACandidate()) {
+                    throw new Error("TornPDA storage bridge was not ready before the startup timeout.");
+                }
+                // The deferred callback is deliberate: PDA_storage.loadAll() can
+                // synchronously throw while TornPDA's bridge is still initializing.
+                const values = await Promise.resolve().then(() => PDA_storage.loadAll());
                 PDA_STORE.values = values && typeof values === "object" ? values : {};
                 debugLog("Storage backend selected", { backend: "PDA_storage", storedKeys: Object.keys(PDA_STORE.values).length });
                 return PDA_STORE.values;
-            }).catch((error) => {
+            })().catch((error) => {
                 warnLog("PDA_storage load failed; using GM compatibility storage", { error: safeErrorMessage(error) });
                 PDA_STORE.values = null;
                 PDA_STORE.fallbackLogged = true;
+                // A cold TornPDA launch can time out before its bridge event. Keep
+                // the working GM fallback for this boot, then promote PDA_storage
+                // as soon as the late native bridge announces itself.
+                schedulePdaStorageRetryAfterBridgeReady();
                 return null;
             });
         }
@@ -1309,7 +1375,13 @@
         state.ffscouterKey = (await gmGetValue(APP_STORAGE.ffscouterKey, "")) || "";
         state.ffscouterStatus = state.ffscouterKey ? "Saved · Not verified" : "Not configured";
         state.widgetPosition = await gmGetValue(APP_STORAGE.position, null);
-        const dashboardState = await gmGetValue(APP_STORAGE.dashboard, { currentTab: "faction" });
+        const savedDashboardState = await gmGetValue(APP_STORAGE.dashboard, { currentTab: "faction" });
+        const dashboardState = savedDashboardState && typeof savedDashboardState === "object" && !Array.isArray(savedDashboardState)
+            ? savedDashboardState
+            : { currentTab: "faction" };
+        if (dashboardState !== savedDashboardState) {
+            warnLog("Saved dashboard state was invalid; using safe defaults", { valueType: typeof savedDashboardState });
+        }
         state.currentTab = dashboardState.currentTab === "settings" ? "settings" : "faction";
         state.factionSubTab = dashboardState.factionSubTab || state.factionSubTab;
         state.settingsSubTab = dashboardState.settingsSubTab || state.settingsSubTab;
@@ -1408,32 +1480,19 @@
     }
 
     function pdaHandler(handler, ...args) {
-        const bridge = getTornPDABridge();
-        if (bridge) {
-            debugLog("Native bridge handler", { handler, state: "available" });
-            return bridge.callHandler(handler, ...args);
-        }
-        debugLog("Native bridge waiting", { handler, timeoutMs: 1200 });
-        return new Promise((resolve, reject) => {
-            const timeout = window.setTimeout(() => {
-                warnLog("Native bridge unavailable", { handler, timeoutMs: 1200 });
-                reject(new Error("TornPDA native bridge is unavailable."));
-            }, 1200);
-            window.addEventListener("flutterInAppWebViewPlatformReady", () => {
-                window.clearTimeout(timeout);
-                const readyBridge = getTornPDABridge();
-                if (!readyBridge) {
-                    warnLog("Native bridge unavailable after readiness event", { handler });
-                    reject(new Error("TornPDA native bridge is unavailable."));
-                    return;
-                }
+        debugLog("Native bridge waiting", { handler, timeoutMs: PDA_BRIDGE_READY_TIMEOUT_MS });
+        return waitForTornPDABridgeReady()
+            .then((bridge) => {
+                if (!bridge) throw new Error("TornPDA native bridge is unavailable.");
                 debugLog("Native bridge handler", { handler, state: "ready" });
-                readyBridge.callHandler(handler, ...args).then(resolve, (error) => {
-                    warnLog("Native bridge handler failed", { handler, error: safeErrorMessage(error) });
-                    reject(error);
-                });
-            }, { once: true });
-        });
+                // Defer the invocation so a synchronous bridge error is returned as
+                // a rejected promise instead of escaping the caller's startup path.
+                return Promise.resolve().then(() => bridge.callHandler(handler, ...args));
+            })
+            .catch((error) => {
+                warnLog("Native bridge handler failed", { handler, error: safeErrorMessage(error) });
+                throw error;
+            });
     }
 
     const NATIVE_TOAST_COLORS = {
@@ -1622,7 +1681,7 @@
     async function clearScheduledWarHospitalAlerts({ clearDelivered = false, clearNotificationIds = false } = {}) {
         const settings = state.warHospitalAlertSettings;
         const pendingNative = Object.values(settings.scheduledTargets || {}).filter((record) => record?.delivery === "native");
-        await Promise.allSettled(pendingNative.map((record) => cancelNativeWarHospitalAlert(record)));
+        await Promise.all(pendingNative.map((record) => cancelNativeWarHospitalAlert(record).catch(() => false)));
         [...state.warHospitalAlertTimers.keys()].forEach((targetId) => clearWarHospitalAlertTimer(targetId));
         settings.scheduledTargets = {};
         if (clearDelivered) settings.deliveredEvents = {};
@@ -4425,9 +4484,7 @@
         const base64Data = utf8Base64(text);
         if (!base64Data) return { native: true, shared: false, message: "This runtime could not encode the export." };
         try {
-            const response = bridge
-                ? await bridge.callHandler("shareFile", { base64Data, fileName })
-                : await pdaHandler("shareFile", { base64Data, fileName });
+            const response = await pdaHandler("shareFile", { base64Data, fileName });
             if (response?.status === "success") return { native: true, shared: true };
             return { native: true, shared: false, message: String(response?.message || "TornPDA could not open its share sheet.") };
         } catch (error) {
@@ -7397,11 +7454,36 @@
         scheduleAutoRefresh();
     }
 
+    function recoverFromStartupStorageFailure(error) {
+        errorLog("Startup persistence failed; rendering with safe defaults", { error: safeErrorMessage(error) });
+        state.currentTab = "faction";
+        state.factionSubTab = "general";
+        state.settingsSubTab = "controls";
+        state.personalSubTab = "info";
+        state.autoRefreshSettings = { ...AUTO_REFRESH_DEFAULTS };
+        state.warTargetFilters = { ...WAR_TARGET_FILTER_DEFAULTS };
+        state.warTargetFFRange = { min: "", max: "" };
+        state.warTargetBSRange = { min: "", max: "" };
+        state.warTargetRangeMetric = "ff";
+        state.warHospitalAlertSettings = createWarHospitalAlertSettings();
+        state.widgetPosition = null;
+        state.isMinimized = false;
+        state.sectionStatus.settings = "Storage was unavailable during startup; running with safe defaults.";
+    }
+
     async function bootstrap() {
-        await loadPersistedState();
-        initializeDOMDashboard();
-        registerTornPDARuntimeDetection();
-        registerRuntimeActivityHandlers();
+        try {
+            await loadPersistedState();
+        } catch (error) {
+            recoverFromStartupStorageFailure(error);
+        }
+        try {
+            initializeDOMDashboard();
+            registerTornPDARuntimeDetection();
+            registerRuntimeActivityHandlers();
+        } catch (error) {
+            errorLog("Dashboard initialization failed", { error: safeErrorMessage(error) });
+        }
     }
 
     if (document.readyState === "complete" || document.readyState === "interactive") {

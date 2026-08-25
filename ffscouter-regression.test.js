@@ -22,12 +22,13 @@ const settingsControls = section("function bindSettingsControls", "function bind
 const hospitalAlerts = section("function getWarHospitalAlertNotificationId", "function getCrossOriginTransport");
 const targetFiltering = section("function getWarTargetStatus", "function getWarTargetSortValue");
 
-assert.match(source, /@version\s+1\.0\.32/, "userscript header version must be 1.0.32");
+assert.match(source, /@version\s+1\.0\.33/, "userscript header version must be 1.0.33");
 assert.match(source, /@license\s+MIT/, "metadata must declare the MIT license");
 assert.match(source, /https:\/\/github\.com\/SharpSplinter\/Naughty-Faction-Companion/, "metadata must use the renamed GitHub account");
 assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Faction-Companion\/refs\/heads\/main/, "metadata must update from the renamed account");
 assert.doesNotMatch(source + readme, /xf4k31tx/, "stale GitHub account links must not remain");
-assert.match(source, /const SCRIPT_VERSION = "1\.0\.32";/, "displayed version must match the userscript header");
+assert.match(source, /const SCRIPT_VERSION = "1\.0\.33";/, "displayed version must match the userscript header");
+assert.match(source, /^\/\/ @run-at\s+document-end$/m, "TornPDA storage startup must wait until document-end");
 assert.match(source, /@grant\s+GM_notification/, "desktop hospital alerts must request the legacy Tampermonkey notification grant");
 assert.match(source, /@grant\s+GM\.notification/, "desktop hospital alerts must request the modern Tampermonkey notification grant");
 assert.match(source, /const CONSOLE_TAG = "\[Naughty Faction Companion\]";/, "diagnostics must use the script-specific console prefix");
@@ -47,6 +48,12 @@ assert.match(source, /storagePreference: "NFC_V1_STORAGE_PREFERENCE"/, "storage 
 assert.match(source, /useLegacyGMStorage: false/, "PDA_storage must remain the unchecked default");
 assert.match(storage, /const loadStoragePreference = async \(\)/, "the storage preference must load before normal persisted values");
 assert.match(restore, /await loadStoragePreference\(\)/, "storage routing must be selected before restoring settings and keys");
+assert.match(source, /function waitForTornPDABridgeReady\(/, "native bridge calls must wait for TornPDA readiness");
+assert.match(storage, /const waitForPdaStorageBridgeReady = async \(\)/, "PDA_storage loading must wait for bridge readiness");
+assert.match(storage, /Promise\.resolve\(\)\.then\(\(\) => PDA_storage\.loadAll\(\)\)/, "synchronous PDA_storage startup errors must become promise rejections");
+assert.match(storage, /PDA_STORE\.retryScheduled/, "late bridge readiness must retry the native storage backend");
+assert.match(source, /function recoverFromStartupStorageFailure\(/, "a storage startup failure must not prevent dashboard rendering");
+assert.match(source, /Startup persistence failed; rendering with safe defaults/, "startup fallback must emit an actionable diagnostic");
 assert.match(storage, /nextUseLegacyGMStorage \? "pda-to-gm" : "gm-to-pda"/, "switching storage must migrate known companion values in the selected direction");
 assert.match(storage, /const writeStoragePreference = async \(preference, requireLegacyGM = false\)/, "the preference must persist independently of the selected backend");
 assert.match(storage, /if \(state\.useLegacyGMStorage\)/, "legacy GM mode must route reads and writes through GM first");
@@ -67,6 +74,7 @@ assert.match(source, /function syncWarHospitalAlertsFromFreshData/, "hospital al
 assert.match(hospitalAlerts, /scheduleNotification/, "TornPDA hospital alerts must use native scheduled notifications");
 assert.match(hospitalAlerts, /NATIVE_WAR_HOSPITAL_ALERT_ID_MIN/, "native hospital alert IDs must remain inside TornPDA's supported range");
 assert.match(hospitalAlerts, /cancelNotification/, "changing view eligibility must cancel stale TornPDA hospital alerts");
+assert.doesNotMatch(hospitalAlerts, /Promise\.allSettled/, "hospital alert cleanup must support older TornPDA WebViews");
 assert.match(renderer, /war-hospital-alert-toggle/, "FFScouter must expose the hospital-alert toggle");
 assert.match(renderer, /war-hospital-alert-time-dialog/, "first use must prompt for a hospital-alert threshold");
 assert.match(settings, /reset-war-hospital-alerts-btn/, "Settings must offer a hospital-alert preference reset");
@@ -172,7 +180,7 @@ assert.match(settingsControls, /stageLocalBackupRestore\(file\)/, "selected back
 assert.match(settingsControls, /confirmLocalBackupRestoreInput\?\.checked/, "restoring a backup must require explicit confirmation");
 assert.match(source, /async function shareCsvWithTornPDA\(csv, fileName\)/, "TornPDA CSV exports must provide a native share-sheet path");
 assert.match(source, /async function shareTextWithTornPDA\(text, fileName\)/, "TornPDA backups and CSV exports must share through one native path");
-assert.match(source, /bridge\.callHandler\("shareFile", \{ base64Data, fileName \}\)/, "native exports must use TornPDA shareFile data");
+assert.match(source, /pdaHandler\("shareFile", \{ base64Data, fileName \}\)/, "native exports must route TornPDA shareFile data through the readiness-safe bridge helper");
 assert.match(source, /response\?\.status === "success"/, "native exports must require a successful TornPDA share response");
 assert.match(source, /exportInFlight: false/, "native shares must be serialized");
 assert.match(source, /snapshot opened in the TornPDA share sheet/, "CSV export feedback must identify the native share sheet");

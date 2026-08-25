@@ -10,6 +10,9 @@ const getSource = section("const gmGetValue = async", "const gmSetValue");
 const setSource = section("const gmSetValue = async", "const getStoredKey");
 const deleteSource = section("const deleteStoredValue = async", "const normalizeStoragePreference");
 const nativeWriteSource = section("const writePdaValuesNow = async", "function createPdaWriteQueue");
+const nativeLoadSource = section("const loadPdaStorage = async", "const legacyGetValue");
+const storageRetrySource = section("function schedulePdaStorageRetryAfterBridgeReady", "const loadPdaStorage");
+const pdaHandlerSource = section("function pdaHandler", "const NATIVE_TOAST_COLORS");
 const backupValidationSource = section("function validateLocalBackupPayload", "function readLocalBackupFile");
 
 const createPdaWriteQueue = new Function("PDA_WRITE_DEBOUNCE_MS", "warnLog", `${queueSource}\nreturn createPdaWriteQueue;`)(1, () => {});
@@ -29,6 +32,21 @@ const makeNativeWrite = (loadPdaStorage, hasPdaStorage, PDA_storage) => new Func
     "loadPdaStorage", "hasPdaStorage", "PDA_storage", "warnLog", "safeErrorMessage",
     `${nativeWriteSource}\nreturn writePdaValuesNow;`
 )(loadPdaStorage, hasPdaStorage, PDA_storage, () => {}, (error) => String(error));
+const makeNativeLoad = ({ hasPdaStorage, PDA_storage, PDA_STORE, waitForPdaStorageBridgeReady, schedulePdaStorageRetryAfterBridgeReady = () => {}, isTornPDACandidate = () => true, pdaBridgeReadyEventSeen = true }) => new Function(
+    "hasPdaStorage", "PDA_storage", "PDA_STORE", "waitForPdaStorageBridgeReady", "schedulePdaStorageRetryAfterBridgeReady", "isTornPDACandidate", "pdaBridgeReadyEventSeen", "debugLog", "warnLog", "safeErrorMessage", "window",
+    `${nativeLoadSource}\nreturn loadPdaStorage;`
+)(hasPdaStorage, PDA_storage, PDA_STORE, waitForPdaStorageBridgeReady, schedulePdaStorageRetryAfterBridgeReady, isTornPDACandidate, pdaBridgeReadyEventSeen, () => {}, () => {}, (error) => String(error), {
+    addEventListener: () => {},
+    removeEventListener: () => {}
+});
+const makeStorageRetry = (pdaBridgeReadyEventSeen, PDA_STORE, window, loadPdaStorage) => new Function(
+    "pdaBridgeReadyEventSeen", "PDA_STORE", "window", "loadPdaStorage",
+    `${storageRetrySource}\nreturn schedulePdaStorageRetryAfterBridgeReady;`
+)(pdaBridgeReadyEventSeen, PDA_STORE, window, loadPdaStorage);
+const makePdaHandler = (waitForTornPDABridgeReady) => new Function(
+    "waitForTornPDABridgeReady", "PDA_BRIDGE_READY_TIMEOUT_MS", "debugLog", "warnLog", "safeErrorMessage",
+    `${pdaHandlerSource}\nreturn pdaHandler;`
+)(waitForTornPDABridgeReady, 1, () => {}, () => {}, (error) => String(error));
 const makeBackupValidator = new Function(
     "isBackupRecord", "cloneBackupPayload", "BACKUP_SCHEMA", "BACKUP_SCHEMA_VERSION", "BACKUP_STORAGE_NAMESPACE", "getManagedStorageKeys", "getBackupSecretStorageKeys",
     `${backupValidationSource}\nreturn validateLocalBackupPayload;`
@@ -110,6 +128,55 @@ test("PDA quota failure falls back to one legacy batch", async () => {
     const queue = createPdaWriteQueue(nativeWrite, async (values) => { legacyCalls.push(values); return true; }, 1);
     assert.equal(await queue.enqueue({ cache: "value" }), true);
     assert.deepEqual(legacyCalls, [{ cache: "value" }]);
+});
+
+test("native storage waits for bridge readiness before loading", async () => {
+    let readyCalls = 0;
+    let loadCalls = 0;
+    const load = makeNativeLoad({
+        hasPdaStorage: () => true,
+        PDA_storage: { loadAll: () => { loadCalls += 1; return { saved: true }; } },
+        PDA_STORE: { loaded: null, values: null, fallbackLogged: false, retryScheduled: false },
+        waitForPdaStorageBridgeReady: async () => { readyCalls += 1; return { callHandler: () => {} }; }
+    });
+    assert.deepEqual(await load(), { saved: true });
+    assert.equal(readyCalls, 1);
+    assert.equal(loadCalls, 1);
+});
+
+test("synchronous native storage startup errors resolve to the GM fallback", async () => {
+    const store = { loaded: null, values: null, fallbackLogged: false, retryScheduled: false };
+    const load = makeNativeLoad({
+        hasPdaStorage: () => true,
+        PDA_storage: { loadAll: () => { throw new Error("bridge not ready"); } },
+        PDA_STORE: store,
+        waitForPdaStorageBridgeReady: async () => ({ callHandler: () => {} })
+    });
+    assert.equal(await load(), null);
+    assert.equal(store.values, null);
+    assert.equal(store.fallbackLogged, true);
+});
+
+test("late bridge readiness retries storage when it was unavailable at startup", async () => {
+    const store = { loaded: Promise.resolve(null), values: null, fallbackLogged: true, retryScheduled: false };
+    let readyListener;
+    let retryCalls = 0;
+    const retry = makeStorageRetry(false, store, {
+        addEventListener: (name, callback) => { if (name === "flutterInAppWebViewPlatformReady") readyListener = callback; }
+    }, () => { retryCalls += 1; return Promise.resolve({}); });
+    retry();
+    assert.equal(store.retryScheduled, true);
+    assert.equal(typeof readyListener, "function");
+    readyListener();
+    assert.equal(store.retryScheduled, false);
+    assert.equal(retryCalls, 1);
+});
+
+test("native handler turns a synchronous bridge failure into a rejected promise", async () => {
+    const pdaHandler = makePdaHandler(async () => ({ callHandler: () => { throw new Error("bridge not ready"); } }));
+    const result = pdaHandler("showToast", { text: "test" });
+    assert.equal(typeof result.then, "function");
+    await assert.rejects(result, /bridge not ready/);
 });
 
 test("delete uses native PDA_storage.delete and GM fallback semantics", async () => {

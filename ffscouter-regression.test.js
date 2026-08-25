@@ -20,11 +20,12 @@ const storage = section("// --- TornPDA-storage-first persistent storage ---", "
 const settings = section("function renderSettingsPanel", "function renderInventorySection");
 const settingsControls = section("function bindSettingsControls", "function bindPersonalControls");
 
-assert.match(source, /@version\s+1\.0\.30/, "userscript header version must be 1.0.30");
+assert.match(source, /@version\s+1\.0\.31/, "userscript header version must be 1.0.31");
+assert.match(source, /@license\s+MIT/, "metadata must declare the MIT license");
 assert.match(source, /https:\/\/github\.com\/SharpSplinter\/Naughty-Faction-Companion/, "metadata must use the renamed GitHub account");
 assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Faction-Companion\/refs\/heads\/main/, "metadata must update from the renamed account");
 assert.doesNotMatch(source + readme, /xf4k31tx/, "stale GitHub account links must not remain");
-assert.match(source, /const SCRIPT_VERSION = "1\.0\.30";/, "displayed version must match the userscript header");
+assert.match(source, /const SCRIPT_VERSION = "1\.0\.31";/, "displayed version must match the userscript header");
 assert.match(source, /const CONSOLE_TAG = "\[Naughty Faction Companion\]";/, "diagnostics must use the script-specific console prefix");
 assert.match(source, /function redactSecretText\(value\)/, "diagnostics must redact secret-bearing text");
 assert.match(source, /function getSafeRequestTarget\(method, rawUrl\)/, "API diagnostics must build a query-free request target");

@@ -24,13 +24,13 @@ const hospitalAlerts = section("function getWarHospitalAlertNotificationId", "fu
 const targetFiltering = section("function getWarTargetStatus", "function getWarTargetSortValue");
 const minimizedInteraction = section('const dragHandle = document.getElementById("nfc-drag-handle")', "const resizeHandles = dashboard.querySelectorAll");
 
-assert.match(source, /@version\s+1\.0\.41/, "userscript header version must be 1.0.41");
+assert.match(source, /@version\s+1\.0\.42/, "userscript header version must be 1.0.42");
 assert.match(source, /@license\s+MIT/, "metadata must declare the MIT license");
 assert.match(source, /https:\/\/github\.com\/SharpSplinter\/Naughty-Faction-Companion/, "metadata must use the renamed GitHub account");
 assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Faction-Companion\/main/, "metadata must update from the renamed account");
 assert.doesNotMatch(source, /refs\/heads\/main/, "TornPDA update metadata must use the direct branch URL");
 assert.doesNotMatch(source + readme, /xf4k31tx/, "stale GitHub account links must not remain");
-assert.match(source, /const SCRIPT_VERSION = "1\.0\.41";/, "displayed version must match the userscript header");
+assert.match(source, /const SCRIPT_VERSION = "1\.0\.42";/, "displayed version must match the userscript header");
 assert.doesNotMatch(source, /BOOT_TRACE|logBootPhase|bootEnvironmentSnapshot|bootErrorDetails|logBootWatchdog/, "temporary boot-phase diagnostics must stay disabled");
 assert.match(source, /^\/\/ @run-at\s+document-start$/m, "Faction must execute at document-start");
 assert.match(source, /@grant\s+GM_notification/, "desktop hospital alerts must request the legacy Tampermonkey notification grant");
@@ -196,6 +196,10 @@ assert.match(source, /tableWrap\.style\.setProperty\("min-height", `\$\{tableHei
 assert.match(source, /nfc-war-target-table--compact/, "narrow FFScouter headers must use explicit compact labels rather than clipped text");
 assert.match(source, /compactLabel: "On"/, "compact FFScouter headers must use short visible names");
 assert.match(source, /nfc-faction-general-layout/, "General must have an independent compact portrait layout");
+assert.match(source, /nfc-faction-general-layout \{[\s\S]*display:flex !important;[\s\S]*flex-direction:column !important;[\s\S]*height:auto !important;/, "General cards must use a normal vertical layout flow");
+assert.match(source, /nfc-faction-general-layout > \* \{[\s\S]*position:relative;[\s\S]*flex:0 0 auto !important;[\s\S]*margin:0 !important;/, "General sections must reserve their own non-overlapping layout rows");
+assert.match(source, /nfc-faction-general-active:not\(\.nfc-compact-scroll\) \{[\s\S]*overflow-y: auto !important;[\s\S]*scrollbar-width: none;/, "General must scroll vertically rather than shrink cards into overlap on desktop");
+assert.match(source, /if \(state\.currentTab === "faction" && state\.factionSubTab === "general"\) \{[\s\S]*return;/, "General must opt out of height-based zoom fitting");
 assert.doesNotMatch(source, /Math\.max\(0\.72, Math\.min\(1, availableHeight/, "General must fit fully rather than clip at a fixed zoom floor");
 assert.match(source, /ntc-ffscouter-summary-viewport/, "the FFScouter summary must reserve its own non-overlapping layout row");
 assert.match(source, /summaryViewport\.style\.flex = `0 0 \$\{reservedSummaryHeight\}px`/, "the table must begin below the reserved FFScouter summary height");

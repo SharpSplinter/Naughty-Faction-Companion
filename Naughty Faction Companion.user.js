@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.0.41
+// @version      1.0.42
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -31,7 +31,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.41";
+    const SCRIPT_VERSION = "1.0.42";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -6388,6 +6388,9 @@
         content.removeAttribute("tabindex");
         content.removeAttribute("role");
         content.removeAttribute("aria-label");
+        if (state.currentTab === "faction" && state.factionSubTab === "general") {
+            return;
+        }
         if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") {
             const layout = content.querySelector(".ntc-ffscouter-layout");
             const summaryViewport = layout?.querySelector(".ntc-ffscouter-summary-viewport");
@@ -6911,6 +6914,19 @@
                     width: 0;
                     height: 0;
                 }
+                #nfc-faction-wrapper #nfc-content.nfc-faction-general-active:not(.nfc-compact-scroll) {
+                    overflow-x: hidden !important;
+                    overflow-y: auto !important;
+                    overscroll-behavior: contain;
+                    -webkit-overflow-scrolling: touch;
+                    scrollbar-width: none;
+                    -ms-overflow-style: none;
+                }
+                #nfc-faction-wrapper #nfc-content.nfc-faction-general-active:not(.nfc-compact-scroll)::-webkit-scrollbar {
+                    display: none;
+                    width: 0;
+                    height: 0;
+                }
                 #nfc-faction-wrapper #nfc-main-body {
                     display: flex !important;
                     flex-direction: column;
@@ -7094,14 +7110,24 @@
                    up its useful viewport, and the only vertical scroller remains the
                    player list itself. */
                 #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout {
-                    display:grid;
-                    gap:8px;
+                    display:flex !important;
+                    flex-direction:column !important;
+                    align-items:stretch;
+                    align-content:flex-start;
+                    gap:10px;
                     min-height:0;
+                    height:auto !important;
                     width:100%;
+                    overflow:visible;
                 }
                 #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout > * {
-                    min-height:0;
+                    position:relative;
+                    inset:auto;
+                    flex:0 0 auto !important;
+                    min-height:auto;
+                    width:100%;
                     max-width:100%;
+                    margin:0 !important;
                 }
                 @container (max-width: 430px) {
                     #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout {

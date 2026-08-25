@@ -27,9 +27,9 @@ This open-source userscript gives Torn factions a focused, local operations view
 ### Interface
 
 - Dark and lower-glare light themes.
-- Desktop move, resize, snap, and minimize controls.
+- Desktop move, resize, snap, and minimize controls. The minimized launcher opens from any tap/click and can be dragged independently; its last launcher position is retained.
 - Native TornPDA detection plus the same compact-viewport trigger as the other companions: effective width ≤700px, effective height ≤520px, or scale >1.1 at ≤960px. Compact mode follows safe areas and live viewport/orientation updates.
-- Hidden scrollbar tracks for every intentional scroll region without disabling desktop wheel/keyboard or TornPDA touch scrolling. General and Settings fit within the panel; the FFScouter player list remains the only in-panel vertical list.
+- Hidden scrollbar tracks for every intentional scroll region without disabling desktop wheel/keyboard or TornPDA touch scrolling. In compact mode, Settings keeps readable horizontal sizing and vertically scrolls inside the panel; the FFScouter player list remains the other in-panel vertical list.
 - Compact portrait and landscape reflow keeps controls, cards, statuses, filters, and tables inside the usable viewport. FFScouter fits all columns to its width and keeps only its results list vertically scrollable.
 - User-triggered CSV export and JSON backup for cached local data: TornPDA opens its native share sheet through `shareFile({ base64Data, fileName })`, while desktop/Tampermonkey downloads the file locally. Android and iOS choose Files or another destination from that system sheet rather than a browser save-location picker. A native share failure is shown as an error instead of being mislabeled as a download, and simultaneous share requests are prevented.
 - Native TornPDA toast feedback for successful saves, refreshes, reminder actions, and recoverable errors; desktop keeps its in-panel status feedback.

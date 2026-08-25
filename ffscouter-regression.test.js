@@ -22,14 +22,15 @@ const settings = section("function renderSettingsPanel", "function renderInvento
 const settingsControls = section("function bindSettingsControls", "function bindPersonalControls");
 const hospitalAlerts = section("function getWarHospitalAlertNotificationId", "function getCrossOriginTransport");
 const targetFiltering = section("function getWarTargetStatus", "function getWarTargetSortValue");
+const minimizedInteraction = section('const dragHandle = document.getElementById("nfc-drag-handle")', "const resizeHandles = dashboard.querySelectorAll");
 
-assert.match(source, /@version\s+1\.0\.36/, "userscript header version must be 1.0.36");
+assert.match(source, /@version\s+1\.0\.37/, "userscript header version must be 1.0.37");
 assert.match(source, /@license\s+MIT/, "metadata must declare the MIT license");
 assert.match(source, /https:\/\/github\.com\/SharpSplinter\/Naughty-Faction-Companion/, "metadata must use the renamed GitHub account");
 assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Faction-Companion\/main/, "metadata must update from the renamed account");
 assert.doesNotMatch(source, /refs\/heads\/main/, "TornPDA update metadata must use the direct branch URL");
 assert.doesNotMatch(source + readme, /xf4k31tx/, "stale GitHub account links must not remain");
-assert.match(source, /const SCRIPT_VERSION = "1\.0\.36";/, "displayed version must match the userscript header");
+assert.match(source, /const SCRIPT_VERSION = "1\.0\.37";/, "displayed version must match the userscript header");
 assert.doesNotMatch(source, /BOOT_TRACE|logBootPhase|bootEnvironmentSnapshot|bootErrorDetails|logBootWatchdog/, "temporary boot-phase diagnostics must stay disabled");
 assert.match(source, /^\/\/ @run-at\s+document-start$/m, "Faction must execute at document-start");
 assert.match(source, /@grant\s+GM_notification/, "desktop hospital alerts must request the legacy Tampermonkey notification grant");
@@ -89,6 +90,14 @@ assert.doesNotMatch(source, /ID \$\{formatInteger\(/, "displayed IDs must remain
 assert.match(source, /tornpda:tabState/, "TornPDA tab state must pause automatic refresh while inactive");
 assert.match(source, /document\.addEventListener\("visibilitychange"/, "document visibility must pause automatic refresh while inactive");
 assert.match(source, /function isAutomaticRefreshAllowed/, "auto-refresh must centrally gate inactive states");
+assert.match(source, /const getStoredMinimizedPosition =/, "minimized icon positions must be restored from persisted state");
+assert.match(source, /const setStoredMinimizedPosition =/, "minimized icon positions must be saved independently from the expanded panel position");
+assert.match(source, /state\.isMinimized \? getStoredMinimizedPosition\(position\) : null/, "minimized view must prefer its saved coordinates");
+assert.match(source, /#nfc-faction-wrapper\[data-minimized="true"\] #nfc-drag-handle\s*\{\s*touch-action: none;/, "the minimized icon must accept reliable TornPDA drag gestures");
+assert.match(minimizedInteraction, /const DRAG_ACTIVATION_DISTANCE_PX = 5/, "small tap movement must not be mistaken for an icon drag");
+assert.match(minimizedInteraction, /setStoredMinimizedPosition\(\{ x: rect\.left, y: rect\.top \}\)/, "dragging a minimized icon must persist its coordinates");
+assert.match(minimizedInteraction, /if \(wasMinimized && !didDrag && !cancelled\) restoreMinimizedWidget\(\);/, "releasing a non-dragged minimized icon must restore it without relying on a synthetic click");
+assert.match(minimizedInteraction, /dashboard\.addEventListener\("click", \(e\) => \{[\s\S]*restoreMinimizedWidget\(\);/, "click fallback must restore from every part of the minimized icon");
 
 for (const key of ["warTargetSort", "warTargetFilters", "warTargetFFRange", "warTargetBSRange", "warTargetRangeMetric", "warHospitalAlertSettings", "warTargetColumnOrder", "warTargetColumnWidths"]) {
     assert.match(persistence, new RegExp(key), `${key} must be saved`);
@@ -155,6 +164,11 @@ assert.match(source, /resizeRenderTimer = setTimeout/, "FFScouter columns must r
 assert.match(source, /widgetBody\.style\.overflowY = "hidden"/, "the script window itself must not vertically scroll");
 assert.match(source, /function fitCurrentContentToWidget\(\)/, "non-table panels must scale to fit the available window height");
 assert.match(source, /requestAnimationFrame\(fitCurrentContentToWidget\)/, "card fitting must run after renders and size changes");
+assert.match(source, /const useSettingsScroll = state\.currentTab === "settings" && isCompactRuntime\(\);/, "compact Settings must opt out of height-based content scaling");
+assert.match(source, /content\.classList\.toggle\("nfc-settings-scroll", useSettingsScroll\);/, "compact Settings must use a dedicated scrollable content class");
+assert.match(source, /if \(useSettingsScroll\) \{[\s\S]*content\.setAttribute\("tabindex", "0"\);[\s\S]*return;/, "compact Settings must remain keyboard and touch scrollable instead of shrinking vertically");
+assert.match(source, /#nfc-faction-wrapper #nfc-content\.nfc-settings-scroll \{[\s\S]*overflow-x: hidden !important;[\s\S]*overflow-y: auto !important;[\s\S]*-webkit-overflow-scrolling: touch;[\s\S]*scrollbar-width: none;/, "compact Settings must fit horizontally while allowing hidden-scrollbar vertical touch scrolling");
+assert.match(source, /#nfc-faction-wrapper #nfc-content\.nfc-settings-scroll::\-webkit-scrollbar \{[\s\S]*display: none;/, "compact Settings must hide the WebKit scrollbar without disabling scrolling");
 assert.match(source, /min-height:210px;flex:1 1 auto;border:1px solid #343a43/, "the FFScouter table must retain room for roughly five readable target rows");
 assert.match(source, /ntc-ffscouter-summary/, "the FFScouter summary must have an independently responsive container");
 assert.match(source, /const preferredTableHeight = tableHeaderHeight \+ \(tableRowHeight \* 4\) \+ 4/, "FFScouter must reserve four readable player rows before summary scaling");

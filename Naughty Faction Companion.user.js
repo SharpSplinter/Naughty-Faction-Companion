@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.0.36
+// @version      1.0.37
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -31,7 +31,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.36";
+    const SCRIPT_VERSION = "1.0.37";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -1122,9 +1122,27 @@
     };
 
     const getStoredPosition = () => state.widgetPosition || null;
-    const setStoredPosition = (pos) => {
-        state.widgetPosition = pos;
-        void gmSetValue(APP_STORAGE.position, pos);
+    const getStoredMinimizedPosition = (position = getStoredPosition()) => {
+        const minimized = position && typeof position === "object" ? position.minimized : null;
+        const x = Number(minimized?.x);
+        const y = Number(minimized?.y);
+        return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+    };
+    const setStoredPosition = (pos, { preserveMinimizedPosition = true } = {}) => {
+        const next = pos && typeof pos === "object" ? { ...pos } : pos;
+        const minimized = preserveMinimizedPosition ? getStoredMinimizedPosition() : null;
+        if (next && minimized && !Object.prototype.hasOwnProperty.call(next, "minimized")) next.minimized = minimized;
+        state.widgetPosition = next;
+        void gmSetValue(APP_STORAGE.position, next);
+    };
+    const setStoredMinimizedPosition = (pos) => {
+        const x = Number(pos?.x);
+        const y = Number(pos?.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+        const current = getStoredPosition();
+        const next = current && typeof current === "object" ? { ...current } : {};
+        next.minimized = { x, y };
+        setStoredPosition(next, { preserveMinimizedPosition: false });
     };
 
     const getStoredDashboardState = () => ({
@@ -5168,7 +5186,7 @@
                 const defaultPosition = isCompactRuntime()
                     ? { edge: "right", x: null, y: MOBILE_TOP_OFFSET_PX }
                     : { edge: "right", x: null, y: 20 };
-                setStoredPosition(defaultPosition);
+                setStoredPosition(defaultPosition, { preserveMinimizedPosition: false });
                 applyCurrentWidgetSize();
                 applyWidgetPosition();
                 debugLog("Window size & position reset to defaults", { isTornPDA: isTornPDAEnvironment(), defaultPosition });
@@ -6056,11 +6074,21 @@
         if (!dashboard) return;
         const bounds = getWidgetViewportBounds();
         const rect = dashboard.getBoundingClientRect();
+        const minimized = state.isMinimized ? getStoredMinimizedPosition(position) : null;
+        const maxLeft = Math.max(bounds.minLeft, bounds.maxRight - rect.width);
+        const maxTop = Math.max(bounds.minTop, bounds.maxBottom - rect.height);
+        if (minimized) {
+            const left = Math.min(Math.max(minimized.x, bounds.minLeft), maxLeft);
+            const top = Math.min(Math.max(minimized.y, bounds.minTop), maxTop);
+            dashboard.style.left = `${left}px`;
+            dashboard.style.right = "auto";
+            dashboard.style.top = `${top}px`;
+            dashboard.style.bottom = "auto";
+            return;
+        }
         const edge = ["left", "right", "top", "bottom"].includes(position?.edge) ? position.edge : "right";
         const requestedX = Number(position?.x ?? rect.left);
         const requestedY = Number(position?.y ?? position?.top ?? rect.top);
-        const maxLeft = Math.max(bounds.minLeft, bounds.maxRight - rect.width);
-        const maxTop = Math.max(bounds.minTop, bounds.maxBottom - rect.height);
         const left = Math.min(Math.max(requestedX, bounds.minLeft), maxLeft);
         const top = Math.min(Math.max(requestedY, bounds.minTop), maxTop);
         dashboard.style.left = "auto";
@@ -6120,6 +6148,17 @@
 
         content.style.zoom = "1";
         content.classList.toggle("nfc-faction-general-active", state.currentTab === "faction" && state.factionSubTab === "general");
+        const useSettingsScroll = state.currentTab === "settings" && isCompactRuntime();
+        content.classList.toggle("nfc-settings-scroll", useSettingsScroll);
+        if (useSettingsScroll) {
+            content.setAttribute("tabindex", "0");
+            content.setAttribute("role", "region");
+            content.setAttribute("aria-label", "Faction settings. Scroll for more options.");
+            return;
+        }
+        content.removeAttribute("tabindex");
+        content.removeAttribute("role");
+        content.removeAttribute("aria-label");
         if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") {
             const layout = content.querySelector(".ntc-ffscouter-layout");
             const summaryViewport = layout?.querySelector(".ntc-ffscouter-summary-viewport");
@@ -6174,6 +6213,14 @@
         startChainCountdownTimer();
         startFactionLiveRefreshTimer();
         if (state.factionSubTab === "ffscouter") startWarTargetsRefreshTimer();
+    }
+
+    function restoreMinimizedWidget() {
+        if (!state.isMinimized) return;
+        state.isMinimized = false;
+        setStoredDashboardState({ isMinimized: false });
+        applyWidgetView();
+        debugLog("Minimized icon restored");
     }
 
     function applyWidgetView() {
@@ -6290,6 +6337,9 @@
                     border-bottom: 1px solid #435671;
                     cursor: move;
                     user-select: none;
+                }
+                #nfc-faction-wrapper[data-minimized="true"] #nfc-drag-handle {
+                    touch-action: none;
                 }
                 #nfc-faction-wrapper #nfc-title {
                     flex: 1 1 auto;
@@ -6612,6 +6662,19 @@
                     max-width: 100%;
                     overflow: hidden;
                     font-size: clamp(9px, 2.4cqi, 12px) !important;
+                }
+                #nfc-faction-wrapper #nfc-content.nfc-settings-scroll {
+                    overflow-x: hidden !important;
+                    overflow-y: auto !important;
+                    overscroll-behavior: contain;
+                    -webkit-overflow-scrolling: touch;
+                    scrollbar-width: none;
+                    -ms-overflow-style: none;
+                }
+                #nfc-faction-wrapper #nfc-content.nfc-settings-scroll::-webkit-scrollbar {
+                    display: none;
+                    width: 0;
+                    height: 0;
                 }
                 #nfc-faction-wrapper #nfc-main-body {
                     display: flex !important;
@@ -7252,7 +7315,10 @@
         let didDrag = false;
         let offsetX;
         let offsetY;
+        let dragStartX;
+        let dragStartY;
         let dragPointerId = null;
+        const DRAG_ACTIVATION_DISTANCE_PX = 5;
 
         dragHandle.addEventListener(interactionEvents.down, (e) => {
             if (!isPrimaryInteraction(e)) return;
@@ -7265,6 +7331,8 @@
             const rect = dashboard.getBoundingClientRect();
             offsetX = e.clientX - rect.left;
             offsetY = e.clientY - rect.top;
+            dragStartX = e.clientX;
+            dragStartY = e.clientY;
             dashboard.style.bottom = "auto";
             dashboard.style.right = "auto";
             dashboard.style.left = `${rect.left}px`;
@@ -7274,6 +7342,7 @@
         document.addEventListener(interactionEvents.move, (e) => {
             if (!isDragging || !eventMatchesPointer(e, dragPointerId)) return;
             e.preventDefault();
+            if (!didDrag && Math.hypot(e.clientX - dragStartX, e.clientY - dragStartY) < DRAG_ACTIVATION_DISTANCE_PX) return;
             didDrag = true;
             const bounds = getWidgetViewportBounds();
             const maxLeft = Math.max(bounds.minLeft, bounds.maxRight - dashboard.offsetWidth);
@@ -7284,26 +7353,35 @@
             dashboard.style.top = `${top}px`;
         }, { passive: false });
 
-        const finishDrag = (e) => {
+        const finishDrag = (e, cancelled = false) => {
             if (!isDragging || !eventMatchesPointer(e, dragPointerId)) return;
-            if (isDragging) {
+            const wasMinimized = state.isMinimized;
+            if (didDrag) {
                 const rect = dashboard.getBoundingClientRect();
-                const edge = getNearestWidgetEdge(rect);
-                const position = { edge, x: rect.left, y: rect.top };
-                setStoredPosition(position);
-                applyWidgetPosition(position);
+                if (wasMinimized) {
+                    setStoredMinimizedPosition({ x: rect.left, y: rect.top });
+                    applyWidgetPosition();
+                    debugLog("Minimized icon position saved", { x: Math.round(rect.left), y: Math.round(rect.top) });
+                } else {
+                    const edge = getNearestWidgetEdge(rect);
+                    const position = { edge, x: rect.left, y: rect.top };
+                    setStoredPosition(position);
+                    applyWidgetPosition(position);
+                }
+            } else if (!wasMinimized || cancelled) {
+                applyWidgetPosition();
             }
+            releasePointer(dashboard, dragPointerId);
             isDragging = false;
             dragPointerId = null;
+            if (wasMinimized && !didDrag && !cancelled) restoreMinimizedWidget();
         };
         document.addEventListener(interactionEvents.up, finishDrag);
-        if (interactionEvents.cancel) document.addEventListener(interactionEvents.cancel, finishDrag);
+        if (interactionEvents.cancel) document.addEventListener(interactionEvents.cancel, (e) => finishDrag(e, true));
 
         dashboard.addEventListener("click", (e) => {
             if (!state.isMinimized || didDrag) return;
-            state.isMinimized = false;
-            setStoredDashboardState({ isMinimized: false });
-            applyWidgetView();
+            restoreMinimizedWidget();
         });
 
         const resizeHandles = dashboard.querySelectorAll(".nfc-resize-handle");

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.0.39
+// @version      1.0.40
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -31,7 +31,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.39";
+    const SCRIPT_VERSION = "1.0.40";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -71,6 +71,8 @@
     const TORN_PDA_HANDLER_PATTERN = /\btorn\s*pda\b/i;
     const MOBILE_TOP_OFFSET_PX = 12;
     const RUNTIME_GLOBAL_KEY = "__NAUGHTY_FACTION_COMPANION_RUNTIME__";
+    const PAGE_SCOPE_HISTORY_PATCH_KEY = "__NAUGHTY_FACTION_COMPANION_HISTORY_PATCH__";
+    const PAGE_SCOPE_LOCATION_EVENT = "naughty-faction-companion:location-change";
     const VIRTUAL_KEYBOARD_OPEN_DELTA_PX = 32;
     const VIRTUAL_KEYBOARD_WIDTH_TOLERANCE_PX = 24;
     const virtualKeyboardState = { active: false, baseline: null };
@@ -366,6 +368,15 @@
         return normalized;
     }
 
+    function isFactionPageLocation(rawUrl = window.location.href) {
+        try {
+            const parsed = new URL(String(rawUrl || ""), window.location.origin);
+            return parsed.origin === window.location.origin && /^\/factions\.php$/i.test(parsed.pathname);
+        } catch {
+            return false;
+        }
+    }
+
     const state = {
         runtime: { ...initialRuntime },
         sortState: { key: "value", direction: "desc" },
@@ -392,6 +403,10 @@
         storageSwitchInFlight: false,
         injectedApiKeyActive: false,
         runtimeTabState: { isActiveTab: true, isWebViewVisible: true },
+        pageScopeActive: isFactionPageLocation(),
+        pageScopeEpoch: 0,
+        pageScopeHandlersRegistered: false,
+        pageScopeMonitorTimer: null,
         autoRefreshSuspended: false,
         nativeReminderMinutes: 15,
         nativeReminderAt: 0,
@@ -443,6 +458,10 @@
         },
         exportInFlight: false
     };
+
+    function isCurrentPageScope(epoch) {
+        return state.pageScopeActive && state.pageScopeEpoch === epoch;
+    }
 
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const formatMoney = (num) => num ? '$' + Number(num).toLocaleString() : '$0';
@@ -1923,12 +1942,15 @@
     }
 
     function syncWarHospitalAlertsFromFreshData() {
+        const pageScopeEpoch = state.pageScopeEpoch;
+        if (!state.pageScopeActive) return Promise.resolve(false);
         if (state.warHospitalAlertSyncPromise) {
             state.warHospitalAlertSyncQueued = true;
             return state.warHospitalAlertSyncPromise;
         }
         state.warHospitalAlertSyncPromise = Promise.resolve()
             .then(() => {
+                if (!isCurrentPageScope(pageScopeEpoch)) return false;
                 const faction = state.caches.faction || {};
                 const targets = faction.warTargets?.targets || [];
                 const war = faction.war || faction.warTargets?.war || null;
@@ -1942,7 +1964,7 @@
                 state.warHospitalAlertSyncPromise = null;
                 if (state.warHospitalAlertSyncQueued) {
                     state.warHospitalAlertSyncQueued = false;
-                    void syncWarHospitalAlertsFromFreshData();
+                    if (state.pageScopeActive) void syncWarHospitalAlertsFromFreshData();
                 }
             });
         return state.warHospitalAlertSyncPromise;
@@ -4620,7 +4642,8 @@
     }
 
     async function refreshSectionByKey(sectionKey, statusEl) {
-        if (state.isMinimized) return false;
+        if (!state.pageScopeActive || state.isMinimized) return false;
+        const pageScopeEpoch = state.pageScopeEpoch;
         const apiKey = getStoredKey();
         debugLog("Manual section refresh requested", { sectionKey, apiKeyPresent: !!apiKey });
         if (!apiKey) {
@@ -4632,9 +4655,12 @@
 
         try {
             switch (sectionKey) {
-                case "faction":
-                    setSectionCache("faction", (await fetchFactionData(apiKey)) || state.caches.faction);
+                case "faction": {
+                    const faction = await fetchFactionData(apiKey);
+                    if (!isCurrentPageScope(pageScopeEpoch)) return false;
+                    setSectionCache("faction", faction || state.caches.faction);
                     break;
+                }
                 default:
                     return false;
             }
@@ -4644,6 +4670,7 @@
             debugLog("Manual section refresh complete", { sectionKey });
             return true;
         } catch (error) {
+            if (!isCurrentPageScope(pageScopeEpoch)) return false;
             if (statusEl) setUserStatus(statusEl, `Refresh failed: ${safeErrorMessage(error)}`, "error");
             debugLog("Manual section refresh failed", { sectionKey, error: error.message });
             return false;
@@ -5442,7 +5469,8 @@
     }
 
     async function refreshWarTargets() {
-        if (state.isMinimized) return false;
+        if (!state.pageScopeActive || state.isMinimized) return false;
+        const pageScopeEpoch = state.pageScopeEpoch;
         if (state.warTargetsRefreshInFlight) return false;
         const faction = state.caches.faction || {};
         const war = faction.war || null;
@@ -5462,6 +5490,7 @@
         state.warTargetsRefreshInFlight = true;
         try {
             const refreshed = await fetchWarTargetData(apiKey, war, { loadStatic, existing });
+            if (!isCurrentPageScope(pageScopeEpoch)) return false;
             const currentFaction = state.caches.faction || {};
             if (Number(currentFaction.war?.warId || 0) !== Number(war.warId || 0)) return false;
             state.caches.faction = { ...currentFaction, warTargets: { ...refreshed, war: { ...war } } };
@@ -5475,6 +5504,7 @@
             if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") renderTabContent();
             return true;
         } catch (error) {
+            if (!isCurrentPageScope(pageScopeEpoch)) return false;
             const currentFaction = state.caches.faction || {};
             if (Number(currentFaction.war?.warId || 0) === Number(war.warId || 0)) {
                 state.caches.faction = {
@@ -5761,6 +5791,7 @@
     };
 
     function renderTabContent() {
+        if (!state.pageScopeActive) return;
         const contentEl = document.getElementById("nfc-content");
         if (!contentEl) return;
 
@@ -5812,10 +5843,10 @@
 
     function startChainCountdownTimer() {
         stopChainCountdownTimer();
-        if (state.isMinimized) return;
+        if (state.isMinimized || !state.pageScopeActive) return;
         const updateCountdown = () => {
             const elements = document.querySelectorAll("[data-chain-seconds]");
-            if (state.isMinimized || !elements.length || state.currentTab !== "faction") {
+            if (state.isMinimized || !state.pageScopeActive || !elements.length || state.currentTab !== "faction") {
                 stopChainCountdownTimer();
                 return;
             }
@@ -5841,7 +5872,12 @@
 
     function startCooldownCountdownTimer() {
         stopCooldownCountdownTimer();
+        if (state.isMinimized || !state.pageScopeActive) return;
         const updateCountdown = () => {
+            if (state.isMinimized || !state.pageScopeActive) {
+                stopCooldownCountdownTimer();
+                return;
+            }
             updateBarTimers();
             const elements = document.querySelectorAll("[id^='cooldown-'][data-seconds]");
             elements.forEach((el) => {
@@ -5891,7 +5927,8 @@
 
     async function refreshAllSections(options = {}) {
         const { silent = false } = options;
-        if (state.isMinimized) return false;
+        if (!state.pageScopeActive || state.isMinimized) return false;
+        const pageScopeEpoch = state.pageScopeEpoch;
         const apiKey = getStoredKey();
         debugLog("Faction refresh initiated", { silent, apiKeyPresent: !!apiKey });
         if (!apiKey) {
@@ -5904,6 +5941,7 @@
         try {
             state.lastRefresh = Date.now();
             const faction = await fetchFactionData(apiKey);
+            if (!isCurrentPageScope(pageScopeEpoch)) return false;
             setSectionCache("faction", faction || state.caches.faction);
             state.lastRefreshBySection.all = Date.now();
             renderTabContent();
@@ -5915,6 +5953,7 @@
             debugLog("Full refresh complete", { sections: Object.keys(state.caches) });
             return true;
         } catch (error) {
+            if (!isCurrentPageScope(pageScopeEpoch)) return false;
             if (!silent && status) status.innerText = `Refresh failed: ${error.message}`;
             debugLog("Full refresh failed", { error: error.message });
             errorLog("Refresh failed", { error: safeErrorMessage(error) });
@@ -5943,7 +5982,7 @@
     // Company updates once daily at a fixed UTC time (see isCompanyUpdateDue).
     // Inventory is fully manual-only. Activity has been removed entirely.
     function isAutomaticRefreshAllowed() {
-        if (state.isMinimized || document.visibilityState === "hidden") return false;
+        if (!state.pageScopeActive || state.isMinimized || document.visibilityState === "hidden") return false;
         if (!isTornPDAEnvironment()) return true;
         return state.runtimeTabState.isActiveTab !== false && state.runtimeTabState.isWebViewVisible !== false;
     }
@@ -6008,6 +6047,111 @@
         });
         window.addEventListener("flutterInAppWebViewPlatformReady", () => { void refreshNativeTabState(); }, { once: true });
         void refreshNativeTabState();
+    }
+
+    function applyFactionPageScope(reason = "route-check") {
+        const active = isFactionPageLocation();
+        const changed = state.pageScopeActive !== active;
+        state.pageScopeActive = active;
+        if (changed) state.pageScopeEpoch += 1;
+
+        const dashboard = state.dashboard || document.getElementById("nfc-faction-wrapper");
+        if (dashboard && !state.dashboard) state.dashboard = dashboard;
+        if (active && dashboard && !dashboard.isConnected && document.body) {
+            document.body.appendChild(dashboard);
+        }
+        if (dashboard) {
+            dashboard.hidden = !active;
+            if ("inert" in dashboard) dashboard.inert = !active;
+            dashboard.style.setProperty("display", active ? "flex" : "none", "important");
+            dashboard.setAttribute("aria-hidden", active ? "false" : "true");
+        }
+
+        if (!active) {
+            pauseAutomaticRefresh(`page-scope:${reason}`);
+            stopChainCountdownTimer();
+            stopCooldownCountdownTimer();
+            if (changed) debugLog("Faction page left; dashboard suspended", { path: window.location.pathname });
+            return false;
+        }
+
+        if (!dashboard && document.body) {
+            initializeDOMDashboard();
+        } else if (dashboard && changed) {
+            applyWidgetView();
+            renderTabContent();
+        }
+        applyRuntimeActivityState(`page-scope:${reason}`);
+        if (changed) debugLog("Faction page entered; dashboard restored", { path: window.location.pathname });
+        return true;
+    }
+
+    function patchFactionPageHistory() {
+        if (window[PAGE_SCOPE_HISTORY_PATCH_KEY]) return true;
+        let patched = false;
+        ["pushState", "replaceState"].forEach((methodName) => {
+            try {
+                const original = window.history?.[methodName];
+                if (typeof original !== "function") return;
+                window.history[methodName] = function(...args) {
+                    const result = original.apply(this, args);
+                    try {
+                        window.dispatchEvent(new Event(PAGE_SCOPE_LOCATION_EVENT));
+                    } catch { /* URL polling remains the fallback in isolated userscript worlds. */ }
+                    return result;
+                };
+                patched = true;
+            } catch { /* Some userscript sandboxes expose read-only History methods. */ }
+        });
+        if (patched) {
+            try { window[PAGE_SCOPE_HISTORY_PATCH_KEY] = true; } catch { /* Polling still detects URL changes. */ }
+        }
+        return patched;
+    }
+
+    function registerFactionPageScopeHandlers() {
+        if (state.pageScopeHandlersRegistered) return;
+        state.pageScopeHandlersRegistered = true;
+        let lastHref = String(window.location.href);
+        const sync = (reason, force = false) => {
+            const nextHref = String(window.location.href);
+            if (!force && nextHref === lastHref) return;
+            lastHref = nextHref;
+            applyFactionPageScope(reason);
+        };
+        const schedulePoll = () => {
+            if (state.pageScopeMonitorTimer) window.clearTimeout(state.pageScopeMonitorTimer);
+            const delay = state.pageScopeActive ? 250 : 1000;
+            state.pageScopeMonitorTimer = window.setTimeout(() => {
+                state.pageScopeMonitorTimer = null;
+                sync("url-poll");
+                schedulePoll();
+            }, delay);
+        };
+        const syncAfterNavigation = (event) => {
+            window.setTimeout(() => {
+                sync(event.type, true);
+                schedulePoll();
+            }, 0);
+        };
+
+        window.addEventListener("popstate", syncAfterNavigation);
+        window.addEventListener("hashchange", syncAfterNavigation);
+        window.addEventListener(PAGE_SCOPE_LOCATION_EVENT, syncAfterNavigation);
+        window.addEventListener("pageshow", (event) => {
+            sync(event.type, true);
+            schedulePoll();
+        });
+        window.addEventListener("pagehide", () => {
+            if (state.pageScopeMonitorTimer) window.clearTimeout(state.pageScopeMonitorTimer);
+            state.pageScopeMonitorTimer = null;
+            pauseAutomaticRefresh("pagehide");
+            stopChainCountdownTimer();
+            stopCooldownCountdownTimer();
+        });
+        patchFactionPageHistory();
+        applyFactionPageScope("registration");
+        schedulePoll();
     }
 
     function performAutoRefreshCycle() {
@@ -6290,7 +6434,7 @@
     }
 
     function resumeWindowActivity() {
-        if (state.isMinimized) return;
+        if (state.isMinimized || !state.pageScopeActive) return;
         resumeAutomaticRefresh("window-restored");
         if (state.currentTab !== "faction") return;
         startChainCountdownTimer();
@@ -6364,7 +6508,10 @@
     }
 
     function initializeDOMDashboard() {
-        if (document.getElementById("nfc-faction-wrapper")) {
+        if (!state.pageScopeActive || !isFactionPageLocation()) return;
+        const existingDashboard = document.getElementById("nfc-faction-wrapper");
+        if (existingDashboard) {
+            state.dashboard = existingDashboard;
             return;
         }
 
@@ -7655,7 +7802,7 @@
             recoverFromStartupStorageFailure(error);
         }
         try {
-            initializeDOMDashboard();
+            registerFactionPageScopeHandlers();
             registerTornPDARuntimeDetection();
             registerRuntimeActivityHandlers();
         } catch (error) {

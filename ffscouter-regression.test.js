@@ -19,13 +19,17 @@ const responsiveColumns = section("function allocateColumnPixels", "function get
 const storage = section("// --- TornPDA-storage-first persistent storage ---", "const getStoredKey");
 const settings = section("function renderSettingsPanel", "function renderInventorySection");
 const settingsControls = section("function bindSettingsControls", "function bindPersonalControls");
+const hospitalAlerts = section("function getWarHospitalAlertNotificationId", "function getCrossOriginTransport");
+const targetFiltering = section("function getWarTargetStatus", "function getWarTargetSortValue");
 
-assert.match(source, /@version\s+1\.0\.31/, "userscript header version must be 1.0.31");
+assert.match(source, /@version\s+1\.0\.32/, "userscript header version must be 1.0.32");
 assert.match(source, /@license\s+MIT/, "metadata must declare the MIT license");
 assert.match(source, /https:\/\/github\.com\/SharpSplinter\/Naughty-Faction-Companion/, "metadata must use the renamed GitHub account");
 assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Faction-Companion\/refs\/heads\/main/, "metadata must update from the renamed account");
 assert.doesNotMatch(source + readme, /xf4k31tx/, "stale GitHub account links must not remain");
-assert.match(source, /const SCRIPT_VERSION = "1\.0\.31";/, "displayed version must match the userscript header");
+assert.match(source, /const SCRIPT_VERSION = "1\.0\.32";/, "displayed version must match the userscript header");
+assert.match(source, /@grant\s+GM_notification/, "desktop hospital alerts must request the legacy Tampermonkey notification grant");
+assert.match(source, /@grant\s+GM\.notification/, "desktop hospital alerts must request the modern Tampermonkey notification grant");
 assert.match(source, /const CONSOLE_TAG = "\[Naughty Faction Companion\]";/, "diagnostics must use the script-specific console prefix");
 assert.match(source, /function redactSecretText\(value\)/, "diagnostics must redact secret-bearing text");
 assert.match(source, /function getSafeRequestTarget\(method, rawUrl\)/, "API diagnostics must build a query-free request target");
@@ -57,11 +61,23 @@ assert.match(source, /TORN_PDA_INJECTED_API_KEY = "_###PDA-APIKEY###_"/, "TornPD
 assert.match(settings, /Using TornPDA’s injected API key/, "injected key status must be visible without displaying the key");
 assert.match(source, /function showNativeToast/, "TornPDA feedback must prefer native toasts");
 assert.match(source, /function scheduleNativeReminder/, "TornPDA native reminders must be supported");
+assert.match(source, /function getWarHospitalAlertCandidates/, "hospital alerts must derive candidates through the current FFScouter view");
+assert.match(source, /function reconcileWarHospitalAlerts/, "hospital alerts must reconcile stale native and desktop schedules");
+assert.match(source, /function syncWarHospitalAlertsFromFreshData/, "hospital alerts must schedule from a fresh active scan");
+assert.match(hospitalAlerts, /scheduleNotification/, "TornPDA hospital alerts must use native scheduled notifications");
+assert.match(hospitalAlerts, /NATIVE_WAR_HOSPITAL_ALERT_ID_MIN/, "native hospital alert IDs must remain inside TornPDA's supported range");
+assert.match(hospitalAlerts, /cancelNotification/, "changing view eligibility must cancel stale TornPDA hospital alerts");
+assert.match(renderer, /war-hospital-alert-toggle/, "FFScouter must expose the hospital-alert toggle");
+assert.match(renderer, /war-hospital-alert-time-dialog/, "first use must prompt for a hospital-alert threshold");
+assert.match(settings, /reset-war-hospital-alerts-btn/, "Settings must offer a hospital-alert preference reset");
+assert.match(settingsControls, /disableWarHospitalAlerts\(\{ resetPreference: true \}\)/, "Settings reset must clear hospital-alert preference and schedules");
+assert.match(source, /const formatIdentifier =/, "identifier formatting must not reuse comma-separated integer formatting");
+assert.doesNotMatch(source, /ID \$\{formatInteger\(/, "displayed IDs must remain ungrouped identifiers");
 assert.match(source, /tornpda:tabState/, "TornPDA tab state must pause automatic refresh while inactive");
 assert.match(source, /document\.addEventListener\("visibilitychange"/, "document visibility must pause automatic refresh while inactive");
 assert.match(source, /function isAutomaticRefreshAllowed/, "auto-refresh must centrally gate inactive states");
 
-for (const key of ["warTargetSort", "warTargetFilters", "warTargetFFRange", "warTargetColumnOrder", "warTargetColumnWidths"]) {
+for (const key of ["warTargetSort", "warTargetFilters", "warTargetFFRange", "warTargetBSRange", "warTargetRangeMetric", "warHospitalAlertSettings", "warTargetColumnOrder", "warTargetColumnWidths"]) {
     assert.match(persistence, new RegExp(key), `${key} must be saved`);
     assert.match(restore, new RegExp(key), `${key} must be restored`);
 }
@@ -209,5 +225,38 @@ for (let mask = 0; mask < 64; mask += 1) {
         assert.deepEqual(faction, before, `filters mutated faction state for mask ${mask} and range ${range}`);
     }
 }
+
+const hospitalViewState = {
+    warTargetFilters: { ...defaults },
+    warTargetRangeMetric: "ff",
+    warTargetFFRange: { min: "2", max: "3" },
+    warTargetBSRange: { min: "", max: "" },
+    warHospitalAlertSettings: { enabled: true, thresholdMinutes: 3 }
+};
+const hospitalFilter = new Function(
+    "state",
+    "WAR_HOSPITAL_ALERT_THRESHOLDS",
+    "formatIdentifier",
+    `${targetFiltering}\nreturn { filterWarTargets, getWarHospitalAlertCandidates, targetMatchesWarHospitalAlertView };`
+)(hospitalViewState, [1, 3, 5], (value, fallback = "—") => {
+    const numeric = Math.trunc(Number(value));
+    return Number.isSafeInteger(numeric) && numeric >= 0 ? String(numeric) : fallback;
+});
+const hospitalNow = Date.now();
+const hospitalTargets = [
+    { id: 8317, name: "Visible FF", fairFight: 2.5, battleStats: 900, lastAction: { status: "online" }, status: { state: "Hospital", until: Math.ceil((hospitalNow + 10 * 60 * 1000) / 1000) } },
+    { id: 8318, name: "Visible BS", fairFight: 4.5, battleStats: 1200, lastAction: { status: "online" }, status: { state: "Hospital", until: Math.ceil((hospitalNow + 10 * 60 * 1000) / 1000) } },
+    { id: 8319, name: "Released", fairFight: 2.4, battleStats: 950, lastAction: { status: "online" }, status: { state: "Hospital", until: Math.floor((hospitalNow - 60 * 1000) / 1000) } }
+];
+assert.deepEqual(hospitalFilter.filterWarTargets(hospitalTargets).map((target) => target.id), [8317, 8319], "FF range must constrain the view while expired hospital entries remain excluded from alerts");
+assert.deepEqual(hospitalFilter.getWarHospitalAlertCandidates(hospitalTargets, { warId: 44 }, hospitalNow).map((candidate) => candidate.targetId), [8317], "only visible hospitalized targets may receive alerts");
+hospitalViewState.warTargetRangeMetric = "bs";
+hospitalViewState.warTargetBSRange = { min: "1000", max: "1300" };
+assert.deepEqual(hospitalFilter.getWarHospitalAlertCandidates(hospitalTargets, { warId: 44 }, hospitalNow).map((candidate) => candidate.targetId), [8318], "estimated-BS range must constrain hospital-alert candidates");
+hospitalViewState.warTargetFilters.hospitalized = false;
+assert.equal(hospitalFilter.getWarHospitalAlertCandidates(hospitalTargets, { warId: 44 }, hospitalNow).length, 0, "disabled hospital view filter must suppress alerts");
+hospitalViewState.warTargetFilters.hospitalized = true;
+hospitalViewState.warTargetBSRange = { min: "", max: "" };
+assert.deepEqual(hospitalFilter.getWarHospitalAlertCandidates(hospitalTargets, { warId: 44 }, hospitalNow).map((candidate) => candidate.targetId), [8317, 8318], "an unbounded selected view may alert every hospitalized enemy");
 
 console.log("FFScouter regression checks passed: persistence, storage preference, 384 filter/range combinations, cache race guards, responsive widths, hidden Estimates card, and wheel controls.");

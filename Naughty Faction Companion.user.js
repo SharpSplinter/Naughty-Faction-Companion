@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.0.31
+// @version      1.0.32
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -18,6 +18,8 @@
 // @grant        GM.getValue
 // @grant        GM.setValue
 // @grant        GM.deleteValue
+// @grant        GM_notification
+// @grant        GM.notification
 // @connect      api.torn.com
 // @connect      ffscouter.com
 // ==/UserScript==
@@ -28,7 +30,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.31";
+    const SCRIPT_VERSION = "1.0.32";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -37,6 +39,10 @@
     const TORN_PDA_INJECTED_API_KEY = "_###PDA-APIKEY###_";
     const TORN_PDA_API_KEY_MARKER = "_###PDA-APIKEY###_";
     const NATIVE_REMINDER_ID = 4271;
+    const NATIVE_WAR_HOSPITAL_ALERT_ID_MIN = 5000;
+    const NATIVE_WAR_HOSPITAL_ALERT_ID_MAX = 9999;
+    const WAR_HOSPITAL_ALERT_THRESHOLDS = Object.freeze([1, 3, 5]);
+    const WAR_HOSPITAL_ALERT_MAX_TRACKED = 250;
     const PDA_WRITE_DEBOUNCE_MS = 120;
     const BACKUP_SCHEMA = "naughty-faction-companion-backup";
     const BACKUP_SCHEMA_VERSION = 1;
@@ -198,12 +204,68 @@
         offline: true
     };
 
+    const createWarHospitalAlertSettings = () => ({
+        enabled: false,
+        thresholdMinutes: null,
+        deliveredEvents: {},
+        scheduledTargets: {},
+        notificationIds: {}
+    });
+
+    function normalizeWarHospitalAlertSettings(value) {
+        const raw = value && typeof value === "object" ? value : {};
+        const requestedThreshold = Math.round(Number(raw.thresholdMinutes));
+        const thresholdMinutes = WAR_HOSPITAL_ALERT_THRESHOLDS.includes(requestedThreshold) ? requestedThreshold : null;
+        const normalized = createWarHospitalAlertSettings();
+        normalized.enabled = raw.enabled === true && thresholdMinutes !== null;
+        normalized.thresholdMinutes = thresholdMinutes;
+
+        Object.entries(raw.deliveredEvents && typeof raw.deliveredEvents === "object" ? raw.deliveredEvents : {})
+            .slice(-WAR_HOSPITAL_ALERT_MAX_TRACKED)
+            .forEach(([eventKey, deliveredAt]) => {
+                const timestamp = Math.max(0, Math.trunc(Number(deliveredAt) || 0));
+                if (eventKey && timestamp) normalized.deliveredEvents[String(eventKey)] = timestamp;
+            });
+
+        Object.entries(raw.scheduledTargets && typeof raw.scheduledTargets === "object" ? raw.scheduledTargets : {})
+            .slice(-WAR_HOSPITAL_ALERT_MAX_TRACKED)
+            .forEach(([targetId, record]) => {
+                const notificationId = Math.trunc(Number(record?.notificationId));
+                const timestamp = Math.max(0, Math.trunc(Number(record?.timestamp) || 0));
+                const eventKey = String(record?.eventKey || "");
+                if (!eventKey || !timestamp || notificationId < NATIVE_WAR_HOSPITAL_ALERT_ID_MIN || notificationId > NATIVE_WAR_HOSPITAL_ALERT_ID_MAX) return;
+                normalized.scheduledTargets[String(targetId)] = {
+                    eventKey,
+                    notificationId,
+                    timestamp,
+                    delivery: record?.delivery === "desktop" ? "desktop" : "native"
+                };
+            });
+
+        Object.entries(raw.notificationIds && typeof raw.notificationIds === "object" ? raw.notificationIds : {})
+            .slice(-WAR_HOSPITAL_ALERT_MAX_TRACKED)
+            .forEach(([targetId, rawId]) => {
+                const notificationId = Math.trunc(Number(rawId));
+                if (notificationId >= NATIVE_WAR_HOSPITAL_ALERT_ID_MIN && notificationId <= NATIVE_WAR_HOSPITAL_ALERT_ID_MAX) {
+                    normalized.notificationIds[String(targetId)] = notificationId;
+                }
+            });
+
+        return normalized;
+    }
+
     const state = {
         runtime: { ...initialRuntime },
         sortState: { key: "value", direction: "desc" },
         warTargetSort: { key: "status", direction: "asc" },
         warTargetFilters: { ...WAR_TARGET_FILTER_DEFAULTS },
         warTargetFFRange: { min: "", max: "" },
+        warTargetBSRange: { min: "", max: "" },
+        warTargetRangeMetric: "ff",
+        warHospitalAlertSettings: createWarHospitalAlertSettings(),
+        warHospitalAlertTimers: new Map(),
+        warHospitalAlertSyncPromise: null,
+        warHospitalAlertSyncQueued: false,
         warTargetColumnOrder: ["player", "online", "status", "stats", "ff", "attack"],
         warTargetColumnWidths: { player: 112, online: 64, status: 150, stats: 82, ff: 44, attack: 62 },
         warTargetColumnLayoutVersion: 2,
@@ -281,6 +343,10 @@
         const value = Number(num ?? 0);
         if (!Number.isFinite(value)) return "0";
         return Math.round(value).toLocaleString();
+    };
+    const formatIdentifier = (value, fallback = "—") => {
+        const numeric = Math.trunc(Number(value));
+        return Number.isSafeInteger(numeric) && numeric >= 0 ? String(numeric) : fallback;
     };
     const formatDuration = (totalSeconds) => {
         const seconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
@@ -1005,6 +1071,9 @@
         warTargetColumnLayoutVersion: state.warTargetColumnLayoutVersion,
         warTargetFilters: state.warTargetFilters,
         warTargetFFRange: state.warTargetFFRange,
+        warTargetBSRange: state.warTargetBSRange,
+        warTargetRangeMetric: state.warTargetRangeMetric,
+        warHospitalAlertSettings: state.warHospitalAlertSettings,
         warTargetSort: state.warTargetSort,
         autoRefreshSettings: state.autoRefreshSettings,
         nativeReminderMinutes: state.nativeReminderMinutes,
@@ -1041,6 +1110,18 @@
                 min: String(payload.warTargetFFRange.min ?? ""),
                 max: String(payload.warTargetFFRange.max ?? "")
             };
+        }
+        if (payload && payload.warTargetBSRange && typeof payload.warTargetBSRange === "object") {
+            state.warTargetBSRange = {
+                min: String(payload.warTargetBSRange.min ?? ""),
+                max: String(payload.warTargetBSRange.max ?? "")
+            };
+        }
+        if (payload && payload.warTargetRangeMetric) {
+            state.warTargetRangeMetric = payload.warTargetRangeMetric === "bs" ? "bs" : "ff";
+        }
+        if (payload && payload.warHospitalAlertSettings && typeof payload.warHospitalAlertSettings === "object") {
+            state.warHospitalAlertSettings = normalizeWarHospitalAlertSettings(payload.warHospitalAlertSettings);
         }
         if (payload && payload.warTargetSort && typeof payload.warTargetSort === "object") {
             const allowedSortKeys = ["player", "online", "status", "stats", "ff", "attack"];
@@ -1291,6 +1372,12 @@
             min: String(dashboardState.warTargetFFRange?.min ?? ""),
             max: String(dashboardState.warTargetFFRange?.max ?? "")
         };
+        state.warTargetBSRange = {
+            min: String(dashboardState.warTargetBSRange?.min ?? ""),
+            max: String(dashboardState.warTargetBSRange?.max ?? "")
+        };
+        state.warTargetRangeMetric = dashboardState.warTargetRangeMetric === "bs" ? "bs" : "ff";
+        state.warHospitalAlertSettings = normalizeWarHospitalAlertSettings(dashboardState.warHospitalAlertSettings);
         const savedWarTargetSort = dashboardState.warTargetSort || {};
         state.warTargetSort = {
             key: warTargetColumns.includes(savedWarTargetSort.key) ? savedWarTargetSort.key : "status",
@@ -1402,6 +1489,302 @@
         state.nativeReminderAt = 0;
         setStoredDashboardState({ nativeReminderAt: 0 });
         return true;
+    }
+
+    function getWarHospitalAlertNotificationId(targetId) {
+        const key = String(Math.trunc(Number(targetId)));
+        const settings = state.warHospitalAlertSettings;
+        const existing = Math.trunc(Number(settings.notificationIds?.[key]));
+        if (existing >= NATIVE_WAR_HOSPITAL_ALERT_ID_MIN && existing <= NATIVE_WAR_HOSPITAL_ALERT_ID_MAX) return existing;
+
+        const used = new Set(Object.entries(settings.notificationIds || {})
+            .filter(([storedTargetId]) => storedTargetId !== key)
+            .map(([, notificationId]) => Math.trunc(Number(notificationId)))
+            .filter((notificationId) => notificationId >= NATIVE_WAR_HOSPITAL_ALERT_ID_MIN && notificationId <= NATIVE_WAR_HOSPITAL_ALERT_ID_MAX));
+        const span = NATIVE_WAR_HOSPITAL_ALERT_ID_MAX - NATIVE_WAR_HOSPITAL_ALERT_ID_MIN + 1;
+        const seed = Math.abs(Math.trunc(Number(targetId) || 0)) % span;
+        for (let offset = 0; offset < span; offset += 1) {
+            const candidate = NATIVE_WAR_HOSPITAL_ALERT_ID_MIN + ((seed + offset) % span);
+            if (!used.has(candidate)) {
+                settings.notificationIds[key] = candidate;
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    function getWarHospitalAlertUrl(targetId) {
+        return `https://www.torn.com/loader.php?sid=attack&user2ID=${encodeURIComponent(formatIdentifier(targetId, "0"))}`;
+    }
+
+    function getWarHospitalAlertText(target, status, thresholdMinutes, immediate = false) {
+        const player = String(target?.name || `Player ${formatIdentifier(target?.id, "0")}`);
+        const playerId = formatIdentifier(target?.id, "0");
+        if (!immediate) return `${player} (ID ${playerId}) has ${formatInteger(thresholdMinutes)} minutes left in hospital.`;
+        const secondsLeft = Math.max(0, Math.ceil((Number(status?.untilMs) - Date.now()) / 1000));
+        return `${player} (ID ${playerId}) has ${formatDuration(secondsLeft)} left in hospital.`;
+    }
+
+    function requestDesktopHospitalNotificationPermission() {
+        if (canUseNativePdaFeatures()) return;
+        const tampermonkeyNotifier = typeof GM_notification === "function"
+            || (typeof GM !== "undefined" && typeof GM.notification === "function");
+        if (tampermonkeyNotifier || typeof Notification === "undefined" || Notification.permission !== "default") return;
+        void Notification.requestPermission().catch((error) => {
+            warnLog("Desktop notification permission request failed", { error: safeErrorMessage(error) });
+        });
+    }
+
+    async function showDesktopWarHospitalNotification(title, text, notificationId, url) {
+        const details = {
+            title,
+            text,
+            tag: `nfc-war-hospital-${formatInteger(notificationId)}`,
+            timeout: 12_000,
+            url
+        };
+        try {
+            if (typeof GM_notification === "function") {
+                await Promise.resolve(GM_notification(details));
+                return true;
+            }
+            if (typeof GM !== "undefined" && typeof GM.notification === "function") {
+                await GM.notification(details);
+                return true;
+            }
+        } catch (error) {
+            warnLog("Tampermonkey hospital notification failed", { error: safeErrorMessage(error) });
+        }
+        try {
+            if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+                const notification = new Notification(title, { body: text, tag: details.tag });
+                notification.onclick = () => window.open(url, "_blank", "noopener");
+                return true;
+            }
+        } catch (error) {
+            warnLog("Browser hospital notification failed", { error: safeErrorMessage(error) });
+        }
+        return false;
+    }
+
+    async function scheduleNativeWarHospitalAlert(candidate, notificationId, timestamp, immediate = false) {
+        if (!canUseNativePdaFeatures()) return false;
+        const thresholdMinutes = state.warHospitalAlertSettings.thresholdMinutes;
+        const response = await pdaHandler("scheduleNotification", {
+            title: "FFScouter hospital release",
+            subtitle: getWarHospitalAlertText(candidate.target, candidate.status, thresholdMinutes, immediate),
+            id: notificationId,
+            timestamp: Math.max(Date.now() + 1_000, Math.trunc(Number(timestamp) || 0)),
+            overwriteID: true,
+            launchNativeToast: false,
+            urlCallback: getWarHospitalAlertUrl(candidate.targetId)
+        });
+        if (response?.status === "error") throw new Error(response.message || "TornPDA could not schedule the hospital alert.");
+        return true;
+    }
+
+    async function cancelNativeWarHospitalAlert(record) {
+        if (record?.delivery !== "native" || !canUseNativePdaFeatures()) return false;
+        try {
+            const response = await pdaHandler("cancelNotification", { id: Math.trunc(Number(record.notificationId)) });
+            if (response?.status === "error") throw new Error(response.message || "TornPDA could not cancel the hospital alert.");
+            return true;
+        } catch (error) {
+            warnLog("Native hospital alert cancellation failed", { error: safeErrorMessage(error) });
+            return false;
+        }
+    }
+
+    function clearWarHospitalAlertTimer(targetId) {
+        const key = String(targetId);
+        const pending = state.warHospitalAlertTimers.get(key);
+        if (pending?.timer) clearTimeout(pending.timer);
+        state.warHospitalAlertTimers.delete(key);
+    }
+
+    function pruneWarHospitalAlertSettings(now = Date.now()) {
+        const settings = state.warHospitalAlertSettings;
+        const cutoff = now - (48 * 60 * 60 * 1000);
+        settings.deliveredEvents = Object.fromEntries(Object.entries(settings.deliveredEvents || {})
+            .filter(([, deliveredAt]) => Number(deliveredAt) >= cutoff)
+            .slice(-WAR_HOSPITAL_ALERT_MAX_TRACKED));
+        settings.scheduledTargets = Object.fromEntries(Object.entries(settings.scheduledTargets || {})
+            .filter(([, record]) => Number(record?.timestamp) >= now - (10 * 60 * 1000))
+            .slice(-WAR_HOSPITAL_ALERT_MAX_TRACKED));
+        settings.notificationIds = Object.fromEntries(Object.entries(settings.notificationIds || {}).slice(-WAR_HOSPITAL_ALERT_MAX_TRACKED));
+    }
+
+    function persistWarHospitalAlertSettings() {
+        state.warHospitalAlertSettings = normalizeWarHospitalAlertSettings(state.warHospitalAlertSettings);
+        setStoredDashboardState({ warHospitalAlertSettings: state.warHospitalAlertSettings });
+    }
+
+    async function clearScheduledWarHospitalAlerts({ clearDelivered = false, clearNotificationIds = false } = {}) {
+        const settings = state.warHospitalAlertSettings;
+        const pendingNative = Object.values(settings.scheduledTargets || {}).filter((record) => record?.delivery === "native");
+        await Promise.allSettled(pendingNative.map((record) => cancelNativeWarHospitalAlert(record)));
+        [...state.warHospitalAlertTimers.keys()].forEach((targetId) => clearWarHospitalAlertTimer(targetId));
+        settings.scheduledTargets = {};
+        if (clearDelivered) settings.deliveredEvents = {};
+        if (clearNotificationIds) settings.notificationIds = {};
+        persistWarHospitalAlertSettings();
+    }
+
+    async function disableWarHospitalAlerts({ resetPreference = false } = {}) {
+        await clearScheduledWarHospitalAlerts({ clearDelivered: resetPreference, clearNotificationIds: resetPreference });
+        state.warHospitalAlertSettings.enabled = false;
+        if (resetPreference) state.warHospitalAlertSettings.thresholdMinutes = null;
+        persistWarHospitalAlertSettings();
+    }
+
+    async function enableWarHospitalAlerts(thresholdMinutes) {
+        const selected = Math.round(Number(thresholdMinutes));
+        if (!WAR_HOSPITAL_ALERT_THRESHOLDS.includes(selected)) throw new Error("Choose 1, 3, or 5 minutes.");
+        if (state.warHospitalAlertSettings.thresholdMinutes !== selected) {
+            await clearScheduledWarHospitalAlerts();
+        }
+        state.warHospitalAlertSettings.thresholdMinutes = selected;
+        state.warHospitalAlertSettings.enabled = true;
+        persistWarHospitalAlertSettings();
+        void refreshWarTargets();
+    }
+
+    async function deliverWarHospitalAlert(candidate, war, { persist = true } = {}) {
+        const settings = state.warHospitalAlertSettings;
+        if (settings.deliveredEvents?.[candidate.eventKey]) return false;
+        if (!targetMatchesWarHospitalAlertView(candidate.target)) return false;
+        const notificationId = getWarHospitalAlertNotificationId(candidate.targetId);
+        if (notificationId === null) return false;
+        const title = "FFScouter hospital release";
+        const text = getWarHospitalAlertText(candidate.target, candidate.status, settings.thresholdMinutes, true);
+        const url = getWarHospitalAlertUrl(candidate.targetId);
+        let delivered = false;
+        if (canUseNativePdaFeatures()) {
+            try {
+                delivered = await scheduleNativeWarHospitalAlert(candidate, notificationId, Date.now() + 1_000, true);
+                if (delivered) void showNativeToast(text, "info");
+            } catch (error) {
+                warnLog("Native hospital alert delivery failed", { error: safeErrorMessage(error) });
+            }
+        }
+        if (!delivered) delivered = await showDesktopWarHospitalNotification(title, text, notificationId, url);
+        settings.deliveredEvents[candidate.eventKey] = Date.now();
+        delete settings.scheduledTargets[String(candidate.targetId)];
+        clearWarHospitalAlertTimer(candidate.targetId);
+        pruneWarHospitalAlertSettings();
+        if (persist) persistWarHospitalAlertSettings();
+        debugLog("FFScouter hospital alert delivered", {
+            delivered,
+            delivery: canUseNativePdaFeatures() ? "native" : "desktop",
+            notificationId,
+            targetId: candidate.targetId,
+            warId: Number(war?.warId || 0)
+        });
+        return delivered;
+    }
+
+    function scheduleDesktopWarHospitalAlert(candidate, war, notificationId) {
+        const targetId = String(candidate.targetId);
+        clearWarHospitalAlertTimer(targetId);
+        const delay = Math.max(0, candidate.triggerAt - Date.now());
+        const timer = window.setTimeout(() => {
+            state.warHospitalAlertTimers.delete(targetId);
+            void deliverWarHospitalAlert(candidate, war);
+        }, delay);
+        state.warHospitalAlertTimers.set(targetId, { eventKey: candidate.eventKey, timer });
+        return {
+            eventKey: candidate.eventKey,
+            notificationId,
+            timestamp: candidate.triggerAt,
+            delivery: "desktop"
+        };
+    }
+
+    async function reconcileWarHospitalAlerts(targets, war) {
+        const settings = state.warHospitalAlertSettings;
+        const now = Date.now();
+        if (!settings.enabled || !WAR_HOSPITAL_ALERT_THRESHOLDS.includes(settings.thresholdMinutes)) {
+            await clearScheduledWarHospitalAlerts();
+            return false;
+        }
+        const candidates = getWarHospitalAlertCandidates(targets, war, now);
+        const byTargetId = new Map(candidates.map((candidate) => [String(candidate.targetId), candidate]));
+
+        for (const [targetId, record] of Object.entries(settings.scheduledTargets || {})) {
+            const candidate = byTargetId.get(targetId);
+            const isCurrent = candidate
+                && candidate.eventKey === record.eventKey
+                && Number(record.timestamp) === Number(candidate.triggerAt);
+            if (isCurrent) continue;
+            clearWarHospitalAlertTimer(targetId);
+            await cancelNativeWarHospitalAlert(record);
+            delete settings.scheduledTargets[targetId];
+        }
+
+        for (const candidate of candidates) {
+            const targetId = String(candidate.targetId);
+            const existing = settings.scheduledTargets[targetId];
+            if (candidate.triggerAt <= now) {
+                if (existing?.delivery === "native" && existing.eventKey === candidate.eventKey && canUseNativePdaFeatures()) {
+                    settings.deliveredEvents[candidate.eventKey] = now;
+                    delete settings.scheduledTargets[targetId];
+                    clearWarHospitalAlertTimer(targetId);
+                    continue;
+                }
+                await deliverWarHospitalAlert(candidate, war, { persist: false });
+                continue;
+            }
+            const notificationId = getWarHospitalAlertNotificationId(candidate.targetId);
+            if (notificationId === null) continue;
+            if (canUseNativePdaFeatures()) {
+                if (existing?.delivery === "native" && existing.eventKey === candidate.eventKey && Number(existing.timestamp) === Number(candidate.triggerAt)) continue;
+                if (existing) await cancelNativeWarHospitalAlert(existing);
+                try {
+                    await scheduleNativeWarHospitalAlert(candidate, notificationId, candidate.triggerAt);
+                    clearWarHospitalAlertTimer(targetId);
+                    settings.scheduledTargets[targetId] = {
+                        eventKey: candidate.eventKey,
+                        notificationId,
+                        timestamp: candidate.triggerAt,
+                        delivery: "native"
+                    };
+                } catch (error) {
+                    warnLog("Native hospital alert scheduling failed", { error: safeErrorMessage(error) });
+                    settings.scheduledTargets[targetId] = scheduleDesktopWarHospitalAlert(candidate, war, notificationId);
+                }
+            } else if (existing?.delivery !== "desktop" || existing.eventKey !== candidate.eventKey || Number(existing.timestamp) !== Number(candidate.triggerAt) || !state.warHospitalAlertTimers.has(targetId)) {
+                settings.scheduledTargets[targetId] = scheduleDesktopWarHospitalAlert(candidate, war, notificationId);
+            }
+        }
+        pruneWarHospitalAlertSettings(now);
+        persistWarHospitalAlertSettings();
+        return true;
+    }
+
+    function syncWarHospitalAlertsFromFreshData() {
+        if (state.warHospitalAlertSyncPromise) {
+            state.warHospitalAlertSyncQueued = true;
+            return state.warHospitalAlertSyncPromise;
+        }
+        state.warHospitalAlertSyncPromise = Promise.resolve()
+            .then(() => {
+                const faction = state.caches.faction || {};
+                const targets = faction.warTargets?.targets || [];
+                const war = faction.war || faction.warTargets?.war || null;
+                return reconcileWarHospitalAlerts(targets, war);
+            })
+            .catch((error) => {
+                warnLog("FFScouter hospital alert reconciliation failed", { error: safeErrorMessage(error) });
+                return false;
+            })
+            .finally(() => {
+                state.warHospitalAlertSyncPromise = null;
+                if (state.warHospitalAlertSyncQueued) {
+                    state.warHospitalAlertSyncQueued = false;
+                    void syncWarHospitalAlertsFromFreshData();
+                }
+            });
+        return state.warHospitalAlertSyncPromise;
     }
 
     function getCrossOriginTransport() {
@@ -2846,7 +3229,7 @@
                 <div style="border: 1px solid #2f3540; border-radius: 8px; padding: 10px; background: rgba(20,20,20,0.7);">
                     <div style="display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; margin-bottom: 5px;">
                         <div style="color: #fff; font-size: 12px; line-height: 1.3; font-weight: 800; overflow-wrap: anywhere;">${escapeHtml(String(icon?.title || "Untitled Status"))}</div>
-                        <div style="color: #9dd8ff; border: 1px solid #35445a; border-radius: 999px; padding: 2px 6px; font-size: 9px; font-weight: 800; white-space: nowrap;">ID ${icon?.id === undefined || icon?.id === null ? "—" : formatInteger(icon.id)}</div>
+                        <div style="color: #9dd8ff; border: 1px solid #35445a; border-radius: 999px; padding: 2px 6px; font-size: 9px; font-weight: 800; white-space: nowrap;">ID ${icon?.id === undefined || icon?.id === null ? "—" : formatIdentifier(icon.id)}</div>
                     </div>
                     <div style="color: #d0d0d0; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; white-space: normal;">${formatStatusIconDescription(icon?.description)}</div>
                     <div style="color: ${expiryColor}; font-size: 9px; line-height: 1.35; margin-top: 7px; overflow-wrap: anywhere;">${expiry}</div>
@@ -3307,7 +3690,7 @@
         const points = Number(money.points ?? 0);
 
         const topCards = [
-            buildStatCard("Player", profile.name || "Unknown", `Player ID ${formatInteger(playerId)}`),
+            buildStatCard("Player", profile.name || "Unknown", `Player ID ${formatIdentifier(playerId)}`),
             buildStatCard("Level", profile.level || "-", "Current level", "#7fe18d"),
             buildStatCard("Job", jobName, jobSubtext)
         ].join("");
@@ -3501,20 +3884,54 @@
     }
 
     function filterWarTargets(targets) {
-        const minText = String(state.warTargetFFRange?.min ?? "").trim();
-        const maxText = String(state.warTargetFFRange?.max ?? "").trim();
-        const minFF = minText === "" ? null : Number(minText);
-        const maxFF = maxText === "" ? null : Number(maxText);
-        const hasMin = Number.isFinite(minFF);
-        const hasMax = Number.isFinite(maxFF);
+        const rangeMetric = state.warTargetRangeMetric === "bs" ? "bs" : "ff";
+        const selectedRange = rangeMetric === "bs" ? state.warTargetBSRange : state.warTargetFFRange;
+        const minText = String(selectedRange?.min ?? "").trim();
+        const maxText = String(selectedRange?.max ?? "").trim();
+        let minValue = minText === "" ? null : Number(minText);
+        let maxValue = maxText === "" ? null : Number(maxText);
+        const hasMin = Number.isFinite(minValue);
+        const hasMax = Number.isFinite(maxValue);
+        if (hasMin && hasMax && minValue > maxValue) [minValue, maxValue] = [maxValue, minValue];
         return targets.filter((target) => {
             const keys = getWarTargetFilterKeys(target);
             if (state.warTargetFilters[keys.status] === false || state.warTargetFilters[keys.online] === false) return false;
             if (!hasMin && !hasMax) return true;
-            const fairFight = Number(target?.fairFight);
-            if (!Number.isFinite(fairFight) || fairFight <= 0) return false;
-            return (!hasMin || fairFight >= minFF) && (!hasMax || fairFight <= maxFF);
+            const rangeValue = Number(rangeMetric === "bs" ? target?.battleStats : target?.fairFight);
+            if (!Number.isFinite(rangeValue) || rangeValue <= 0) return false;
+            return (!hasMin || rangeValue >= minValue) && (!hasMax || rangeValue <= maxValue);
         });
+    }
+
+    function getWarHospitalAlertEventKey(war, target, status) {
+        return `${formatIdentifier(war?.warId, "0")}:${formatIdentifier(target?.id, "0")}:${Math.round(Number(status?.untilMs) || 0)}`;
+    }
+
+    function targetMatchesWarHospitalAlertView(target, now = Date.now()) {
+        const status = getWarTargetStatus(target);
+        return status.kind === "hospital"
+            && status.untilMs > now
+            && filterWarTargets([target]).length === 1;
+    }
+
+    function getWarHospitalAlertCandidates(targets, war, now = Date.now()) {
+        const settings = state.warHospitalAlertSettings;
+        const thresholdMinutes = Math.round(Number(settings?.thresholdMinutes));
+        if (!settings?.enabled || !WAR_HOSPITAL_ALERT_THRESHOLDS.includes(thresholdMinutes)) return [];
+        return filterWarTargets(Array.isArray(targets) ? targets : [])
+            .map((target) => {
+                const targetId = Math.trunc(Number(target?.id));
+                const status = getWarTargetStatus(target);
+                if (!Number.isSafeInteger(targetId) || targetId <= 0 || status.kind !== "hospital" || status.untilMs <= now) return null;
+                return {
+                    target,
+                    targetId,
+                    status,
+                    eventKey: getWarHospitalAlertEventKey(war, target, status),
+                    triggerAt: status.untilMs - (thresholdMinutes * 60 * 1000)
+                };
+            })
+            .filter(Boolean);
     }
 
     function getWarTargetSortValue(target, key) {
@@ -3690,7 +4107,7 @@
     function renderWarTargetCell(key, target, display) {
         switch (key) {
             case "player":
-                return `<td class="nfc-war-target-cell nfc-war-target-player" style="padding:8px 7px;overflow:hidden;"><a href="https://www.torn.com/profiles.php?XID=${target.id}" target="_blank" rel="noopener noreferrer" style="color:#9dd8ff;font-weight:800;text-decoration:none;overflow-wrap:anywhere;">${escapeHtml(target.name)}</a><div style="color:#7f8996;font-size:9px;white-space:nowrap;">ID ${formatInteger(target.id)} · Level ${formatInteger(target.level)}</div></td>`;
+                return `<td class="nfc-war-target-cell nfc-war-target-player" style="padding:8px 7px;overflow:hidden;"><a href="https://www.torn.com/profiles.php?XID=${target.id}" target="_blank" rel="noopener noreferrer" style="color:#9dd8ff;font-weight:800;text-decoration:none;overflow-wrap:anywhere;">${escapeHtml(target.name)}</a><div style="color:#7f8996;font-size:9px;white-space:nowrap;">ID ${formatIdentifier(target.id)} · Level ${formatInteger(target.level)}</div></td>`;
             case "online":
                 return `<td class="nfc-war-target-cell nfc-war-target-online nfc-online-${escapeHtml(String(display.online || "unknown").toLowerCase())}" style="padding:8px 7px;color:${display.onlineColor};font-weight:800;overflow:hidden;">${escapeHtml(display.online)}<div style="color:#7f8996;font-size:9px;font-weight:500;overflow-wrap:anywhere;">${escapeHtml(target.lastAction?.relative || "")}</div></td>`;
             case "status":
@@ -3738,15 +4155,41 @@
                 ${group.options.map(([key, label]) => `<label class="ntc-war-target-filter-option" style="display:inline-flex;align-items:center;gap:4px;border:1px solid #3a424d;border-radius:999px;padding:3px 6px;background:rgba(255,255,255,.035);color:#d7dde5;font-size:9px;font-weight:700;cursor:pointer;white-space:nowrap;"><input data-war-target-filter="${key}" type="checkbox" ${state.warTargetFilters[key] !== false ? "checked" : ""} style="width:12px;height:12px;margin:0;accent-color:#5ba7f7;cursor:pointer;">${label}</label>`).join("")}
             </div>
         `).join("");
-        const ffRangeActive = String(state.warTargetFFRange.min).trim() !== "" || String(state.warTargetFFRange.max).trim() !== "";
-        const ffRangePanel = `
+        const rangeMetric = state.warTargetRangeMetric === "bs" ? "bs" : "ff";
+        const selectedRange = rangeMetric === "bs" ? state.warTargetBSRange : state.warTargetFFRange;
+        const rangeActive = String(selectedRange.min).trim() !== "" || String(selectedRange.max).trim() !== "";
+        const rangeLabel = rangeMetric === "bs" ? "Est. BS Range" : "FF Range";
+        const rangeStep = rangeMetric === "bs" ? "1" : "0.01";
+        const rangePanel = `
             <div class="ntc-war-ff-range" style="display:flex;align-items:center;gap:5px;flex:1 1 205px;min-width:0;flex-wrap:wrap;">
-                <span class="ntc-war-filter-group-label" style="color:#929eac;font-size:9px;font-weight:850;text-transform:uppercase;letter-spacing:.45px;min-width:48px;">FF Range</span>
-                <input id="war-ff-min-input" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(state.warTargetFFRange.min)}" placeholder="Min" aria-label="Minimum Fair Fight score" style="width:58px;min-width:52px;background:#111820;border:1px solid #3a424d;border-radius:5px;color:#d7dde5;padding:4px 5px;font-size:9px;">
+                <span class="ntc-war-filter-group-label" style="color:#929eac;font-size:9px;font-weight:850;text-transform:uppercase;letter-spacing:.45px;min-width:48px;">Range</span>
+                <select id="war-target-range-metric-select" aria-label="Range metric" style="max-width:76px;background:#111820;border:1px solid #3a424d;border-radius:5px;color:#d7dde5;padding:4px 5px;font-size:9px;"><option value="ff" ${rangeMetric === "ff" ? "selected" : ""}>FF</option><option value="bs" ${rangeMetric === "bs" ? "selected" : ""}>Est. BS</option></select>
+                <input id="war-ff-min-input" type="number" min="0" step="${rangeStep}" inputmode="decimal" value="${escapeHtml(selectedRange.min)}" placeholder="Min" aria-label="Minimum ${escapeHtml(rangeLabel)}" style="width:58px;min-width:52px;background:#111820;border:1px solid #3a424d;border-radius:5px;color:#d7dde5;padding:4px 5px;font-size:9px;">
                 <span style="color:#697582;font-size:9px;">to</span>
-                <input id="war-ff-max-input" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(state.warTargetFFRange.max)}" placeholder="Max" aria-label="Maximum Fair Fight score" style="width:58px;min-width:52px;background:#111820;border:1px solid #3a424d;border-radius:5px;color:#d7dde5;padding:4px 5px;font-size:9px;">
-                <button id="clear-war-ff-range-btn" type="button" ${ffRangeActive ? "" : "disabled"} style="border:1px solid #3a424d;border-radius:5px;background:${ffRangeActive ? "#303944" : "#20262d"};color:${ffRangeActive ? "#d7dde5" : "#697582"};padding:4px 6px;font-size:9px;cursor:${ffRangeActive ? "pointer" : "default"};">${ffRangeActive ? "Clear" : "Off"}</button>
+                <input id="war-ff-max-input" type="number" min="0" step="${rangeStep}" inputmode="decimal" value="${escapeHtml(selectedRange.max)}" placeholder="Max" aria-label="Maximum ${escapeHtml(rangeLabel)}" style="width:58px;min-width:52px;background:#111820;border:1px solid #3a424d;border-radius:5px;color:#d7dde5;padding:4px 5px;font-size:9px;">
+                <button id="clear-war-ff-range-btn" type="button" ${rangeActive ? "" : "disabled"} style="border:1px solid #3a424d;border-radius:5px;background:${rangeActive ? "#303944" : "#20262d"};color:${rangeActive ? "#d7dde5" : "#697582"};padding:4px 6px;font-size:9px;cursor:${rangeActive ? "pointer" : "default"};">${rangeActive ? "Clear" : "Off"}</button>
             </div>
+        `;
+        const hospitalAlertSettings = state.warHospitalAlertSettings;
+        const hospitalAlertMinutes = hospitalAlertSettings.thresholdMinutes;
+        const hospitalAlertsEnabled = hospitalAlertSettings.enabled && WAR_HOSPITAL_ALERT_THRESHOLDS.includes(hospitalAlertMinutes);
+        const hospitalAlertSummary = hospitalAlertMinutes
+            ? `At ${formatInteger(hospitalAlertMinutes)} minute${hospitalAlertMinutes === 1 ? "" : "s"} left · matches this visible view`
+            : "Choose 1, 3, or 5 minutes when enabling";
+        const hospitalAlertPanel = `
+            <div class="ntc-war-hospital-alert-panel" style="display:flex;align-items:center;gap:6px;flex:1 1 260px;min-width:0;flex-wrap:wrap;padding:5px 6px;border:1px solid #3a546d;border-radius:7px;background:rgba(47,91,138,.12);">
+                <label style="display:inline-flex;align-items:center;gap:5px;color:#e4f0ff;font-size:9px;font-weight:800;cursor:pointer;white-space:nowrap;"><input id="war-hospital-alert-toggle" type="checkbox" ${hospitalAlertsEnabled ? "checked" : ""} style="margin:0;accent-color:#5ba7f7;cursor:pointer;">Hospital alerts</label>
+                <button id="war-hospital-alert-time-btn" type="button" ${hospitalAlertsEnabled ? "" : "disabled"} style="border:1px solid #4f7397;border-radius:5px;background:${hospitalAlertsEnabled ? "#294a6d" : "#20262d"};color:${hospitalAlertsEnabled ? "#e4f0ff" : "#697582"};padding:3px 6px;font-size:9px;font-weight:800;cursor:${hospitalAlertsEnabled ? "pointer" : "default"};">${hospitalAlertMinutes ? `${formatInteger(hospitalAlertMinutes)} min` : "Choose"}</button>
+                <span style="color:#9fb8d1;font-size:8px;line-height:1.3;overflow-wrap:anywhere;">${escapeHtml(hospitalAlertSummary)}</span>
+            </div>
+            <dialog id="war-hospital-alert-time-dialog" class="nfc-scroll-region" aria-label="Choose hospital alert time" style="width:min(340px,calc(100vw - 32px));max-width:calc(100vw - 32px);border:1px solid #4a657f;border-radius:10px;padding:0;background:#182337;color:#f4f8ff;box-shadow:0 18px 60px rgba(0,0,0,.58);">
+                <div style="display:grid;gap:10px;padding:14px;">
+                    <div style="font-size:13px;font-weight:900;">Hospital alert time</div>
+                    <div style="color:#b9c7d8;font-size:10px;line-height:1.45;">Notify when a visible hospitalized enemy has this much time left. Your current status, activity, FF/BS range, and other FFScouter filters still apply.</div>
+                    <div style="display:flex;gap:7px;flex-wrap:wrap;">${WAR_HOSPITAL_ALERT_THRESHOLDS.map((minutes) => `<button data-war-hospital-alert-threshold="${minutes}" type="button" style="background:#315987;color:#fff;border:1px solid #5c96dc;border-radius:6px;padding:7px 10px;font-size:10px;font-weight:800;cursor:pointer;">${formatInteger(minutes)} min</button>`).join("")}</div>
+                    <button id="cancel-war-hospital-alert-time-btn" type="button" style="justify-self:end;background:#59616d;color:#fff;border:none;border-radius:6px;padding:6px 10px;font-size:10px;font-weight:700;cursor:pointer;">Cancel</button>
+                </div>
+            </dialog>
         `;
         const rows = targets.map((target) => {
             const online = String(target.lastAction?.status || "Unknown");
@@ -3782,7 +4225,8 @@
                         <div class="ntc-war-target-filter-panel nfc-ffscouter-filter-panel" style="display:flex;align-items:center;gap:7px 12px;flex-wrap:wrap;">
                             <div class="nfc-ffscouter-sort-summary" style="display:grid;gap:1px;flex:0 0 auto;"><span class="ntc-war-filter-heading" style="color:#fff;font-size:10px;font-weight:900;">Sort &amp; View</span><span style="color:#697582;font-size:8px;white-space:nowrap;">${escapeHtml(activeSort.label)} · ${sortDirection}</span></div>
                             ${filterPanel}
-                            ${ffRangePanel}
+                            ${rangePanel}
+                            ${hospitalAlertPanel}
                         </div>
                         <div class="nfc-ffscouter-stat-grid" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;">${buildStatCard("Online / Idle", onlineCount, "Live Torn status", "#7fe18d")}${buildStatCard("Healthy", okayCount, "Status: Okay", "#5ba7f7")}</div>
                         ${notices.map((notice) => `<div style="color:#e0a25e;font-size:10px;line-height:1.4;">⚠ ${escapeHtml(notice)}</div>`).join("")}
@@ -3808,7 +4252,7 @@
         const membersCount = Number(factionBasic.members ?? members.length ?? 0);
         const respect = Number(factionBasic.respect ?? getStatValue(factionStats, "respect") ?? 0);
         const cards = [
-            buildStatCard("Faction", factionBasic.name || userFaction.name || userFaction.faction_name || "Unknown", `ID ${factionBasic.id || userFaction.id || userFaction.faction_id ? formatInteger(factionBasic.id || userFaction.id || userFaction.faction_id) : "-"}`),
+            buildStatCard("Faction", factionBasic.name || userFaction.name || userFaction.faction_name || "Unknown", `ID ${factionBasic.id || userFaction.id || userFaction.faction_id ? formatIdentifier(factionBasic.id || userFaction.id || userFaction.faction_id) : "-"}`),
             buildStatCard("Members", membersCount, "Current member count"),
             buildStatCard("Respect", respect, "Faction respect")
         ].join("");
@@ -3873,7 +4317,7 @@
         const weeklyIncome = Number(income.weekly || 0);
         const financialNote = "Estimated using current ads budget and wages — actual profit may differ if these were changed during the week.";
         const cards = [
-            buildStatCard("Company", profile.name || "Unknown", `ID ${profile.id ? formatInteger(profile.id) : "-"}`),
+            buildStatCard("Company", profile.name || "Unknown", `ID ${profile.id ? formatIdentifier(profile.id) : "-"}`),
             buildStatCard("Type & Rating", companyType, rating ? `${formatInteger(rating)}★ rating` : "No rating available"),
             buildStatCard("Employees", `${formatInteger(currentRoster)} / ${formatInteger(maxRoster)}`, "Current roster / max roster"),
             buildStatCard("Stock", stockTotal, "Total stock quantity"),
@@ -4162,6 +4606,12 @@
                         <div id="native-reminder-status" style="color:#aaa;font-size:10px;line-height:1.4;">${escapeHtml(nativeReminderStatus)}</div>
                     </div>
                     <div style="border: 1px solid #3d3d3d; border-radius: 6px; padding: 10px; display: grid; gap: 7px;">
+                        <div style="color: #fff; font-weight: 700; font-size: 12px;">FFScouter hospital alerts</div>
+                        <div style="color:#aaa;font-size:11px;line-height:1.45;">${state.warHospitalAlertSettings.enabled ? `Enabled at ${formatInteger(state.warHospitalAlertSettings.thresholdMinutes)} minute${state.warHospitalAlertSettings.thresholdMinutes === 1 ? "" : "s"} left.` : "Disabled."} Alerts only use enemies currently included by the FFScouter view filters and FF/estimated-BS range.</div>
+                        <div style="color:#7f99b5;font-size:10px;line-height:1.4;">TornPDA queues native alerts from a fresh active scan; desktop alerts are best effort while this page remains open.</div>
+                        <button id="reset-war-hospital-alerts-btn" type="button" style="justify-self:start;background:#59616d;color:#fff;border:none;border-radius:6px;padding:8px 10px;font-size:11px;cursor:pointer;">Reset Hospital Alert Preference</button>
+                    </div>
+                    <div style="border: 1px solid #3d3d3d; border-radius: 6px; padding: 10px; display: grid; gap: 7px;">
                         <div style="color: #fff; font-weight: 700; font-size: 12px;">Window</div>
                         <div style="color: #aaa; font-size: 11px; line-height: 1.4;">Clears every saved size and position for every tab, then re-applies the default layout for this device (the safe visual viewport in TornPDA, a floating panel on desktop).</div>
                         <button id="reset-window-size-btn" style="background: #a13b3b; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Reset Window Size &amp; Position</button>
@@ -4345,6 +4795,7 @@
         const scheduleNativeReminderButton = document.getElementById("schedule-native-reminder-btn");
         const cancelNativeReminderButton = document.getElementById("cancel-native-reminder-btn");
         const nativeReminderStatus = document.getElementById("native-reminder-status");
+        const resetWarHospitalAlertsButton = document.getElementById("reset-war-hospital-alerts-btn");
         const backupIncludeKeysInput = document.getElementById("backup-include-api-keys-input");
         const downloadLocalBackupButton = document.getElementById("download-local-backup-btn");
         const chooseLocalBackupButton = document.getElementById("choose-local-backup-btn");
@@ -4529,6 +4980,27 @@
                     state.sectionStatus.settings = message;
                 } finally {
                     cancelNativeReminderButton.disabled = false;
+                }
+            };
+        }
+
+        if (resetWarHospitalAlertsButton && !resetWarHospitalAlertsButton.dataset.bound) {
+            resetWarHospitalAlertsButton.dataset.bound = "true";
+            resetWarHospitalAlertsButton.onclick = async () => {
+                resetWarHospitalAlertsButton.disabled = true;
+                try {
+                    await disableWarHospitalAlerts({ resetPreference: true });
+                    const message = "FFScouter hospital alert preference reset.";
+                    state.sectionStatus.settings = message;
+                    setUserStatus(status, message, "success");
+                    renderTabContent();
+                } catch (error) {
+                    const message = `Hospital alert reset failed: ${safeErrorMessage(error)}`;
+                    state.sectionStatus.settings = message;
+                    setUserStatus(status, message, "error");
+                    warnLog("Hospital alert reset failed", { error: safeErrorMessage(error) });
+                } finally {
+                    resetWarHospitalAlertsButton.disabled = false;
                 }
             };
         }
@@ -4778,6 +5250,7 @@
                 lastRefresh: state.lastRefreshBySection.faction,
                 status: state.sectionStatus.faction
             });
+            if (!refreshed.liveError) void syncWarHospitalAlertsFromFreshData();
             if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") renderTabContent();
             return true;
         } catch (error) {
@@ -4811,41 +5284,126 @@
                 state.warTargetFilters = { ...state.warTargetFilters, [key]: input.checked };
                 setStoredDashboardState({ warTargetFilters: state.warTargetFilters });
                 renderTabContent();
+                void refreshWarTargets();
             };
         });
         const minFFInput = document.getElementById("war-ff-min-input");
         const maxFFInput = document.getElementById("war-ff-max-input");
         const clearFFRangeButton = document.getElementById("clear-war-ff-range-btn");
-        const saveFFRange = () => {
-            const normalizeFFBound = (value) => {
+        const rangeMetricSelect = document.getElementById("war-target-range-metric-select");
+        const hospitalAlertToggle = document.getElementById("war-hospital-alert-toggle");
+        const hospitalAlertTimeButton = document.getElementById("war-hospital-alert-time-btn");
+        const hospitalAlertTimeDialog = document.getElementById("war-hospital-alert-time-dialog");
+        const hospitalAlertThresholdButtons = contentEl.querySelectorAll("[data-war-hospital-alert-threshold]");
+        const cancelHospitalAlertTimeButton = document.getElementById("cancel-war-hospital-alert-time-btn");
+        const saveWarTargetRange = () => {
+            const metric = state.warTargetRangeMetric === "bs" ? "bs" : "ff";
+            const normalizeRangeBound = (value) => {
                 const text = String(value || "").trim();
                 if (!text) return "";
                 const number = Number(text);
-                return Number.isFinite(number) ? String(Math.max(0, number)) : "";
+                if (!Number.isFinite(number)) return "";
+                const normalized = Math.max(0, number);
+                return metric === "bs" ? String(Math.round(normalized)) : String(normalized);
             };
-            let min = normalizeFFBound(minFFInput?.value);
-            let max = normalizeFFBound(maxFFInput?.value);
+            let min = normalizeRangeBound(minFFInput?.value);
+            let max = normalizeRangeBound(maxFFInput?.value);
             if (min !== "" && max !== "" && Number(min) > Number(max)) [min, max] = [max, min];
-            state.warTargetFFRange = { min, max };
-            setStoredDashboardState({ warTargetFFRange: state.warTargetFFRange });
+            if (metric === "bs") {
+                state.warTargetBSRange = { min, max };
+                setStoredDashboardState({ warTargetBSRange: state.warTargetBSRange });
+            } else {
+                state.warTargetFFRange = { min, max };
+                setStoredDashboardState({ warTargetFFRange: state.warTargetFFRange });
+            }
             renderTabContent();
+            void refreshWarTargets();
         };
-        if (minFFInput) minFFInput.onchange = saveFFRange;
-        if (maxFFInput) maxFFInput.onchange = saveFFRange;
+        if (rangeMetricSelect) rangeMetricSelect.onchange = () => {
+            state.warTargetRangeMetric = rangeMetricSelect.value === "bs" ? "bs" : "ff";
+            setStoredDashboardState({ warTargetRangeMetric: state.warTargetRangeMetric });
+            renderTabContent();
+            void refreshWarTargets();
+        };
+        if (minFFInput) minFFInput.onchange = saveWarTargetRange;
+        if (maxFFInput) maxFFInput.onchange = saveWarTargetRange;
         [minFFInput, maxFFInput].filter(Boolean).forEach((input) => {
             input.onwheel = (event) => {
                 event.preventDefault();
                 const step = Number(input.step) || 0.01;
                 const current = input.value === "" ? 0 : Number(input.value);
                 const next = Math.max(0, (Number.isFinite(current) ? current : 0) + (event.deltaY < 0 ? step : -step));
-                input.value = next.toFixed(2).replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
-                saveFFRange();
+                input.value = state.warTargetRangeMetric === "bs"
+                    ? String(Math.round(next))
+                    : next.toFixed(2).replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+                saveWarTargetRange();
             };
         });
         if (clearFFRangeButton) clearFFRangeButton.onclick = () => {
-            state.warTargetFFRange = { min: "", max: "" };
-            setStoredDashboardState({ warTargetFFRange: state.warTargetFFRange });
+            if (state.warTargetRangeMetric === "bs") {
+                state.warTargetBSRange = { min: "", max: "" };
+                setStoredDashboardState({ warTargetBSRange: state.warTargetBSRange });
+            } else {
+                state.warTargetFFRange = { min: "", max: "" };
+                setStoredDashboardState({ warTargetFFRange: state.warTargetFFRange });
+            }
             renderTabContent();
+            void refreshWarTargets();
+        };
+
+        const chooseHospitalAlertThreshold = async (minutes) => {
+            const selected = Math.round(Number(minutes));
+            if (!WAR_HOSPITAL_ALERT_THRESHOLDS.includes(selected)) return;
+            hospitalAlertTimeDialog?.close();
+            requestDesktopHospitalNotificationPermission();
+            try {
+                await enableWarHospitalAlerts(selected);
+                state.sectionStatus.faction = `Hospital alerts enabled at ${formatInteger(selected)} minute${selected === 1 ? "" : "s"} left.`;
+                renderTabContent();
+            } catch (error) {
+                state.sectionStatus.faction = `Hospital alerts could not be enabled: ${safeErrorMessage(error)}`;
+                warnLog("Hospital alert enablement failed", { error: safeErrorMessage(error) });
+                renderTabContent();
+            }
+        };
+        const openHospitalAlertTimeDialog = (intent) => {
+            if (hospitalAlertTimeDialog?.showModal) {
+                hospitalAlertTimeDialog.dataset.intent = intent;
+                if (!hospitalAlertTimeDialog.open) hospitalAlertTimeDialog.showModal();
+                return;
+            }
+            const selected = Math.round(Number(window.prompt("Notify with how much hospital time left? Enter 1, 3, or 5.", String(state.warHospitalAlertSettings.thresholdMinutes || 3))));
+            if (WAR_HOSPITAL_ALERT_THRESHOLDS.includes(selected)) {
+                void chooseHospitalAlertThreshold(selected);
+            } else if (intent === "enable" && hospitalAlertToggle) {
+                hospitalAlertToggle.checked = false;
+            }
+        };
+        if (hospitalAlertToggle) hospitalAlertToggle.onchange = async () => {
+            if (!hospitalAlertToggle.checked) {
+                await disableWarHospitalAlerts();
+                state.sectionStatus.faction = "Hospital alerts disabled.";
+                renderTabContent();
+                return;
+            }
+            if (!WAR_HOSPITAL_ALERT_THRESHOLDS.includes(state.warHospitalAlertSettings.thresholdMinutes)) {
+                hospitalAlertToggle.checked = false;
+                openHospitalAlertTimeDialog("enable");
+                return;
+            }
+            requestDesktopHospitalNotificationPermission();
+            await enableWarHospitalAlerts(state.warHospitalAlertSettings.thresholdMinutes);
+            state.sectionStatus.faction = `Hospital alerts enabled at ${formatInteger(state.warHospitalAlertSettings.thresholdMinutes)} minute${state.warHospitalAlertSettings.thresholdMinutes === 1 ? "" : "s"} left.`;
+            renderTabContent();
+        };
+        if (hospitalAlertTimeButton) hospitalAlertTimeButton.onclick = () => openHospitalAlertTimeDialog("change");
+        hospitalAlertThresholdButtons.forEach((button) => {
+            button.onclick = () => void chooseHospitalAlertThreshold(button.getAttribute("data-war-hospital-alert-threshold"));
+        });
+        if (cancelHospitalAlertTimeButton) cancelHospitalAlertTimeButton.onclick = () => {
+            const intent = hospitalAlertTimeDialog?.dataset.intent;
+            hospitalAlertTimeDialog?.close();
+            if (intent === "enable" && hospitalAlertToggle) hospitalAlertToggle.checked = false;
         };
         contentEl.querySelectorAll("[data-war-target-sort]").forEach((header) => {
             header.onclick = (event) => {

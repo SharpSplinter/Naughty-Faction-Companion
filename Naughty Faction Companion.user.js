@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.0.42
+// @version      1.1.5
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -23,6 +23,7 @@
 // @run-at       document-start
 // @connect      api.torn.com
 // @connect      ffscouter.com
+// @connect      naughtybot.unifiedbot.net
 // ==/UserScript==
 
 (function() {
@@ -31,7 +32,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.0.42";
+    const SCRIPT_VERSION = "1.1.10";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -272,6 +273,8 @@
     const APP_STORAGE = {
         key: "NFC_V1_USER_KEY",
         ffscouterKey: "NFC_V1_FFSCOUTER_KEY",
+        staffApiBase: "NFC_V1_STAFF_API_BASE",
+        staffApiToken: "NFC_V1_STAFF_API_TOKEN",
         position: "NFC_V1_WIDGET_POS",
         dashboard: "NFC_V1_DASHBOARD_STATE",
         companyStockHistory: "NFC_V1_COMPANY_STOCK_HISTORY",
@@ -291,7 +294,8 @@
     // deduplicated: one response refreshes every view backed by that source.
     const AUTO_REFRESH_TARGETS = [
         { id: "faction:general", label: "Faction › General", section: "faction", defaultEnabled: true, defaultSeconds: 10 },
-        { id: "faction:ffscouter", label: "Faction › FFScouter", section: "warTargets", defaultEnabled: true, defaultSeconds: 30 }
+        { id: "faction:ffscouter", label: "Faction › FFScouter", section: "warTargets", defaultEnabled: true, defaultSeconds: 30 },
+        { id: "staff:overview", label: "Staff › Overview", section: "staff", defaultEnabled: true, defaultSeconds: 20 }
     ];
     const AUTO_REFRESH_DEFAULTS = Object.fromEntries(AUTO_REFRESH_TARGETS.map((target) => [target.id, {
         enabled: target.defaultEnabled,
@@ -395,6 +399,7 @@
         expandedCategories: new Set(),
         currentTab: "faction",
         factionSubTab: "general",
+        staffSubTab: "statuses",
         settingsSubTab: "controls",
         personalSubTab: "info",
         autoRefreshSettings: { ...AUTO_REFRESH_DEFAULTS },
@@ -421,6 +426,8 @@
         widgetPosition: null,
         dashboard: null,
         lastRefresh: null,
+        staffData: null,
+        staffStatus: "Not loaded",
         autoRefreshTimer: null,
         chainCountdownTimer: null,
         cooldownCountdownTimer: null,
@@ -439,6 +446,7 @@
             company: 0,
             inventory: 0,
             warTargets: 0,
+            staff: 0,
             all: 0
         },
         sectionStatus: {
@@ -1220,6 +1228,20 @@
         else void deleteStoredValue(APP_STORAGE.ffscouterKey);
     };
 
+    const getStoredStaffApiBase = () => state.staffApiBase || "";
+    const setStoredStaffApiBase = (url) => {
+        state.staffApiBase = String(url || "").trim().replace(/\/+$/, "");
+        if (state.staffApiBase) void gmSetValue(APP_STORAGE.staffApiBase, state.staffApiBase);
+        else void deleteStoredValue(APP_STORAGE.staffApiBase);
+    };
+
+    const getStoredStaffApiToken = () => state.staffApiToken || "";
+    const setStoredStaffApiToken = (token) => {
+        state.staffApiToken = String(token || "").trim();
+        if (state.staffApiToken) void gmSetValue(APP_STORAGE.staffApiToken, state.staffApiToken);
+        else void deleteStoredValue(APP_STORAGE.staffApiToken);
+    };
+
     const getStoredPosition = () => state.widgetPosition || null;
     const getStoredMinimizedPosition = (position = getStoredPosition()) => {
         const minimized = position && typeof position === "object" ? position.minimized : null;
@@ -1248,6 +1270,7 @@
         currentTab: state.currentTab,
         overviewSubTab: state.overviewSubTab,
         factionSubTab: state.factionSubTab,
+        staffSubTab: state.staffSubTab,
         settingsSubTab: state.settingsSubTab,
         personalSubTab: state.personalSubTab,
         theme: state.theme,
@@ -1270,6 +1293,7 @@
         if (payload && payload.currentTab) state.currentTab = payload.currentTab;
         if (payload && payload.overviewSubTab) state.overviewSubTab = payload.overviewSubTab;
         if (payload && payload.factionSubTab) state.factionSubTab = payload.factionSubTab;
+        if (payload && payload.staffSubTab) state.staffSubTab = payload.staffSubTab;
         if (payload && payload.settingsSubTab) state.settingsSubTab = payload.settingsSubTab;
         if (payload && payload.personalSubTab) state.personalSubTab = payload.personalSubTab;
         if (payload && payload.autoRefreshSettings && typeof payload.autoRefreshSettings === "object") {
@@ -1495,6 +1519,8 @@
         state.injectedApiKeyActive = Boolean(getInjectedTornPDAApiKey());
         state.ffscouterKey = (await gmGetValue(APP_STORAGE.ffscouterKey, "")) || "";
         state.ffscouterStatus = state.ffscouterKey ? "Saved · Not verified" : "Not configured";
+        state.staffApiBase = (await gmGetValue(APP_STORAGE.staffApiBase, "")) || "";
+        state.staffApiToken = (await gmGetValue(APP_STORAGE.staffApiToken, "")) || "";
         state.widgetPosition = await gmGetValue(APP_STORAGE.position, null);
         const savedDashboardState = await gmGetValue(APP_STORAGE.dashboard, { currentTab: "faction" });
         const dashboardState = savedDashboardState && typeof savedDashboardState === "object" && !Array.isArray(savedDashboardState)
@@ -1503,8 +1529,9 @@
         if (dashboardState !== savedDashboardState) {
             warnLog("Saved dashboard state was invalid; using safe defaults", { valueType: typeof savedDashboardState });
         }
-        state.currentTab = dashboardState.currentTab === "settings" ? "settings" : "faction";
+        state.currentTab = ["settings", "staff"].includes(dashboardState.currentTab) ? dashboardState.currentTab : "faction";
         state.factionSubTab = dashboardState.factionSubTab || state.factionSubTab;
+        state.staffSubTab = dashboardState.staffSubTab || state.staffSubTab;
         state.settingsSubTab = dashboardState.settingsSubTab || state.settingsSubTab;
         state.personalSubTab = dashboardState.personalSubTab || state.personalSubTab;
         state.autoRefreshSettings = Object.fromEntries(AUTO_REFRESH_TARGETS.map((target) => {
@@ -4644,21 +4671,38 @@
     async function refreshSectionByKey(sectionKey, statusEl) {
         if (!state.pageScopeActive || state.isMinimized) return false;
         const pageScopeEpoch = state.pageScopeEpoch;
-        const apiKey = getStoredKey();
-        debugLog("Manual section refresh requested", { sectionKey, apiKeyPresent: !!apiKey });
-        if (!apiKey) {
-            if (statusEl) statusEl.innerText = "⚠️ Enter a Torn API key first.";
-            return false;
-        }
+        debugLog("Manual section refresh requested", { sectionKey });
 
         if (statusEl) statusEl.innerText = `Refreshing ${sectionKey}...`;
 
         try {
             switch (sectionKey) {
                 case "faction": {
+                    // Torn key gate lives here (not at the top of the function) - it's
+                    // specific to sections that call api.torn.com directly with the
+                    // user's own key. The "staff" section below authenticates with the
+                    // separate staff API token instead, so it must not be blocked by a
+                    // missing personal Torn key.
+                    const apiKey = getStoredKey();
+                    if (!apiKey) {
+                        if (statusEl) statusEl.innerText = "⚠️ Enter a Torn API key first.";
+                        return false;
+                    }
                     const faction = await fetchFactionData(apiKey);
                     if (!isCurrentPageScope(pageScopeEpoch)) return false;
                     setSectionCache("faction", faction || state.caches.faction);
+                    break;
+                }
+                case "staff": {
+                    if (!getStoredStaffApiBase()) {
+                        if (statusEl) statusEl.innerText = "⚠️ Set a Staff API base URL in Settings first.";
+                        return false;
+                    }
+                    const staffData = await fetchStaffStatus();
+                    if (!isCurrentPageScope(pageScopeEpoch)) return false;
+                    state.staffData = staffData;
+                    state.lastRefreshBySection.staff = Date.now();
+                    state.staffStatus = `Updated ${new Date().toLocaleTimeString()}`;
                     break;
                 }
                 default:
@@ -4688,6 +4732,7 @@
 
     function getCurrentAutoRefreshTarget() {
         if (state.currentTab === "faction") return `faction:${state.factionSubTab}`;
+        if (state.currentTab === "staff") return "staff:overview";
         return null;
     }
 
@@ -4821,6 +4866,19 @@
                         </div>
                     </dialog>
                 </div>
+                <div style="border: 1px solid #3d3d3d; border-radius: 8px; padding: 11px; display: grid; gap: 9px; background: rgba(255,255,255,0.02);">
+                    <div>
+                        <div style="color: #fff; font-weight: 800; font-size: 13px;">Staff Dashboard</div>
+                        <div style="color: #aaa; font-size: 11px; line-height: 1.45; margin-top: 3px;">Enables the Staff tab. Base URL and token come from whoever runs your faction's NaughtyBot dashboard - ask a leader if you don't have these.</div>
+                    </div>
+                    <div style="display: flex; gap: 7px; flex-wrap: wrap;">
+                        <input type="text" id="staff-api-base-input" value="${escapeHtml(getStoredStaffApiBase())}" autocomplete="off" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 2 1 220px; min-width: 0; font-size: 11px;" placeholder="https://your-dashboard-host" />
+                        <input type="password" id="staff-api-token-input" value="${escapeHtml(getStoredStaffApiToken())}" autocomplete="off" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 1 1 140px; min-width: 0; font-size: 11px;" placeholder="Token (if required)" />
+                        <button id="save-staff-api-btn" style="background: #3b5998; color: white; border: none; border-radius: 6px; padding: 8px 11px; font-size: 11px; cursor: pointer;">Save</button>
+                        <button id="clear-staff-api-btn" style="background: #7a3535; color: white; border: none; border-radius: 6px; padding: 8px 11px; font-size: 11px; cursor: pointer;">Clear</button>
+                    </div>
+                    <div id="staff-api-status" style="color: #bfc7d1; font-size: 11px; line-height: 1.4;">${getStoredStaffApiBase() ? "Configured." : "Not configured - Staff tab is disabled."}</div>
+                </div>
             `;
         const refreshContent = `
                 <div style="display:grid;gap:9px;">
@@ -4950,6 +5008,11 @@
         const verifyFFScouterButton = document.getElementById("verify-ffscouter-key-btn");
         const clearFFScouterButton = document.getElementById("clear-ffscouter-key-btn");
         const ffscouterStatus = document.getElementById("ffscouter-key-status");
+        const staffApiBaseInput = document.getElementById("staff-api-base-input");
+        const staffApiTokenInput = document.getElementById("staff-api-token-input");
+        const saveStaffApiButton = document.getElementById("save-staff-api-btn");
+        const clearStaffApiButton = document.getElementById("clear-staff-api-btn");
+        const staffApiStatus = document.getElementById("staff-api-status");
         const ffscouterDialog = document.getElementById("ffscouter-verification-dialog");
         const ffscouterDialogTitle = document.getElementById("ffscouter-dialog-title");
         const ffscouterDialogSummary = document.getElementById("ffscouter-dialog-summary");
@@ -5085,6 +5148,30 @@
                 if (ffscouterKeyInput) ffscouterKeyInput.value = "";
                 setFFScouterStatus("Not configured");
                 setUserStatus(status, "FFScouter key cleared.", "success");
+            };
+        }
+
+        if (saveStaffApiButton && !saveStaffApiButton.dataset.bound) {
+            saveStaffApiButton.dataset.bound = "true";
+            saveStaffApiButton.onclick = () => {
+                setStoredStaffApiBase(staffApiBaseInput ? staffApiBaseInput.value : getStoredStaffApiBase());
+                setStoredStaffApiToken(staffApiTokenInput ? staffApiTokenInput.value : getStoredStaffApiToken());
+                if (staffApiStatus) {
+                    staffApiStatus.textContent = getStoredStaffApiBase() ? "Configured." : "Not configured - Staff tab is disabled.";
+                }
+                setUserStatus(status, "Staff API settings saved.", "success");
+            };
+        }
+
+        if (clearStaffApiButton && !clearStaffApiButton.dataset.bound) {
+            clearStaffApiButton.dataset.bound = "true";
+            clearStaffApiButton.onclick = () => {
+                setStoredStaffApiBase("");
+                setStoredStaffApiToken("");
+                if (staffApiBaseInput) staffApiBaseInput.value = "";
+                if (staffApiTokenInput) staffApiTokenInput.value = "";
+                if (staffApiStatus) staffApiStatus.textContent = "Not configured - Staff tab is disabled.";
+                setUserStatus(status, "Staff API settings cleared.", "success");
             };
         }
 
@@ -5787,7 +5874,8 @@
         personal: "Personal",
         faction: "Faction",
         company: "Company",
-        inventory: "Inventory"
+        inventory: "Inventory",
+        staff: "Staff"
     };
 
     function renderTabContent() {
@@ -5800,6 +5888,9 @@
         switch (state.currentTab) {
             case "faction":
                 innerHtml = renderFactionPanel();
+                break;
+            case "staff":
+                innerHtml = renderStaffPanel();
                 break;
             case "settings":
                 innerHtml = renderSettingsPanel();
@@ -5820,8 +5911,10 @@
         contentEl.innerHTML = innerHtml;
         bindSettingsControls();
         bindFactionControls();
+        bindStaffControls();
         bindSectionRefreshButtons();
         requestAnimationFrame(fitCurrentContentToWidget);
+        requestAnimationFrame(applyStaffAutoSize);
 
         if (state.currentTab === "faction") {
             startChainCountdownTimer();
@@ -5832,6 +5925,205 @@
         }
         if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") startWarTargetsRefreshTimer();
         else stopWarTargetsRefreshTimer();
+    }
+
+    // ── Staff tab (bot-fed, bare-bones - restyled later to match the rest
+    // of the panel) ──────────────────────────────────────────────────────
+    function fetchStaffStatus() {
+        // Not secureCustomFetch: that helper has no timeout at all, so a slow
+        // backend response (the revive check's Torn API fan-out can genuinely
+        // take a while - see staff_status.py) left the Refresh button stuck
+        // on "Refreshing..." forever with no way out. 20s caps it, matching
+        // the backend's own 15s cap on the slow part of the same request.
+        const base = getStoredStaffApiBase();
+        const token = getStoredStaffApiToken();
+        const url = `${base}/api/staff/status${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+        const requestLog = startApiRequest("GET", url);
+        return new Promise((resolve, reject) => {
+            try {
+                crossOriginRequest({
+                    method: "GET",
+                    url: url,
+                    headers: { Accept: "application/json" },
+                    timeout: 20000,
+                    onload: function(response) {
+                        if (response.status >= 200 && response.status < 300) {
+                            try {
+                                const data = JSON.parse(response.responseText);
+                                finishApiRequest(requestLog, response);
+                                resolve(data);
+                            } catch (error) {
+                                const failure = new Error("Failed to parse JSON");
+                                failApiRequest(requestLog, failure, response);
+                                reject(failure);
+                            }
+                        } else {
+                            const failure = new Error(`HTTP Status ${response.status}`);
+                            failApiRequest(requestLog, failure, response);
+                            reject(failure);
+                        }
+                    },
+                    onerror: (error) => {
+                        failApiRequest(requestLog, error);
+                        reject(error instanceof Error ? error : new Error("Could not reach staff API"));
+                    },
+                    ontimeout: () => {
+                        const failure = new Error("Staff API request timed out");
+                        failApiRequest(requestLog, failure);
+                        reject(failure);
+                    }
+                });
+            } catch (error) {
+                failApiRequest(requestLog, error);
+                reject(error);
+            }
+        });
+    }
+
+    const STAFF_SUBTABS = [
+        { id: "statuses", label: "Statuses" },
+        { id: "loans", label: "Loans" },
+        { id: "bleeders", label: "Bleeders" },
+        { id: "revives", label: "Revives" }
+    ];
+    const STAFF_ROW_TEXT_STYLE = "color:#e8edf5;";
+
+    function renderStaffPanel() {
+        if (!getStoredStaffApiBase()) {
+            return `
+                <div style="padding: 14px; color: #bfc7d1; font-size: 12px; line-height: 1.5;">
+                    Set a Staff API base URL (and token, if required) in the Settings tab to enable this tab.
+                </div>
+            `;
+        }
+
+        const data = state.staffData;
+        if (!data) {
+            return `<div style="padding: 14px; color: #bfc7d1; font-size: 12px;">${escapeHtml(state.staffStatus)}</div>`;
+        }
+
+        const members = data.members || [];
+        const loans = data.loans || [];
+        const bleeders = data.bleeders || [];
+        const revives = data.revives || [];
+        const wars = data.wars || [];
+        const reviveKeyConfigured = data.revive_key_configured !== false;
+        const hospitalizedCount = Number(data.hospitalized_count ?? revives.length);
+
+        const warsHtml = wars.map((war) => {
+            const surge = war.surge
+                ? `<div style="color:#ffce54;font-weight:700;">⚡ +${war.surge.amount} surge (${war.surge.seconds_ago}s ago)</div>`
+                : "";
+            return `
+                <div style="border:1px solid #3d3d3d;border-radius:6px;padding:8px;margin-bottom:6px;font-size:11px;">
+                    <div style="font-weight:700;color:#fff;">vs ${escapeHtml(war.enemy_name || "Enemy")}</div>
+                    <div style="${STAFF_ROW_TEXT_STYLE}">Us: 🟢${war.our.online} 🟡${war.our.idle} ⚫${war.our.offline}</div>
+                    <div style="${STAFF_ROW_TEXT_STYLE}">Them: 🟢${war.enemy.online} 🟡${war.enemy.idle} ⚫${war.enemy.offline}</div>
+                    ${surge}
+                </div>
+            `;
+        }).join("");
+
+        const subtabsHtml = STAFF_SUBTABS.map(({ id, label }) => `
+            <button data-staff-subtab="${id}" class="nfc-subtab${state.staffSubTab === id ? " is-active" : ""}" aria-current="${state.staffSubTab === id ? "page" : "false"}">${label}</button>
+        `).join("");
+
+        // A rigid multi-column table doesn't work at this panel's default width -
+        // four columns of real names/dates just get clipped instead of wrapping.
+        // Stacked rows (name on one line, detail on the next, wrapping freely)
+        // stay readable at any width, same idea as the bleeders/revives rows below.
+        const membersHtml = members.length ? members.map((m) => `
+            <div style="border-top:1px solid #2c3648;padding:4px 0;font-size:11px;${STAFF_ROW_TEXT_STYLE}">
+                <div style="font-weight:600;">${escapeHtml(m.name)} [${m.id}] <span style="font-weight:400;color:#9fb0c3;">· Lvl ${m.level ?? "?"}</span></div>
+                <div style="color:#9fb0c3;">${escapeHtml(m.status?.description || m.status?.state || "?")} · last action ${escapeHtml(m.last_action?.status || "?")}</div>
+            </div>
+        `).join("") : `<div style="color:#9fb0c3;font-size:11px;">No member data.</div>`;
+
+        const armoryKeyConfigured = data.armory_key_configured !== false;
+        let loansNote = "";
+        if (!armoryKeyConfigured) {
+            loansNote = `<div style="color:#e0a25e;font-size:10px;margin-bottom:5px;">⚠ No armory-access Torn key registered with the bot (TORN_ARMORY_API_KEY) - can't read live loan status.</div>`;
+        }
+        // Read straight from Torn's live armory state (same "Loaned" column as
+        // the in-game armory page) rather than reconstructed history, so there's
+        // no loan date to show here - only who currently has each item out.
+        const loansHtml = loans.length ? loans.map((l) => `
+            <div style="border-top:1px solid #2c3648;padding:4px 0;font-size:11px;${STAFF_ROW_TEXT_STYLE}">
+                <div style="font-weight:600;">${escapeHtml(l.weapon_name || "?")}</div>
+                <div style="color:#9fb0c3;">Loaned to ${escapeHtml(l.borrower_name || "?")}</div>
+            </div>
+        `).join("") : (armoryKeyConfigured ? `<div style="color:#9fb0c3;font-size:11px;">No items currently loaned out.</div>` : "");
+
+        const bleedersHtml = bleeders.length ? bleeders.map((b) => `
+            <div style="font-size:11px;padding:3px 0;${STAFF_ROW_TEXT_STYLE}">🩸 ${escapeHtml(b.name)} [${b.id}] - offline ${Math.round(b.minutes_offline)}m, ${b.bleeds} bleeds</div>
+        `).join("") : `<div style="color:#9fb0c3;font-size:11px;">No one is currently bleeding.</div>`;
+
+        // Three genuinely different states get collapsed into "the list is empty"
+        // otherwise, and they mean very different things to a leader: the bot has
+        // no way to check revive status at all, it checked and nobody qualifies,
+        // or nobody's hospitalised in the first place. Surface which one this is.
+        let revivesNote = "";
+        if (!reviveKeyConfigured) {
+            revivesNote = `<div style="color:#e0a25e;font-size:10px;margin-bottom:5px;">⚠ No revive-capable Torn key registered with the bot (TORN_REVIVE_API_KEY) - showing hospitalised members only, revive status unknown.</div>`;
+        } else if (hospitalizedCount === 0) {
+            revivesNote = `<div style="color:#9fb0c3;font-size:10px;margin-bottom:5px;">No faction members are currently hospitalised.</div>`;
+        } else if (!revives.length) {
+            revivesNote = `<div style="color:#9fb0c3;font-size:10px;margin-bottom:5px;">${hospitalizedCount} hospitalised, checked individually - none currently revivable.</div>`;
+        }
+        const revivesHtml = revives.length ? revives.map((r) => `
+            <div style="font-size:11px;padding:3px 0;${STAFF_ROW_TEXT_STYLE}">${r.revive_type === "global" ? "🌐" : r.revive_type === "faction" ? "👤" : "❔"} ${escapeHtml(r.name)} [${r.id}] - Lvl ${r.level ?? "?"} (${escapeHtml(r.revive_type)})${r.in_hospital ? ' <span style="color:#ff8a8a;">🏥 in hospital now</span>' : ""}</div>
+        `).join("") : "";
+
+        const sections = {
+            statuses: `<div><div style="color:#fff;font-weight:700;font-size:12px;margin-bottom:4px;">Statuses</div>${membersHtml}</div>`,
+            loans: `<div><div style="color:#fff;font-weight:700;font-size:12px;margin-bottom:4px;">Active Weapon Loans</div>${loansNote}${loansHtml}</div>`,
+            bleeders: `<div><div style="color:#fff;font-weight:700;font-size:12px;margin-bottom:4px;">Bleeders</div>${bleedersHtml}</div>`,
+            revives: `<div>
+                <div style="color:#fff;font-weight:700;font-size:12px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;">
+                    <span>Revive Still On</span>
+                    <button id="staff-copy-revive-msg-btn" type="button" style="background:#3b5998;color:#fff;border:none;border-radius:6px;padding:5px 9px;font-size:10px;cursor:pointer;">Copy Message</button>
+                </div>
+                ${revivesNote}${revivesHtml}
+            </div>`
+        };
+
+        return `
+            <div style="padding: 10px; display: grid; gap: 10px; align-content: start; overflow-y: auto;">
+                ${warsHtml}
+                <div class="nfc-subtabs">${subtabsHtml}</div>
+                ${sections[state.staffSubTab] || sections.statuses}
+            </div>
+        `;
+    }
+
+    function bindStaffControls() {
+        const copyBtn = document.getElementById("staff-copy-revive-msg-btn");
+        if (copyBtn) {
+            copyBtn.addEventListener("click", () => {
+                const revives = state.staffData?.revives || [];
+                const message = revives.length
+                    ? `Still have revives on, please turn them off: ${revives.map((r) => r.name).join(", ")}`
+                    : "No one is currently hospitalised with revives on.";
+                const resetLabel = () => { copyBtn.textContent = "Copy Message"; };
+                navigator.clipboard.writeText(message)
+                    .then(() => { copyBtn.textContent = "Copied!"; setTimeout(resetLabel, 1500); })
+                    .catch(() => { copyBtn.textContent = "Copy failed"; setTimeout(resetLabel, 1500); });
+            });
+        }
+
+        document.querySelectorAll("[data-staff-subtab]").forEach((button) => {
+            if (button.dataset.bound === "true") return;
+            button.dataset.bound = "true";
+            button.onclick = () => {
+                const tabKey = button.getAttribute("data-staff-subtab");
+                if (!tabKey) return;
+                captureCurrentWidgetSize(false);
+                state.staffSubTab = tabKey;
+                setStoredDashboardState({ staffSubTab: tabKey, windowSizes: state.windowSizes });
+                applyCurrentWidgetSize();
+                renderTabContent();
+            };
+        });
     }
 
     function stopChainCountdownTimer() {
@@ -6159,12 +6451,6 @@
             state.autoRefreshTimer = null;
             return;
         }
-        const apiKey = getStoredKey();
-        if (!apiKey) {
-            debugLog("Auto refresh skipped: no API key");
-            state.autoRefreshTimer = setTimeout(performAutoRefreshCycle, AUTO_REFRESH_POLL_MS);
-            return;
-        }
 
         const now = Date.now();
         const targetId = getCurrentAutoRefreshTarget();
@@ -6173,9 +6459,18 @@
         const lastRefresh = target ? (state.lastRefreshBySection[target.section] || 0) : 0;
         const due = !!target && !!setting?.enabled && now - lastRefresh >= setting.seconds * 1000;
 
-        // Faction General and FFScouter use their dedicated view timers below.
-        if (due && target.section !== "warTargets" && target.id !== "faction:general") {
+        if (due && target.section === "staff") {
+            // Staff feed authenticates with its own API token, not the user's
+            // personal Torn API key - must not be gated on that key existing.
             void refreshSectionByKey(target.section, null);
+        } else if (due && target.section !== "warTargets" && target.id !== "faction:general") {
+            // Faction General and FFScouter use their dedicated view timers below.
+            const apiKey = getStoredKey();
+            if (!apiKey) {
+                debugLog("Auto refresh skipped: no API key");
+            } else {
+                void refreshSectionByKey(target.section, null);
+            }
         }
         state.autoRefreshTimer = setTimeout(performAutoRefreshCycle, AUTO_REFRESH_POLL_MS);
     }
@@ -6239,7 +6534,13 @@
         const maxHeight = Math.max(1, bounds.maxBottom - bounds.minTop);
         return {
             minWidth: Math.min(380, maxWidth),
-            minHeight: Math.min(620, maxHeight),
+            // Was 620 - fine for content-heavy tabs (Faction/Statuses), but it's
+            // a hard floor on every tab's resize, including sparse ones (Staff's
+            // Bleeders/Revives when empty) that only need a couple hundred px.
+            // Lowering it doesn't shrink anything by itself - each tab still
+            // remembers its own size independently (getWidgetLayoutKey) - it
+            // just allows a sparse tab to actually be resized down to fit.
+            minHeight: Math.min(280, maxHeight),
             maxWidth,
             maxHeight
         };
@@ -6270,6 +6571,7 @@
         if (state.currentTab === "overview") return `overview:${state.overviewSubTab}`;
         if (state.currentTab === "personal") return `personal:${state.personalSubTab}`;
         if (state.currentTab === "faction") return `faction:${state.factionSubTab}`;
+        if (state.currentTab === "staff") return `staff:${state.staffSubTab}`;
         if (state.currentTab === "settings") return `settings:${state.settingsSubTab}`;
         return state.currentTab;
     }
@@ -6356,15 +6658,56 @@
         const dashboard = state.dashboard;
         if (!dashboard || state.isMinimized) return;
         const limits = getWidgetSizeLimits();
-        const size = isCompactRuntime() ? { width: limits.maxWidth, height: limits.maxHeight } : getCurrentWidgetSize();
         dashboard.style.minWidth = `${limits.minWidth}px`;
         dashboard.style.minHeight = `${limits.minHeight}px`;
         dashboard.style.maxWidth = `${limits.maxWidth}px`;
         dashboard.style.maxHeight = `${limits.maxHeight}px`;
-        dashboard.style.width = `${size.width}px`;
-        dashboard.style.height = `${size.height}px`;
+        if (state.currentTab === "staff") {
+            // This function has 10+ call sites (tab/subtab switches, viewport
+            // resize/scroll handling, etc.) - live-debugged case: a caller
+            // outside the normal render pipeline (syncViewportLayout, fired on
+            // visualViewport "scroll", which happens on ordinary page scrolling
+            // with no actual resize involved) was reading Staff's untrustworthy
+            // stored width independently of applyStaffAutoSize's fix, reviving
+            // the same bad width. Delegating here instead of duplicating the
+            // logic means every caller gets the same correct behavior instead
+            // of only the ones someone remembered to patch.
+            applyStaffAutoSize();
+        } else {
+            const size = isCompactRuntime() ? { width: limits.maxWidth, height: limits.maxHeight } : getCurrentWidgetSize();
+            dashboard.style.width = `${size.width}px`;
+            dashboard.style.height = `${size.height}px`;
+        }
         applyWidgetPosition();
         requestAnimationFrame(fitCurrentContentToWidget);
+    }
+
+    function applyStaffAutoSize() {
+        // Staff sub-tabs vary too wildly in length for the normal resize-and-
+        // remember model (Statuses: potentially 90+ rows; Bleeders/Revives when
+        // there's nothing to report: two lines) - rather than making the user
+        // manually shrink the panel every time they land on a sparse sub-tab,
+        // measure what the content actually needs and size to that directly.
+        //
+        // Width is pinned to a fixed sane default rather than read from the
+        // normal per-tab stored size at all - live-debugged case: a staff:*
+        // layout key ended up storing a ~1908px (full viewport) width, which
+        // fed the #nfc-content container-query font-size clamp and cascaded
+        // into an inflated-looking header even after the height fix, since
+        // that fix never touched width. Root cause of *how* it got that wide
+        // wasn't pinned down, so rather than trust that stored value at all
+        // for this tab, it's just never read here.
+        const dashboard = state.dashboard;
+        if (!dashboard || state.currentTab !== "staff" || state.isMinimized) return;
+        const limits = getWidgetSizeLimits();
+        const targetWidth = Math.min(480, limits.maxWidth);
+        dashboard.style.width = `${targetWidth}px`;
+        // Reading scrollHeight here forces a synchronous layout against the
+        // width just set above, so this reflects the correct height for that
+        // width rather than a stale one measured before the resize.
+        const naturalHeight = dashboard.scrollHeight;
+        const targetHeight = Math.min(limits.maxHeight, Math.max(limits.minHeight, naturalHeight));
+        dashboard.style.height = `${targetHeight}px`;
     }
 
     function fitCurrentContentToWidget() {
@@ -6375,22 +6718,17 @@
 
         content.style.zoom = "1";
         content.classList.toggle("nfc-faction-general-active", state.currentTab === "faction" && state.factionSubTab === "general");
-        const useCompactScroll = isCompactRuntime();
-        content.classList.toggle("nfc-compact-scroll", useCompactScroll);
-        const useSettingsScroll = state.currentTab === "settings" && useCompactScroll;
+        const useSettingsScroll = state.currentTab === "settings" && isCompactRuntime();
         content.classList.toggle("nfc-settings-scroll", useSettingsScroll);
-        if (useCompactScroll) {
+        if (useSettingsScroll) {
             content.setAttribute("tabindex", "0");
             content.setAttribute("role", "region");
-            content.setAttribute("aria-label", state.currentTab === "settings" ? "Faction settings. Scroll for more options." : "Faction companion content. Scroll for more options.");
+            content.setAttribute("aria-label", "Faction settings. Scroll for more options.");
             return;
         }
         content.removeAttribute("tabindex");
         content.removeAttribute("role");
         content.removeAttribute("aria-label");
-        if (state.currentTab === "faction" && state.factionSubTab === "general") {
-            return;
-        }
         if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") {
             const layout = content.querySelector(".ntc-ffscouter-layout");
             const summaryViewport = layout?.querySelector(".ntc-ffscouter-summary-viewport");
@@ -6430,6 +6768,18 @@
         const contentRect = content.getBoundingClientRect();
         const availableHeight = Math.max(1, bodyRect.bottom - contentRect.top);
         const requiredHeight = Math.max(content.scrollHeight, content.offsetHeight);
+        if (!isCompactRuntime()) {
+            // Desktop has room to resize the panel and a real scrollbar works fine -
+            // only PDA's small, scroll-unfriendly webview needs the shrink-to-fit
+            // zoom below. Reusing nfc-settings-scroll's overflow-y:auto rule here
+            // since it's generic (its name is a holdover from settings being the
+            // first tab that needed it).
+            content.classList.add("nfc-settings-scroll");
+            content.setAttribute("tabindex", "0");
+            content.setAttribute("role", "region");
+            content.setAttribute("aria-label", "Scroll for more.");
+            return;
+        }
         content.style.zoom = String(Math.min(1, availableHeight / Math.max(1, requiredHeight)));
     }
 
@@ -6494,10 +6844,7 @@
             widgetBody.style.flex = "1 1 auto";
             widgetBody.style.minHeight = "0";
             widgetBody.style.maxHeight = "none";
-            const useCompactScroll = isCompactRuntime();
-            widgetBody.style.overflowX = "hidden";
-            widgetBody.style.overflowY = useCompactScroll ? "auto" : "hidden";
-            widgetBody.style.touchAction = useCompactScroll ? "pan-y pinch-zoom" : "";
+            widgetBody.style.overflowY = "hidden";
             resizeHandles.forEach((handle) => { handle.style.display = "block"; });
             dragHandle.style.padding = "9px 11px";
             dragHandle.style.height = "auto";
@@ -6525,7 +6872,7 @@
 
         debugLog("Initializing Torn Companion dashboard");
         const storedDashboardState = getStoredDashboardState();
-        state.currentTab = storedDashboardState.currentTab === "settings" ? "settings" : "faction";
+        state.currentTab = ["settings", "staff"].includes(storedDashboardState.currentTab) ? storedDashboardState.currentTab : "faction";
 
         const dashboard = document.createElement("div");
         dashboard.id = "nfc-faction-wrapper";
@@ -6546,6 +6893,7 @@
 
         const tabs = [
             { id: "faction", label: "Faction" },
+            { id: "staff", label: "Staff" },
             { id: "settings", label: "Settings" }
         ];
 
@@ -6914,19 +7262,6 @@
                     width: 0;
                     height: 0;
                 }
-                #nfc-faction-wrapper #nfc-content.nfc-faction-general-active:not(.nfc-compact-scroll) {
-                    overflow-x: hidden !important;
-                    overflow-y: auto !important;
-                    overscroll-behavior: contain;
-                    -webkit-overflow-scrolling: touch;
-                    scrollbar-width: none;
-                    -ms-overflow-style: none;
-                }
-                #nfc-faction-wrapper #nfc-content.nfc-faction-general-active:not(.nfc-compact-scroll)::-webkit-scrollbar {
-                    display: none;
-                    width: 0;
-                    height: 0;
-                }
                 #nfc-faction-wrapper #nfc-main-body {
                     display: flex !important;
                     flex-direction: column;
@@ -7110,24 +7445,14 @@
                    up its useful viewport, and the only vertical scroller remains the
                    player list itself. */
                 #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout {
-                    display:flex !important;
-                    flex-direction:column !important;
-                    align-items:stretch;
-                    align-content:flex-start;
-                    gap:10px;
+                    display:grid;
+                    gap:8px;
                     min-height:0;
-                    height:auto !important;
                     width:100%;
-                    overflow:visible;
                 }
                 #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout > * {
-                    position:relative;
-                    inset:auto;
-                    flex:0 0 auto !important;
-                    min-height:auto;
-                    width:100%;
+                    min-height:0;
                     max-width:100%;
-                    margin:0 !important;
                 }
                 @container (max-width: 430px) {
                     #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout {
@@ -7456,57 +7781,7 @@
                     font-size:21px;
                 }
                 #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-main-body,
-                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-main-body {
-                    padding:8px !important;
-                    overflow-x:hidden !important;
-                    overflow-y:auto !important;
-                    overscroll-behavior:contain;
-                    touch-action:pan-y pinch-zoom;
-                    -webkit-overflow-scrolling:touch;
-                    scrollbar-width:none;
-                    -ms-overflow-style:none;
-                }
-                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-main-body::-webkit-scrollbar,
-                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-main-body::-webkit-scrollbar { display:none; width:0; height:0; }
-                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-content.nfc-compact-scroll,
-                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-content.nfc-compact-scroll {
-                    flex:0 0 auto !important;
-                    min-height:auto !important;
-                    overflow:visible !important;
-                    width:100%;
-                }
-                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-content.nfc-compact-scroll.ntc-ffscouter-active,
-                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-content.nfc-compact-scroll.ntc-ffscouter-active {
-                    grid-template-rows:none !important;
-                }
-                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-content.nfc-compact-scroll .ntc-ffscouter-layout,
-                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-content.nfc-compact-scroll .ntc-ffscouter-layout {
-                    display:flex !important;
-                    flex-direction:column !important;
-                    align-items:stretch !important;
-                    height:auto !important;
-                    min-height:0 !important;
-                    width:100%;
-                }
-                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-content.nfc-compact-scroll .ntc-ffscouter-summary-viewport,
-                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-content.nfc-compact-scroll .ntc-ffscouter-summary-viewport {
-                    height:auto !important;
-                    flex:0 0 auto !important;
-                    overflow:visible !important;
-                }
-                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-content.nfc-compact-scroll .ntc-war-target-table-wrap,
-                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-content.nfc-compact-scroll .ntc-war-target-table-wrap {
-                    height:auto !important;
-                    min-height:0 !important;
-                    flex:0 0 auto !important;
-                    overflow:visible !important;
-                }
-                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-content.nfc-compact-scroll .nfc-war-target-filter-group,
-                #nfc-faction-wrapper[data-runtime="tornpda"] #nfc-content.nfc-compact-scroll .ntc-war-ff-range,
-                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-content.nfc-compact-scroll .nfc-war-target-filter-group,
-                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-content.nfc-compact-scroll .ntc-war-ff-range {
-                    flex:1 1 100% !important;
-                }
+                #nfc-faction-wrapper[data-runtime="pda-pending"] #nfc-main-body { padding:8px !important; overscroll-behavior:contain; }
                 #nfc-faction-wrapper[data-runtime="tornpda"] .nfc-primary-nav,
                 #nfc-faction-wrapper[data-runtime="pda-pending"] .nfc-primary-nav { gap:6px; padding:6px; margin-bottom:8px; }
                 #nfc-faction-wrapper[data-runtime="tornpda"] .nfc-tab,

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.1.8
+// @version      1.1.81
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -31,8 +31,7 @@
 
     // Kept in sync with the @version header above on every bump — displayed in the
     // settings tab version can be confirmed, without relying on console access.
-    const Version = (typeof GM_info !== 'undefined' && GM_info.script) ? GM_info.script.version : "1.0.0";
-    console.log('Running script version: ${VERSION}');
+    const VERSION = GM_info.script.version;
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -730,7 +729,7 @@
     // Logged on every boot and exposed as window.__NAUGHTY_FACTION_COMPANION_RUNTIME__
     // so TornPDA/desktop results can be confirmed without guessing from viewport width.
     const _envDebug = () => debugLog("Startup runtime", {
-        version: SCRIPT_VERSION,
+        version: VERSION,
         mode: compactRuntimeInfo().label,
         confirmedTornPDA: state.runtime.isTornPDA,
         pdaCandidate: state.runtime.pdaCandidate,
@@ -1100,7 +1099,7 @@
             schemaVersion: BACKUP_SCHEMA_VERSION,
             namespace: BACKUP_STORAGE_NAMESPACE,
             createdAt: new Date().toISOString(),
-            scriptVersion: SCRIPT_VERSION,
+            scriptVersion: VERSION,
             includesApiKeys: getBackupSecretStorageKeys().some((key) => Object.prototype.hasOwnProperty.call(values, key)),
             values
         };
@@ -6850,7 +6849,7 @@
             dragHandle.style.height = "auto";
             dragHandle.style.width = "auto";
             dragHandle.style.justifyContent = "space-between";
-            title.textContent = `🧭 Naughty Faction Companion v${SCRIPT_VERSION}`;
+            title.textContent = `🧭 Naughty Faction Companion v${VERSION}`;
             title.style.fontSize = "13px";
             title.style.letterSpacing = "normal";
             toggleBtn.style.display = "grid";
@@ -7851,7 +7850,7 @@
                 }
             </style>
             <header id="nfc-drag-handle">
-                <span id="nfc-title">🧭 Naughty Faction Companion v${SCRIPT_VERSION}</span>
+                <span id="nfc-title">🧭 Naughty Faction Companion v${VERSION}</span>
                 <button id="nfc-toggle-view-btn" type="button" title="Minimize Naughty Faction Companion" aria-label="Minimize Naughty Faction Companion">−</button>
             </header>
 

@@ -32,7 +32,7 @@
     // Kept in sync with the @version header above on every bump — displayed in the
     // widget title bar so a screenshot alone can confirm which build is actually
     // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.1.10";
+    const SCRIPT_VERSION = "1.1.5";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -57,7 +57,7 @@
         "flower", "temporary", "clothing", "car",
         "artifact", "book", "special", "other", "melee",
         "primary", "secondary", "tool", "defensive",
-        "material", "collectible"
+        "material", "collectible", "supply packs"
     ];
 
     const LOANABLE_CATEGORIES = new Set([

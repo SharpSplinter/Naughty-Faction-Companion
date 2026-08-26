@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.1.5
+// @version      1.1.8
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -30,9 +30,9 @@
     'use strict';
 
     // Kept in sync with the @version header above on every bump — displayed in the
-    // widget title bar so a screenshot alone can confirm which build is actually
-    // running on a device, without relying on console access.
-    const SCRIPT_VERSION = "1.1.5";
+    // settings tab version can be confirmed, without relying on console access.
+    const Version = (typeof GM_info !== 'undefined' && GM_info.script) ? GM_info.script.version : "1.0.0";
+    console.log('Running script version: ${VERSION}');
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";

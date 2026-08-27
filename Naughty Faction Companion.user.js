@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.1.89
+// @version      1.1.90
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -31,7 +31,7 @@
 
     // Kept in sync with the @version header above on every bump — displayed in the
     // settings tab version can be confirmed, without relying on console access.
-    const VERSION = (typeof GM_info !== "undefined" && GM_info?.script?.version) ? GM_info.script.version : "1.1.89";
+    const VERSION = (typeof GM_info !== "undefined" && GM_info?.script?.version) ? GM_info.script.version : "1.1.90";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -6820,8 +6820,15 @@
     function restoreMinimizedWidget() {
         if (!state.isMinimized) return;
         state.isMinimized = false;
-        setStoredDashboardState({ isMinimized: false });
+        setStoredDashboardState({
+            currentTab: state.currentTab,
+            factionSubTab: state.factionSubTab,
+            staffSubTab: state.staffSubTab,
+            settingsSubTab: state.settingsSubTab,
+            isMinimized: false
+        });
         applyWidgetView();
+        renderTabContent();
         debugLog("Minimized icon restored");
     }
 
@@ -6892,7 +6899,7 @@
 
         debugLog("Initializing Torn Companion dashboard");
         const storedDashboardState = getStoredDashboardState();
-        state.currentTab = ["settings", "staff"].includes(storedDashboardState.currentTab) ? storedDashboardState.currentTab : "faction";
+        state.currentTab = ["faction", "settings", "staff"].includes(storedDashboardState.currentTab) ? storedDashboardState.currentTab : "faction";
 
         const dashboard = document.createElement("div");
         dashboard.id = "nfc-faction-wrapper";

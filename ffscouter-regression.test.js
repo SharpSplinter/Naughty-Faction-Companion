@@ -19,11 +19,29 @@ const makeFairFightFormatter = new Function(`${fairFightFormatterSource}\nreturn
 const makePdaTouchWidth = new Function("isTornPDAEnvironment", "isTornPDACandidate", `${pdaTouchWidthSource}\nreturn getWarTargetColumnTouchWidthBonus;`);
 
 test("metadata and runtime fallback identify this release", () => {
-    assert.match(source, /^\/\/ @version\s+1\.1\.87$/m);
+    assert.match(source, /^\/\/ @version\s+1\.1\.89$/m);
     assert.match(source, /const VERSION = \(typeof GM_info !== "undefined"/);
     assert.match(source, /^\/\/ @run-at\s+document-start$/m);
     assert.match(source, /^\/\/ @license\s+MIT$/m);
     assert.match(source, /^\/\/ @connect\s+naughtybot\.unifiedbot\.net$/m);
+});
+
+test("personal contribution windows use complete live attack history", () => {
+    assert.match(source, /async function fetchAllUserAttacks\(apiKey, params\)/);
+    assert.match(source, /while \(url && !seenPages\.has\(url\)\)/);
+    assert.match(source, /getAttackRows\(response\)\.forEach/);
+    assert.match(source, /if \(chain\.id > 0 && chain\.start\)/);
+    assert.match(source, /if \(war\?\.start\)/);
+    assert.match(source, /const warWindowEnd = Number\(war\.end \|\| now\)/);
+    assert.match(source, /attack\.is_ranked_war !== true/);
+});
+
+test("disabling hospital alerts invalidates delayed work", () => {
+    assert.match(source, /warHospitalAlertGeneration: 0/);
+    assert.match(source, /state\.warHospitalAlertGeneration \+= 1/);
+    assert.match(source, /function areWarHospitalAlertsActive/);
+    assert.match(source, /if \(areWarHospitalAlertsActive\(generation\)\) void deliverWarHospitalAlert/);
+    assert.match(source, /await cancelNativeWarHospitalAlert\(\{ delivery: "native", notificationId \}\)/);
 });
 
 test("TornPDA source adaptation remains parse-safe", () => {

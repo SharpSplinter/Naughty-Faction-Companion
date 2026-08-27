@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.1.87
+// @version      1.1.89
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -31,7 +31,7 @@
 
     // Kept in sync with the @version header above on every bump — displayed in the
     // settings tab version can be confirmed, without relying on console access.
-    const VERSION = (typeof GM_info !== "undefined" && GM_info?.script?.version) ? GM_info.script.version : "1.1.87";
+    const VERSION = (typeof GM_info !== "undefined" && GM_info?.script?.version) ? GM_info.script.version : "1.1.89";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -404,6 +404,7 @@
         warTargetControlsCollapsed: false,
         warHospitalAlertSettings: createWarHospitalAlertSettings(),
         warHospitalAlertTimers: new Map(),
+        warHospitalAlertGeneration: 0,
         warHospitalAlertSyncPromise: null,
         warHospitalAlertSyncQueued: false,
         warTargetColumnOrder: ["player", "online", "status", "stats", "ff", "attack"],
@@ -1906,6 +1907,13 @@
         setStoredDashboardState({ warHospitalAlertSettings: state.warHospitalAlertSettings });
     }
 
+    function areWarHospitalAlertsActive(generation = state.warHospitalAlertGeneration) {
+        const settings = state.warHospitalAlertSettings;
+        return generation === state.warHospitalAlertGeneration
+            && settings.enabled
+            && WAR_HOSPITAL_ALERT_THRESHOLDS.includes(settings.thresholdMinutes);
+    }
+
     async function clearScheduledWarHospitalAlerts({ clearDelivered = false, clearNotificationIds = false } = {}) {
         const settings = state.warHospitalAlertSettings;
         const pendingNative = Object.values(settings.scheduledTargets || {}).filter((record) => record?.delivery === "native");
@@ -1918,9 +1926,11 @@
     }
 
     async function disableWarHospitalAlerts({ resetPreference = false } = {}) {
-        await clearScheduledWarHospitalAlerts({ clearDelivered: resetPreference, clearNotificationIds: resetPreference });
+        state.warHospitalAlertGeneration += 1;
         state.warHospitalAlertSettings.enabled = false;
         if (resetPreference) state.warHospitalAlertSettings.thresholdMinutes = null;
+        persistWarHospitalAlertSettings();
+        await clearScheduledWarHospitalAlerts({ clearDelivered: resetPreference, clearNotificationIds: resetPreference });
         persistWarHospitalAlertSettings();
     }
 
@@ -1936,7 +1946,8 @@
         void refreshWarTargets();
     }
 
-    async function deliverWarHospitalAlert(candidate, war, { persist = true } = {}) {
+    async function deliverWarHospitalAlert(candidate, war, { persist = true, generation = state.warHospitalAlertGeneration } = {}) {
+        if (!areWarHospitalAlertsActive(generation)) return false;
         const settings = state.warHospitalAlertSettings;
         if (settings.deliveredEvents?.[candidate.eventKey]) return false;
         if (!targetMatchesWarHospitalAlertView(candidate.target)) return false;
@@ -1954,7 +1965,10 @@
                 warnLog("Native hospital alert delivery failed", { error: safeErrorMessage(error) });
             }
         }
-        if (!delivered) delivered = await showDesktopWarHospitalNotification(title, text, notificationId, url);
+        if (!delivered && areWarHospitalAlertsActive(generation)) {
+            delivered = await showDesktopWarHospitalNotification(title, text, notificationId, url);
+        }
+        if (!areWarHospitalAlertsActive(generation)) return false;
         settings.deliveredEvents[candidate.eventKey] = Date.now();
         delete settings.scheduledTargets[String(candidate.targetId)];
         clearWarHospitalAlertTimer(candidate.targetId);
@@ -1970,13 +1984,13 @@
         return delivered;
     }
 
-    function scheduleDesktopWarHospitalAlert(candidate, war, notificationId) {
+    function scheduleDesktopWarHospitalAlert(candidate, war, notificationId, generation = state.warHospitalAlertGeneration) {
         const targetId = String(candidate.targetId);
         clearWarHospitalAlertTimer(targetId);
         const delay = Math.max(0, candidate.triggerAt - Date.now());
         const timer = window.setTimeout(() => {
             state.warHospitalAlertTimers.delete(targetId);
-            void deliverWarHospitalAlert(candidate, war);
+            if (areWarHospitalAlertsActive(generation)) void deliverWarHospitalAlert(candidate, war, { generation });
         }, delay);
         state.warHospitalAlertTimers.set(targetId, { eventKey: candidate.eventKey, timer });
         return {
@@ -1990,7 +2004,8 @@
     async function reconcileWarHospitalAlerts(targets, war) {
         const settings = state.warHospitalAlertSettings;
         const now = Date.now();
-        if (!settings.enabled || !WAR_HOSPITAL_ALERT_THRESHOLDS.includes(settings.thresholdMinutes)) {
+        const generation = state.warHospitalAlertGeneration;
+        if (!areWarHospitalAlertsActive(generation)) {
             await clearScheduledWarHospitalAlerts();
             return false;
         }
@@ -2005,10 +2020,12 @@
             if (isCurrent) continue;
             clearWarHospitalAlertTimer(targetId);
             await cancelNativeWarHospitalAlert(record);
+            if (!areWarHospitalAlertsActive(generation)) return false;
             delete settings.scheduledTargets[targetId];
         }
 
         for (const candidate of candidates) {
+            if (!areWarHospitalAlertsActive(generation)) return false;
             const targetId = String(candidate.targetId);
             const existing = settings.scheduledTargets[targetId];
             if (candidate.triggerAt <= now) {
@@ -2018,7 +2035,7 @@
                     clearWarHospitalAlertTimer(targetId);
                     continue;
                 }
-                await deliverWarHospitalAlert(candidate, war, { persist: false });
+                await deliverWarHospitalAlert(candidate, war, { persist: false, generation });
                 continue;
             }
             const notificationId = getWarHospitalAlertNotificationId(candidate.targetId);
@@ -2026,8 +2043,13 @@
             if (canUseNativePdaFeatures()) {
                 if (existing?.delivery === "native" && existing.eventKey === candidate.eventKey && Number(existing.timestamp) === Number(candidate.triggerAt)) continue;
                 if (existing) await cancelNativeWarHospitalAlert(existing);
+                if (!areWarHospitalAlertsActive(generation)) return false;
                 try {
                     await scheduleNativeWarHospitalAlert(candidate, notificationId, candidate.triggerAt);
+                    if (!areWarHospitalAlertsActive(generation)) {
+                        await cancelNativeWarHospitalAlert({ delivery: "native", notificationId });
+                        return false;
+                    }
                     clearWarHospitalAlertTimer(targetId);
                     settings.scheduledTargets[targetId] = {
                         eventKey: candidate.eventKey,
@@ -2037,12 +2059,14 @@
                     };
                 } catch (error) {
                     warnLog("Native hospital alert scheduling failed", { error: safeErrorMessage(error) });
-                    settings.scheduledTargets[targetId] = scheduleDesktopWarHospitalAlert(candidate, war, notificationId);
+                    if (!areWarHospitalAlertsActive(generation)) return false;
+                    settings.scheduledTargets[targetId] = scheduleDesktopWarHospitalAlert(candidate, war, notificationId, generation);
                 }
             } else if (existing?.delivery !== "desktop" || existing.eventKey !== candidate.eventKey || Number(existing.timestamp) !== Number(candidate.triggerAt) || !state.warHospitalAlertTimers.has(targetId)) {
-                settings.scheduledTargets[targetId] = scheduleDesktopWarHospitalAlert(candidate, war, notificationId);
+                settings.scheduledTargets[targetId] = scheduleDesktopWarHospitalAlert(candidate, war, notificationId, generation);
             }
         }
+        if (!areWarHospitalAlertsActive(generation)) return false;
         pruneWarHospitalAlertSettings(now);
         persistWarHospitalAlertSettings();
         return true;
@@ -3039,6 +3063,35 @@
         return CHAIN_BONUS_RESPECT[Number(attack?.chain || 0)] || 0;
     }
 
+    function getAttackRows(response) {
+        return Array.isArray(response?.attacks) ? response.attacks : (Array.isArray(response) ? response : []);
+    }
+
+    async function fetchAllUserAttacks(apiKey, params) {
+        const attacks = [];
+        const seenAttackIds = new Set();
+        const seenPages = new Set();
+        let url = withKey(`${BASE_URL}user/attacks`, apiKey, { ...params, limit: 100, sort: "ASC" });
+        while (url && !seenPages.has(url)) {
+            seenPages.add(url);
+            const response = await fetchJson(url);
+            getAttackRows(response).forEach((attack) => {
+                const id = String(attack?.id || "");
+                if (id && seenAttackIds.has(id)) return;
+                if (id) seenAttackIds.add(id);
+                attacks.push(attack);
+            });
+            const next = response?._metadata?.links?.next;
+            url = next ? withKey(next, apiKey) : null;
+        }
+        return attacks;
+    }
+
+    function isSuccessfulAttackDuring(attack, start, end) {
+        const timestamp = Number(attack?.started || attack?.timestamp_started || 0);
+        return attack?.result === "Attacked" && timestamp >= start && timestamp <= end;
+    }
+
     async function fetchFactionData(apiKey) {
         setSectionStatus("faction", "Refreshing...");
         debugLog("Fetching faction data");
@@ -3107,114 +3160,34 @@
                 };
             }
 
-            // Personal chain/war contribution:
-            // - "Chain Hits"/"Chain Respect" reflect ONLY the CURRENTLY ACTIVE chain
-            //   (chain.id > 0). Torn's chainreport endpoint only exists for chains
-            //   that have already ended — there's no authoritative per-member API
-            //   for one still in progress — so this is approximated live from
-            //   user/attacks (successful "Attacked" results only) within the active
-            //   chain's start window. Once no chain is active, both are 0.
-            // - "War Hits"/"War Respect" are the SUM across every chain (it's
-            //   normal for a war to have several chains, on-and-off, over its
-            //   duration) that occurred within the ranked war's timeframe, but ONLY
-            //   while the war is still active (war.end is falsy/0 — see how `war`
-            //   is built above, Torn returns no end value for an ongoing war).
-            //   Each completed chain's report is fetched once and cached in
-            //   state.chainReportCache (keyed by chain id, in-memory only) since a
-            //   finished chain's report never changes — later refreshes only need
-            //   to check for any NEW chain that's appeared since.
-            // - "Bonus Hits" is your exact completed-chain count from
-            //   chainreport.attackers[].attacks.bonuses, plus milestones made in the
-            //   current live chain. "Bonus Respect" is the respect earned only from
-            //   those milestones, calculated from the user attack log.
+            // Chain counters use only the current live chain. War counters use the
+            // full ranked-war interval, so chains that ended before the current one
+            // and the current live chain are both included exactly once.
             const personalContribution = { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0, bonusHits: 0, bonusRespect: 0 };
             try {
-                if (ownFactionId) {
-                    const basicResponse = await fetchJson(withKey(`${BASE_URL}user/basic`, apiKey)).catch(() => null);
-                    // user/basic v2 actually returns {"profile":{"id":...}}, NOT
-                    // {"basic":{"player_id":...}} — confirmed via live API response.
-                    // The old (wrong) field path always resolved to 0, which silently
-                    // failed the ownPlayerId truthy check below and skipped the whole
-                    // War Hits/Respect block entirely — the actual root cause of War
-                    // Hits/Respect showing 0 despite everything else being correct.
-                    const ownPlayerId = Number(basicResponse?.profile?.id || 0);
+                const now = Math.floor(Date.now() / 1000);
+                if (chain.id > 0 && chain.start) {
+                    const liveAttacks = await fetchAllUserAttacks(apiKey, { from: chain.start, to: now });
+                    liveAttacks.forEach((attack) => {
+                        if (!isSuccessfulAttackDuring(attack, chain.start, now)) return;
+                        personalContribution.chainHits += 1;
+                        personalContribution.chainRespect += Number(attack.respect_gain || 0);
+                    });
+                }
 
-                    // --- Chain Hits / Chain Respect: only while a chain is active ---
-                    if (chain.id > 0 && chain.start) {
-                        const liveAttacksResponse = await fetchJson(withKey(`${BASE_URL}user/attacks`, apiKey, { from: chain.start, sort: "ASC" })).catch(() => null);
-                        const liveAttacks = Array.isArray(liveAttacksResponse?.attacks) ? liveAttacksResponse.attacks
-                            : (Array.isArray(liveAttacksResponse) ? liveAttacksResponse : []);
-                        liveAttacks.forEach((atk) => {
-                            if (atk.result !== "Attacked") return;
-                            const started = Number(atk.started || atk.timestamp_started || 0);
-                            if (started < chain.start) return;
-                            personalContribution.chainHits += 1;
-                            personalContribution.chainRespect += Number(atk.respect_gain || 0);
-                        });
-                    }
-
-                    // --- War Hits / War Respect / Bonus Hits: summed across every
-                    // chain within the war window, only while the war is active ---
-                    if (war && war.start && !war.end && ownPlayerId) {
-                        if (!state.chainReportCache) state.chainReportCache = {};
-                        const warWindowEnd = Math.floor(Date.now() / 1000);
-
-                        const chainsResponse = await fetchJson(withKey(`${BASE_URL}faction/${ownFactionId}/chains`, apiKey)).catch(() => null);
-                        const chainsList = Array.isArray(chainsResponse?.chains) ? chainsResponse.chains : [];
-                        const warChains = chainsList.filter((c) => Number(c.start || 0) >= war.start);
-
-                        for (const chainSummary of warChains) {
-                            const chainId = Number(chainSummary.id || 0);
-                            if (!chainId) continue;
-                            let mine = state.chainReportCache[chainId];
-                            if (mine === undefined) {
-                                const reportResponse = await fetchJson(withKey(`${BASE_URL}faction/${chainId}/chainreport`, apiKey)).catch(() => null);
-                                const attackers = reportResponse?.chainreport?.attackers || [];
-                                mine = attackers.find((a) => Number(a.id) === ownPlayerId) || null;
-                                // Only cache a completed report — a chain still in
-                                // progress won't have one yet (empty attackers list),
-                                // so leave it uncached to retry on the next tick.
-                                if (attackers.length) state.chainReportCache[chainId] = mine;
-                            }
-                            if (mine) {
-                                const atk = mine.attacks || {};
-                                const rsp = mine.respect || {};
-                                const totalAttacks = Number(atk.total || 0);
-                                const warAttacks = Number(atk.war || 0);
-                                const totalRespect = Number(rsp.total || 0);
-                                personalContribution.warHits += warAttacks;
-                                personalContribution.bonusHits += Number(atk.bonuses || 0);
-                                // chainreport gives per-type ATTACK COUNTS but not a
-                                // per-type RESPECT breakdown. totalRespect IS already
-                                // the war-period respect for this chain whenever every
-                                // attack in it was war-flagged (the common case).
-                                personalContribution.warRespect += totalAttacks > 0
-                                    ? (warAttacks === totalAttacks ? totalRespect : totalRespect * (warAttacks / totalAttacks))
-                                    : 0;
-                            }
-                        }
-
-                        // Bonus-hit respect is calculated from the attack log and its
-                        // milestone lookup. The count comes from completed reports;
-                        // only current active-chain milestones are added here.
-                        // Known limitation: a single call with no explicit pagination —
-                        // for a very long-running war with a huge attack volume this
-                        // may not capture the entire window if Torn caps page size.
-                        const warAttacksResponse = await fetchJson(withKey(`${BASE_URL}user/attacks`, apiKey, { from: war.start, to: warWindowEnd, sort: "ASC" })).catch(() => null);
-                        const warAttacksLog = Array.isArray(warAttacksResponse?.attacks) ? warAttacksResponse.attacks
-                            : (Array.isArray(warAttacksResponse) ? warAttacksResponse : []);
-                        warAttacksLog.forEach((atk) => {
-                            if (atk.result !== "Attacked") return;
-                            const started = Number(atk.started || atk.timestamp_started || 0);
-                            if (started < war.start || started > warWindowEnd) return;
-                            const bonusRespect = getChainBonusRespect(atk);
-                            if (!bonusRespect) return;
+                if (war?.start) {
+                    const warWindowEnd = Number(war.end || now);
+                    const warAttacks = await fetchAllUserAttacks(apiKey, { from: war.start, to: warWindowEnd });
+                    warAttacks.forEach((attack) => {
+                        if (!isSuccessfulAttackDuring(attack, war.start, warWindowEnd) || attack.is_ranked_war !== true) return;
+                        personalContribution.warHits += 1;
+                        personalContribution.warRespect += Number(attack.respect_gain || 0);
+                        const bonusRespect = getChainBonusRespect(attack);
+                        if (bonusRespect) {
+                            personalContribution.bonusHits += 1;
                             personalContribution.bonusRespect += bonusRespect;
-                            if (chain.id > 0 && started >= Number(chain.start || 0)) {
-                                personalContribution.bonusHits += 1;
-                            }
-                        });
-                    }
+                        }
+                    });
                 }
             } catch (contributionError) {
                 warnLog("Personal contribution calculation failed", { error: safeErrorMessage(contributionError) });

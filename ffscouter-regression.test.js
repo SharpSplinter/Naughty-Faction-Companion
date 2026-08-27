@@ -19,7 +19,7 @@ const makeFairFightFormatter = new Function(`${fairFightFormatterSource}\nreturn
 const makePdaTouchWidth = new Function("isTornPDAEnvironment", "isTornPDACandidate", `${pdaTouchWidthSource}\nreturn getWarTargetColumnTouchWidthBonus;`);
 
 test("metadata and runtime fallback identify this release", () => {
-    assert.match(source, /^\/\/ @version\s+1\.1\.90$/m);
+    assert.match(source, /^\/\/ @version\s+1\.1\.91$/m);
     assert.match(source, /const VERSION = \(typeof GM_info !== "undefined"/);
     assert.match(source, /^\/\/ @run-at\s+document-start$/m);
     assert.match(source, /^\/\/ @license\s+MIT$/m);
@@ -48,8 +48,11 @@ test("restoring the minimized window preserves its active tab", () => {
     const restoreSource = section("function restoreMinimizedWidget", "function applyWidgetView");
     assert.match(restoreSource, /currentTab: state\.currentTab/);
     assert.match(restoreSource, /factionSubTab: state\.factionSubTab/);
+    assert.match(restoreSource, /consumeRestoreInteraction\(event\)/);
     assert.match(restoreSource, /renderTabContent\(\)/);
     assert.match(source, /\["faction", "settings", "staff"\]\.includes\(storedDashboardState\.currentTab\)/);
+    assert.match(section("function consumeRestoreInteraction", "function restoreMinimizedWidget"), /document\.addEventListener\("click", swallowNextClick, true\)/);
+    assert.match(source, /restoreMinimizedWidget\(e\);/);
 });
 
 test("TornPDA source adaptation remains parse-safe", () => {

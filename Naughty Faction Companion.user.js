@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.1.90
+// @version      1.1.91
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -31,7 +31,7 @@
 
     // Kept in sync with the @version header above on every bump — displayed in the
     // settings tab version can be confirmed, without relying on console access.
-    const VERSION = (typeof GM_info !== "undefined" && GM_info?.script?.version) ? GM_info.script.version : "1.1.90";
+    const VERSION = (typeof GM_info !== "undefined" && GM_info?.script?.version) ? GM_info.script.version : "1.1.91";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -6817,8 +6817,25 @@
         if (state.factionSubTab === "ffscouter") startWarTargetsRefreshTimer();
     }
 
-    function restoreMinimizedWidget() {
+    function consumeRestoreInteraction(event) {
+        event?.preventDefault?.();
+        event?.stopImmediatePropagation?.();
+        event?.stopPropagation?.();
+        const dashboard = state.dashboard;
+        if (!dashboard) return;
+        const swallowNextClick = (nextEvent) => {
+            if (!dashboard.contains(nextEvent.target)) return;
+            nextEvent.preventDefault();
+            nextEvent.stopImmediatePropagation();
+            document.removeEventListener("click", swallowNextClick, true);
+        };
+        document.addEventListener("click", swallowNextClick, true);
+        window.setTimeout(() => document.removeEventListener("click", swallowNextClick, true), 400);
+    }
+
+    function restoreMinimizedWidget(event) {
         if (!state.isMinimized) return;
+        consumeRestoreInteraction(event);
         state.isMinimized = false;
         setStoredDashboardState({
             currentTab: state.currentTab,
@@ -8232,14 +8249,14 @@
             releasePointer(dashboard, dragPointerId);
             isDragging = false;
             dragPointerId = null;
-            if (wasMinimized && !didDrag && !cancelled) restoreMinimizedWidget();
+            if (wasMinimized && !didDrag && !cancelled) restoreMinimizedWidget(e);
         };
         document.addEventListener(interactionEvents.up, finishDrag);
         if (interactionEvents.cancel) document.addEventListener(interactionEvents.cancel, (e) => finishDrag(e, true));
 
         dashboard.addEventListener("click", (e) => {
             if (!state.isMinimized || didDrag) return;
-            restoreMinimizedWidget();
+            restoreMinimizedWidget(e);
         });
 
         const resizeHandles = dashboard.querySelectorAll(".nfc-resize-handle");

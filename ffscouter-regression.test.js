@@ -15,7 +15,7 @@ const makeBaseNormalizer = new Function("STAFF_API_ORIGIN", "URL", `${baseNormal
 const makePayloadNormalizer = new Function(`${payloadNormalizerSource}\nreturn normalizeStaffStatusPayload;`);
 
 test("metadata and runtime fallback identify this release", () => {
-    assert.match(source, /^\/\/ @version\s+1\.1\.84$/m);
+    assert.match(source, /^\/\/ @version\s+1\.1\.85$/m);
     assert.match(source, /const VERSION = \(typeof GM_info !== "undefined"/);
     assert.match(source, /^\/\/ @run-at\s+document-start$/m);
     assert.match(source, /^\/\/ @license\s+MIT$/m);

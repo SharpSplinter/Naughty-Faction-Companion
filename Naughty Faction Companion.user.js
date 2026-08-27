@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.1.86
+// @version      1.1.87
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -31,7 +31,7 @@
 
     // Kept in sync with the @version header above on every bump — displayed in the
     // settings tab version can be confirmed, without relying on console access.
-    const VERSION = (typeof GM_info !== "undefined" && GM_info?.script?.version) ? GM_info.script.version : "1.1.86";
+    const VERSION = (typeof GM_info !== "undefined" && GM_info?.script?.version) ? GM_info.script.version : "1.1.87";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -500,6 +500,10 @@
         const value = Number(num ?? 0);
         if (!Number.isFinite(value)) return "0";
         return Math.round(value).toLocaleString();
+    };
+    const formatFairFight = (num) => {
+        const value = Number(num);
+        return Number.isFinite(value) && value > 0 ? value.toFixed(2) : "—";
     };
     const formatOptionalInteger = (num, fallback = "—") => {
         if (num === null || num === undefined || num === "") return fallback;
@@ -4271,14 +4275,18 @@
         online: { label: "Online", compactLabel: "On", align: "left", minWidth: 54, hardFloor: 40 },
         status: { label: "Status", compactLabel: "Status", align: "left", minWidth: 96, hardFloor: 62 },
         stats: { label: "Est. Stats", compactLabel: "Est", align: "right", minWidth: 68, hardFloor: 46 },
-        // ff/attack floors raised to match real content minimums (a "1.5x"-style badge and
+        // ff/attack floors raised to match real content minimums (a "1.50" FF value and
         // an "Attack" button both need real room — the earlier 26/34 floors were tighter
         // than the content itself, which combined with .ntc-attack-button's
         // min-width:max-content !important could still overflow even once the column-fit
         // math was correct.
-        ff: { label: "FF", compactLabel: "FF", align: "center", minWidth: 38, hardFloor: 32 },
+        ff: { label: "FF", compactLabel: "FF", align: "center", minWidth: 50, hardFloor: 38 },
         attack: { label: "Attack", compactLabel: "Atk", align: "center", minWidth: 58, hardFloor: 52 }
     };
+
+    function getWarTargetColumnTouchWidthBonus(key) {
+        return key === "ff" && (isTornPDAEnvironment() || isTornPDACandidate()) ? 8 : 0;
+    }
 
     // Fits all visible columns inside `availableWidth` with ZERO horizontal scrolling,
     // rather than letting the table render at its natural (often wider) width and
@@ -4313,9 +4321,10 @@
 
     function computeResponsiveColumnWidths(columnOrder, availableWidth) {
         const cols = columnOrder.filter((key) => WAR_TARGET_COLUMNS[key]);
-        const naturalWidths = cols.map((key) =>
-            Math.max(WAR_TARGET_COLUMNS[key].minWidth, Number(state.warTargetColumnWidths[key]) || WAR_TARGET_COLUMNS[key].minWidth)
-        );
+        const naturalWidths = cols.map((key) => {
+            const column = WAR_TARGET_COLUMNS[key];
+            return Math.max(column.minWidth + getWarTargetColumnTouchWidthBonus(key), Number(state.warTargetColumnWidths[key]) || 0);
+        });
         const naturalTotal = naturalWidths.reduce((sum, w) => sum + w, 0);
 
         if (!Number.isFinite(availableWidth) || availableWidth <= 0) {
@@ -4337,7 +4346,10 @@
             return Object.fromEntries(cols.map((key, i) => [key, widths[i]]));
         }
 
-        const floors = cols.map((key) => Math.min(WAR_TARGET_COLUMNS[key].hardFloor ?? 24, naturalWidths[cols.indexOf(key)]));
+        const floors = cols.map((key, index) => {
+            const column = WAR_TARGET_COLUMNS[key];
+            return Math.min((column.hardFloor ?? 24) + Math.ceil(getWarTargetColumnTouchWidthBonus(key) / 2), naturalWidths[index]);
+        });
         const floorTotal = floors.reduce((sum, w) => sum + w, 0);
 
         if (floorTotal >= availableWidth) {
@@ -4480,7 +4492,7 @@
             const estimate = target.noEstimate || !target.battleStats
                 ? "No estimate"
                 : (target.battleStatsHuman || formatInteger(target.battleStats));
-            const ff = target.fairFight > 0 ? formatInteger(target.fairFight) : "—";
+            const ff = formatFairFight(target.fairFight);
             const estimateAge = target.estimateUpdatedAt ? formatRelativeTime(target.estimateUpdatedAt) : "—";
             const display = { online, onlineColor, statusColor, statusDisplay, estimate, ff, estimateAge };
             return `

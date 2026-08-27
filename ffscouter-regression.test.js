@@ -10,12 +10,16 @@ const baseNormalizerSource = section("function normalizeStaffApiBase", "const ge
 const payloadNormalizerSource = section("function normalizeStaffStatusPayload", "const getStoredPosition");
 const headerRefreshSource = section("function getHeaderRefreshTarget", "const SECTION_TAB_LABELS");
 const freshnessSource = section("function getSectionFreshness", "function formatUtcTimestamp");
+const fairFightFormatterSource = section("const formatFairFight", "const formatOptionalInteger");
+const pdaTouchWidthSource = section("function getWarTargetColumnTouchWidthBonus", "function computeResponsiveColumnWidths");
 
 const makeBaseNormalizer = new Function("STAFF_API_ORIGIN", "URL", `${baseNormalizerSource}\nreturn normalizeStaffApiBase;`);
 const makePayloadNormalizer = new Function(`${payloadNormalizerSource}\nreturn normalizeStaffStatusPayload;`);
+const makeFairFightFormatter = new Function(`${fairFightFormatterSource}\nreturn formatFairFight;`);
+const makePdaTouchWidth = new Function("isTornPDAEnvironment", "isTornPDACandidate", `${pdaTouchWidthSource}\nreturn getWarTargetColumnTouchWidthBonus;`);
 
 test("metadata and runtime fallback identify this release", () => {
-    assert.match(source, /^\/\/ @version\s+1\.1\.86$/m);
+    assert.match(source, /^\/\/ @version\s+1\.1\.87$/m);
     assert.match(source, /const VERSION = \(typeof GM_info !== "undefined"/);
     assert.match(source, /^\/\/ @run-at\s+document-start$/m);
     assert.match(source, /^\/\/ @license\s+MIT$/m);
@@ -116,6 +120,21 @@ test("FFScouter supports pre-war scouting and collapsible Sort & View controls",
     assert.match(source, /data-action="toggle-war-target-controls"/);
     assert.match(source, /Show Sort & View/);
     assert.match(source, /Hide Sort & View/);
+});
+
+test("FFScouter preserves Fair Fight hundredths and widens its PDA sort target", () => {
+    const formatFairFight = makeFairFightFormatter();
+    const pdaTouchWidth = makePdaTouchWidth(() => true, () => false);
+    assert.equal(formatFairFight(1), "1.00");
+    assert.equal(formatFairFight(1.2), "1.20");
+    assert.equal(formatFairFight(1.239), "1.24");
+    assert.equal(formatFairFight(0), "—");
+    assert.equal(pdaTouchWidth("ff"), 8);
+    assert.equal(pdaTouchWidth("stats"), 0);
+    assert.match(source, /const ff = formatFairFight\(target\.fairFight\);/);
+    assert.match(source, /ff: \{ label: "FF", compactLabel: "FF", align: "center", minWidth: 50, hardFloor: 38 \}/);
+    assert.match(section("function filterWarTargets", "function getWarTargetSortValue"), /Number\(rangeMetric === "bs" \? target\?\.battleStats : target\?\.fairFight\)/);
+    assert.match(section("function getWarTargetSortValue", "function sortWarTargets"), /case "ff": return Number\(target\?\.fairFight \|\| 0\);/);
 });
 
 test("only the header owns section refresh while FFScouter keeps live status refresh", () => {

@@ -11,29 +11,46 @@ const payloadNormalizerSource = section("function normalizeStaffStatusPayload", 
 const headerRefreshSource = section("function getHeaderRefreshTarget", "const SECTION_TAB_LABELS");
 const freshnessSource = section("function getSectionFreshness", "function formatUtcTimestamp");
 const fairFightFormatterSource = section("const formatFairFight", "const formatOptionalInteger");
+const respectFormatterSource = section("const formatRespect", "const formatFairFight");
 const pdaTouchWidthSource = section("function getWarTargetColumnTouchWidthBonus", "function computeResponsiveColumnWidths");
+const reportedContributionSource = section("function getReportedChainContribution", "function addContribution");
 
 const makeBaseNormalizer = new Function("STAFF_API_ORIGIN", "URL", `${baseNormalizerSource}\nreturn normalizeStaffApiBase;`);
 const makePayloadNormalizer = new Function(`${payloadNormalizerSource}\nreturn normalizeStaffStatusPayload;`);
 const makeFairFightFormatter = new Function(`${fairFightFormatterSource}\nreturn formatFairFight;`);
+const makeRespectFormatter = new Function(`${respectFormatterSource}\nreturn formatRespect;`);
 const makePdaTouchWidth = new Function("isTornPDAEnvironment", "isTornPDACandidate", `${pdaTouchWidthSource}\nreturn getWarTargetColumnTouchWidthBonus;`);
+const makeReportedContribution = new Function(`${reportedContributionSource}\nreturn getReportedChainContribution;`);
 
 test("metadata and runtime fallback identify this release", () => {
-    assert.match(source, /^\/\/ @version\s+1\.1\.91$/m);
+    assert.match(source, /^\/\/ @version\s+1\.1\.92$/m);
     assert.match(source, /const VERSION = \(typeof GM_info !== "undefined"/);
     assert.match(source, /^\/\/ @run-at\s+document-start$/m);
     assert.match(source, /^\/\/ @license\s+MIT$/m);
     assert.match(source, /^\/\/ @connect\s+naughtybot\.unifiedbot\.net$/m);
 });
 
-test("personal contribution windows use complete live attack history", () => {
-    assert.match(source, /async function fetchAllUserAttacks\(apiKey, params\)/);
+test("personal contribution uses Torn's per-chain reports", () => {
+    assert.match(source, /async function fetchCompletedChainsDuring\(apiKey, start, end\)/);
     assert.match(source, /while \(url && !seenPages\.has\(url\)\)/);
-    assert.match(source, /getAttackRows\(response\)\.forEach/);
-    assert.match(source, /if \(chain\.id > 0 && chain\.start\)/);
-    assert.match(source, /if \(war\?\.start\)/);
-    assert.match(source, /const warWindowEnd = Number\(war\.end \|\| now\)/);
-    assert.match(source, /attack\.is_ranked_war !== true/);
+    assert.match(source, /getChainRows\(response\)\.forEach/);
+    assert.match(source, /faction\/chainreport/);
+    assert.match(source, /faction\/\$\{chainId\}\/chainreport/);
+    assert.match(source, /if \(ownPlayerId && war\?\.start\)/);
+    assert.match(source, /const warWindowEnd = Number\(war\?\.end \|\| now\)/);
+    assert.doesNotMatch(source, /attack\.is_ranked_war !== true/);
+    assert.match(source, /formatRespect\(contribution\.warRespect\)/);
+});
+
+test("chain reports preserve recorded War Respect cents and War Hits", () => {
+    const getContribution = makeReportedContribution();
+    const formatRespect = makeRespectFormatter();
+    const contribution = getContribution({
+        attackers: [{ id: 315311, attacks: { total: 18, war: 16, bonuses: 1 }, respect: { total: 198.94 } }],
+        bonuses: [{ attacker_id: 315311, respect: 40 }]
+    }, 315311);
+    assert.deepEqual(contribution, { hits: 16, chainHits: 18, respect: 198.94, bonusHits: 1, bonusRespect: 40 });
+    assert.equal(formatRespect(198.94), "198.94");
 });
 
 test("disabling hospital alerts invalidates delayed work", () => {

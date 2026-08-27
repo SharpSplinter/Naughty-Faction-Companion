@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.1.91
+// @version      1.1.92
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -31,7 +31,7 @@
 
     // Kept in sync with the @version header above on every bump — displayed in the
     // settings tab version can be confirmed, without relying on console access.
-    const VERSION = (typeof GM_info !== "undefined" && GM_info?.script?.version) ? GM_info.script.version : "1.1.91";
+    const VERSION = (typeof GM_info !== "undefined" && GM_info?.script?.version) ? GM_info.script.version : "1.1.92";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -501,6 +501,11 @@
         const value = Number(num ?? 0);
         if (!Number.isFinite(value)) return "0";
         return Math.round(value).toLocaleString();
+    };
+    const formatRespect = (num) => {
+        const value = Number(num ?? 0);
+        if (!Number.isFinite(value)) return "0";
+        return value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
     };
     const formatFairFight = (num) => {
         const value = Number(num);
@@ -3063,33 +3068,58 @@
         return CHAIN_BONUS_RESPECT[Number(attack?.chain || 0)] || 0;
     }
 
-    function getAttackRows(response) {
-        return Array.isArray(response?.attacks) ? response.attacks : (Array.isArray(response) ? response : []);
+    function getChainRows(response) {
+        return Array.isArray(response?.chains) ? response.chains : (Array.isArray(response) ? response : []);
     }
 
-    async function fetchAllUserAttacks(apiKey, params) {
-        const attacks = [];
-        const seenAttackIds = new Set();
+    async function fetchCompletedChainsDuring(apiKey, start, end) {
+        const chains = [];
+        const seenChainIds = new Set();
         const seenPages = new Set();
-        let url = withKey(`${BASE_URL}user/attacks`, apiKey, { ...params, limit: 100, sort: "ASC" });
+        let url = withKey(`${BASE_URL}faction/chains`, apiKey, { from: start, to: end, limit: 100, sort: "ASC" });
         while (url && !seenPages.has(url)) {
             seenPages.add(url);
             const response = await fetchJson(url);
-            getAttackRows(response).forEach((attack) => {
-                const id = String(attack?.id || "");
-                if (id && seenAttackIds.has(id)) return;
-                if (id) seenAttackIds.add(id);
-                attacks.push(attack);
+            getChainRows(response).forEach((chain) => {
+                const id = String(chain?.id || "");
+                if (id && seenChainIds.has(id)) return;
+                if (id) seenChainIds.add(id);
+                chains.push(chain);
             });
             const next = response?._metadata?.links?.next;
             url = next ? withKey(next, apiKey) : null;
         }
-        return attacks;
+        return chains;
     }
 
-    function isSuccessfulAttackDuring(attack, start, end) {
-        const timestamp = Number(attack?.started || attack?.timestamp_started || 0);
-        return attack?.result === "Attacked" && timestamp >= start && timestamp <= end;
+    function getReportedChainContribution(chainReport, playerId) {
+        const attacker = Array.isArray(chainReport?.attackers)
+            ? chainReport.attackers.find((entry) => Number(entry?.id) === Number(playerId))
+            : null;
+        if (!attacker) return { hits: 0, chainHits: 0, respect: 0, bonusHits: 0, bonusRespect: 0 };
+
+        const attacks = attacker.attacks || {};
+        const matchingBonuses = Array.isArray(chainReport?.bonuses)
+            ? chainReport.bonuses.filter((bonus) => Number(bonus?.attacker_id) === Number(playerId))
+            : [];
+        return {
+            // The report's `war` field is Torn's authoritative count of this
+            // member's war hits; do not infer it from the broader personal log.
+            hits: Math.max(0, Math.trunc(Number(attacks.war) || 0)),
+            chainHits: Math.max(0, Math.trunc(Number(attacks.total) || 0)),
+            // Every report included below is wholly within the Ranked War window,
+            // so the recorded per-member total is the exact respect for that chain.
+            respect: Math.max(0, Number(attacker.respect?.total) || 0),
+            bonusHits: matchingBonuses.length || Math.max(0, Math.trunc(Number(attacks.bonuses) || 0)),
+            bonusRespect: matchingBonuses.reduce((total, bonus) => total + Math.max(0, Number(bonus?.respect) || 0), 0)
+        };
+    }
+
+    function addContribution(target, value) {
+        target.warHits += value.hits;
+        target.warRespect += value.respect;
+        target.bonusHits += value.bonusHits;
+        target.bonusRespect += value.bonusRespect;
     }
 
     async function fetchFactionData(apiKey) {
@@ -3160,34 +3190,57 @@
                 };
             }
 
-            // Chain counters use only the current live chain. War counters use the
-            // full ranked-war interval, so chains that ended before the current one
-            // and the current live chain are both included exactly once.
+            // Chain counters use only the current live chain.  War counters use
+            // Torn's chain reports for every completed chain that falls entirely
+            // within the Ranked War, plus the current chain report when present.
+            // This deliberately avoids user/attacks: its `is_ranked_war` entries
+            // are not the same as the report's recorded Ranked War contribution.
             const personalContribution = { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0, bonusHits: 0, bonusRespect: 0 };
             try {
                 const now = Math.floor(Date.now() / 1000);
-                if (chain.id > 0 && chain.start) {
-                    const liveAttacks = await fetchAllUserAttacks(apiKey, { from: chain.start, to: now });
-                    liveAttacks.forEach((attack) => {
-                        if (!isSuccessfulAttackDuring(attack, chain.start, now)) return;
-                        personalContribution.chainHits += 1;
-                        personalContribution.chainRespect += Number(attack.respect_gain || 0);
-                    });
+                const basicResponse = await fetchJson(withKey(`${BASE_URL}user/basic`, apiKey)).catch(() => null);
+                const ownPlayerId = Number(basicResponse?.profile?.id || basicResponse?.basic?.id || 0);
+                const warWindowEnd = Number(war?.end || now);
+
+                let liveContribution = null;
+                if (ownPlayerId && chain.id > 0 && chain.start) {
+                    // `faction/chainreport` includes the ongoing chain. It is not
+                    // cached, so Chain Hits and Chain Respect remain live.
+                    const liveResponse = await fetchJson(withKey(`${BASE_URL}faction/chainreport`, apiKey)).catch(() => null);
+                    const liveReport = liveResponse?.chainreport || null;
+                    if (Number(liveReport?.id || 0) === chain.id) {
+                        liveContribution = getReportedChainContribution(liveReport, ownPlayerId);
+                        personalContribution.chainHits = liveContribution.chainHits;
+                        personalContribution.chainRespect = liveContribution.respect;
+                    }
                 }
 
-                if (war?.start) {
-                    const warWindowEnd = Number(war.end || now);
-                    const warAttacks = await fetchAllUserAttacks(apiKey, { from: war.start, to: warWindowEnd });
-                    warAttacks.forEach((attack) => {
-                        if (!isSuccessfulAttackDuring(attack, war.start, warWindowEnd) || attack.is_ranked_war !== true) return;
-                        personalContribution.warHits += 1;
-                        personalContribution.warRespect += Number(attack.respect_gain || 0);
-                        const bonusRespect = getChainBonusRespect(attack);
-                        if (bonusRespect) {
-                            personalContribution.bonusHits += 1;
-                            personalContribution.bonusRespect += bonusRespect;
+                if (ownPlayerId && war?.start) {
+                    if (!state.chainReportCache) state.chainReportCache = {};
+                    const completedChains = await fetchCompletedChainsDuring(apiKey, war.start, warWindowEnd);
+                    const warChainIds = new Set();
+
+                    for (const chainSummary of completedChains) {
+                        const chainId = Number(chainSummary?.id || 0);
+                        const chainStart = Number(chainSummary?.start || 0);
+                        const chainEnd = Number(chainSummary?.end || 0);
+                        if (!chainId || chainStart < war.start || !chainEnd || chainEnd > warWindowEnd) continue;
+                        warChainIds.add(chainId);
+
+                        let report = state.chainReportCache[chainId];
+                        if (report === undefined) {
+                            const response = await fetchJson(withKey(`${BASE_URL}faction/${chainId}/chainreport`, apiKey)).catch(() => null);
+                            report = response?.chainreport || null;
+                            // Completed reports never change, so a complete response
+                            // can be reused for the rest of this browser session.
+                            if (report?.id) state.chainReportCache[chainId] = report;
                         }
-                    });
+                        if (report) addContribution(personalContribution, getReportedChainContribution(report, ownPlayerId));
+                    }
+
+                    if (liveContribution && chain.start >= war.start && !warChainIds.has(chain.id)) {
+                        addContribution(personalContribution, liveContribution);
+                    }
                 }
             } catch (contributionError) {
                 warnLog("Personal contribution calculation failed", { error: safeErrorMessage(contributionError) });
@@ -4518,11 +4571,11 @@
         const contribution = faction.personalContribution || { chainHits: 0, chainRespect: 0, warHits: 0, warRespect: 0, bonusHits: 0, bonusRespect: 0 };
         const contributionCards = [
             buildStatCard("Chain Hits", contribution.chainHits, "Your successful attacks in the currently active chain (0 when no chain is active)", "#9dd8ff"),
-            buildStatCard("Chain Respect", Math.floor(contribution.chainRespect || 0), "Respect earned in the currently active chain (0 when no chain is active)", "#7fe18d"),
-            buildStatCard("War Hits", contribution.warHits, "Total war-flagged attacks across every chain this war, while the war is active", "#9dd8ff"),
-            buildStatCard("War Respect", Math.floor(contribution.warRespect || 0), "Total respect from war-flagged attacks across every chain this war", "#7fe18d"),
+            buildStatCard("Chain Respect", formatRespect(contribution.chainRespect), "Respect earned in the currently active chain (0 when no chain is active)", "#7fe18d"),
+            buildStatCard("War Hits", contribution.warHits, "Your recorded war hits across every chain in this Ranked War", "#9dd8ff"),
+            buildStatCard("War Respect", formatRespect(contribution.warRespect), "Your recorded respect across every chain in this Ranked War", "#7fe18d"),
             buildStatCard("Bonus Hits", contribution.bonusHits, "Your total chain-bonus milestone hits this war", "#c9a0ff"),
-            buildStatCard("Bonus Respect", Math.floor(contribution.bonusRespect || 0), "Respect earned solely from your chain-bonus milestone hits this war", "#c9a0ff")
+            buildStatCard("Bonus Respect", formatRespect(contribution.bonusRespect), "Respect earned solely from your chain-bonus milestone hits this war", "#c9a0ff")
         ].join("");
 
         const factionSubTabs = [

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.1.81
+// @version      1.1.85
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -31,7 +31,7 @@
 
     // Kept in sync with the @version header above on every bump — displayed in the
     // settings tab version can be confirmed, without relying on console access.
-    const VERSION = GM_info.script.version;
+    const VERSION = (typeof GM_info !== "undefined" && GM_info?.script?.version) ? GM_info.script.version : "1.1.84";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -254,6 +254,16 @@
         return compactRuntimeInfo().compact;
     }
 
+    function getLayoutProfile() {
+        const viewport = getViewportMetrics();
+        const panelWidth = Math.max(1, Math.round(state?.dashboard?.getBoundingClientRect?.().width || viewport.width));
+        const scale = Number(window.visualViewport?.scale) || 1;
+        if (panelWidth <= 360 || viewport.height <= 420) return "narrow";
+        if (panelWidth <= 560 || scale > 1.1) return "compact";
+        if (panelWidth <= 860) return "standard";
+        return "wide";
+    }
+
     function getInjectedTornPDAApiKey() {
         const key = String(TORN_PDA_INJECTED_API_KEY || "").trim();
         return key && key !== TORN_PDA_API_KEY_MARKER ? key : "";
@@ -281,9 +291,12 @@
         migrated: "NFC_V1_GM_MIGRATED_V1",
         storagePreference: "NFC_V1_STORAGE_PREFERENCE",
         sections: {
-            faction: "NFC_V1_CACHE_FACTION"
+            faction: "NFC_V1_CACHE_FACTION",
+            staff: "NFC_V1_CACHE_STAFF"
         }
     };
+
+    const STAFF_API_ORIGIN = "https://naughtybot.unifiedbot.net";
 
     const AUTO_REFRESH_MS = 15 * 60 * 1000;
     const QUICK_REFRESH_MS = 5 * 60 * 1000;
@@ -310,7 +323,7 @@
     // is manual-refresh-only; a player knows when their own inventory changes, so it
     // never needs a background/staleness-triggered fetch. The Activity tab has been
     // removed entirely (redundant with Torn's own built-in notifications).
-    const SECTION_STALENESS_MS = { faction: QUICK_REFRESH_MS };
+    const SECTION_STALENESS_MS = { faction: QUICK_REFRESH_MS, staff: QUICK_REFRESH_MS };
 
     const WAR_TARGET_FILTER_DEFAULTS = {
         okay: true,
@@ -388,6 +401,7 @@
         warTargetFFRange: { min: "", max: "" },
         warTargetBSRange: { min: "", max: "" },
         warTargetRangeMetric: "ff",
+        warTargetControlsCollapsed: false,
         warHospitalAlertSettings: createWarHospitalAlertSettings(),
         warHospitalAlertTimers: new Map(),
         warHospitalAlertSyncPromise: null,
@@ -424,6 +438,7 @@
         pendingBackupRestore: null,
         widgetPosition: null,
         dashboard: null,
+        layoutObserver: null,
         lastRefresh: null,
         staffData: null,
         staffStatus: "Not loaded",
@@ -446,6 +461,7 @@
             inventory: 0,
             warTargets: 0,
             staff: 0,
+            settings: 0,
             all: 0
         },
         sectionStatus: {
@@ -454,6 +470,8 @@
             faction: "Not loaded",
             company: "Not loaded",
             inventory: "Not loaded",
+            warTargets: "Not updated",
+            staff: "Not updated",
             settings: "Ready"
         },
         caches: {
@@ -461,7 +479,8 @@
             personal: null,
             faction: null,
             company: null,
-            inventory: null
+            inventory: null,
+            staff: null
         },
         exportInFlight: false
     };
@@ -481,6 +500,11 @@
         const value = Number(num ?? 0);
         if (!Number.isFinite(value)) return "0";
         return Math.round(value).toLocaleString();
+    };
+    const formatOptionalInteger = (num, fallback = "—") => {
+        if (num === null || num === undefined || num === "") return fallback;
+        const value = Number(num);
+        return Number.isFinite(value) ? formatInteger(value) : fallback;
     };
     const formatIdentifier = (value, fallback = "—") => {
         const numeric = Math.trunc(Number(value));
@@ -634,10 +658,12 @@
     function publishRuntimeState() {
         const viewport = getViewportMetrics();
         const compact = isCompactRuntime();
-        state.runtime = { ...state.runtime, viewport, compact };
+        const layoutProfile = getLayoutProfile();
+        state.runtime = { ...state.runtime, viewport, compact, layoutProfile };
         const dashboard = state.dashboard;
         if (dashboard) {
-            dashboard.dataset.runtime = compact ? "tornpda" : state.runtime.platform;
+            dashboard.dataset.runtime = state.runtime.platform;
+            dashboard.dataset.layoutProfile = layoutProfile;
             dashboard.dataset.orientation = viewport.orientation;
             dashboard.dataset.minimized = String(state.isMinimized);
             dashboard.dataset.keyboardOpen = String(!!viewport.keyboardOpen);
@@ -648,6 +674,7 @@
             platform: state.runtime.platform,
             isTornPDA: state.runtime.isTornPDA,
             compact,
+            layoutProfile,
             pdaCandidate: state.runtime.pdaCandidate,
             source: state.runtime.source,
             nativeChecked: state.runtime.nativeChecked,
@@ -775,6 +802,8 @@
     const getManagedStorageKeys = () => [
         APP_STORAGE.key,
         APP_STORAGE.ffscouterKey,
+        APP_STORAGE.staffApiBase,
+        APP_STORAGE.staffApiToken,
         APP_STORAGE.position,
         APP_STORAGE.dashboard,
         APP_STORAGE.companyStockHistory,
@@ -1064,7 +1093,7 @@
         return pdaSetValues({ [key]: value });
     };
 
-    const getBackupSecretStorageKeys = () => [APP_STORAGE.key, APP_STORAGE.ffscouterKey];
+    const getBackupSecretStorageKeys = () => [APP_STORAGE.key, APP_STORAGE.ffscouterKey, APP_STORAGE.staffApiToken];
     const isBackupRecord = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
     const cloneBackupPayload = (value) => JSON.parse(JSON.stringify(value));
     async function createLocalBackupPayload(includeApiKeys) {
@@ -1092,8 +1121,10 @@
         const includeSecrets = Boolean(includeApiKeys);
         if (includeSecrets && !state.injectedApiKeyActive && state.apiKey) values[APP_STORAGE.key] = state.apiKey;
         if (includeSecrets && state.ffscouterKey) values[APP_STORAGE.ffscouterKey] = state.ffscouterKey;
+        if (includeSecrets && state.staffApiToken) values[APP_STORAGE.staffApiToken] = state.staffApiToken;
         if (!includeSecrets || state.injectedApiKeyActive) delete values[APP_STORAGE.key];
         if (!includeSecrets) delete values[APP_STORAGE.ffscouterKey];
+        if (!includeSecrets) delete values[APP_STORAGE.staffApiToken];
         return {
             schema: BACKUP_SCHEMA,
             schemaVersion: BACKUP_SCHEMA_VERSION,
@@ -1227,11 +1258,25 @@
         else void deleteStoredValue(APP_STORAGE.ffscouterKey);
     };
 
-    const getStoredStaffApiBase = () => state.staffApiBase || "";
+    function normalizeStaffApiBase(value) {
+        const raw = String(value || "").trim();
+        if (!raw) return "";
+        try {
+            const parsed = new URL(raw);
+            return parsed.origin === STAFF_API_ORIGIN && (parsed.pathname === "/" || parsed.pathname === "") && !parsed.search && !parsed.hash
+                ? STAFF_API_ORIGIN
+                : "";
+        } catch {
+            return "";
+        }
+    }
+
+    const getStoredStaffApiBase = () => normalizeStaffApiBase(state.staffApiBase);
     const setStoredStaffApiBase = (url) => {
-        state.staffApiBase = String(url || "").trim().replace(/\/+$/, "");
+        state.staffApiBase = normalizeStaffApiBase(url);
         if (state.staffApiBase) void gmSetValue(APP_STORAGE.staffApiBase, state.staffApiBase);
         else void deleteStoredValue(APP_STORAGE.staffApiBase);
+        return state.staffApiBase;
     };
 
     const getStoredStaffApiToken = () => state.staffApiToken || "";
@@ -1240,6 +1285,22 @@
         if (state.staffApiToken) void gmSetValue(APP_STORAGE.staffApiToken, state.staffApiToken);
         else void deleteStoredValue(APP_STORAGE.staffApiToken);
     };
+
+    function normalizeStaffStatusPayload(raw) {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Staff Dashboard returned an invalid response.");
+        const asList = (value) => Array.isArray(value) ? value.filter((item) => item && typeof item === "object") : [];
+        return {
+            members: asList(raw.members),
+            loans: asList(raw.loans),
+            bleeders: asList(raw.bleeders),
+            revives: asList(raw.revives),
+            wars: asList(raw.wars),
+            armory_key_configured: raw.armory_key_configured !== false,
+            revive_key_configured: raw.revive_key_configured !== false,
+            hospitalized_count: Math.max(0, Math.trunc(Number(raw.hospitalized_count) || 0)),
+            source_updated_at: typeof raw.updated_at === "string" ? raw.updated_at : ""
+        };
+    }
 
     const getStoredPosition = () => state.widgetPosition || null;
     const getStoredMinimizedPosition = (position = getStoredPosition()) => {
@@ -1282,6 +1343,7 @@
         warTargetFFRange: state.warTargetFFRange,
         warTargetBSRange: state.warTargetBSRange,
         warTargetRangeMetric: state.warTargetRangeMetric,
+        warTargetControlsCollapsed: state.warTargetControlsCollapsed,
         warHospitalAlertSettings: state.warHospitalAlertSettings,
         warTargetSort: state.warTargetSort,
         autoRefreshSettings: state.autoRefreshSettings,
@@ -1329,6 +1391,9 @@
         }
         if (payload && payload.warTargetRangeMetric) {
             state.warTargetRangeMetric = payload.warTargetRangeMetric === "bs" ? "bs" : "ff";
+        }
+        if (payload && typeof payload.warTargetControlsCollapsed === "boolean") {
+            state.warTargetControlsCollapsed = payload.warTargetControlsCollapsed;
         }
         if (payload && payload.warHospitalAlertSettings && typeof payload.warHospitalAlertSettings === "object") {
             state.warHospitalAlertSettings = normalizeWarHospitalAlertSettings(payload.warHospitalAlertSettings);
@@ -1518,7 +1583,7 @@
         state.injectedApiKeyActive = Boolean(getInjectedTornPDAApiKey());
         state.ffscouterKey = (await gmGetValue(APP_STORAGE.ffscouterKey, "")) || "";
         state.ffscouterStatus = state.ffscouterKey ? "Saved · Not verified" : "Not configured";
-        state.staffApiBase = (await gmGetValue(APP_STORAGE.staffApiBase, "")) || "";
+        state.staffApiBase = normalizeStaffApiBase((await gmGetValue(APP_STORAGE.staffApiBase, "")) || "");
         state.staffApiToken = (await gmGetValue(APP_STORAGE.staffApiToken, "")) || "";
         state.widgetPosition = await gmGetValue(APP_STORAGE.position, null);
         const savedDashboardState = await gmGetValue(APP_STORAGE.dashboard, { currentTab: "faction" });
@@ -1596,12 +1661,15 @@
             max: String(dashboardState.warTargetBSRange?.max ?? "")
         };
         state.warTargetRangeMetric = dashboardState.warTargetRangeMetric === "bs" ? "bs" : "ff";
+        state.warTargetControlsCollapsed = dashboardState.warTargetControlsCollapsed === true;
         state.warHospitalAlertSettings = normalizeWarHospitalAlertSettings(dashboardState.warHospitalAlertSettings);
         const savedWarTargetSort = dashboardState.warTargetSort || {};
         state.warTargetSort = {
             key: warTargetColumns.includes(savedWarTargetSort.key) ? savedWarTargetSort.key : "status",
             direction: savedWarTargetSort.direction === "desc" ? "desc" : "asc"
         };
+        state.lastRefreshBySection.settings = Date.now();
+        state.sectionStatus.settings = "Fresh — local settings loaded.";
 
         const sectionNames = Object.keys(APP_STORAGE.sections);
         sectionNames.forEach((name) => {
@@ -1617,6 +1685,15 @@
                 if (bundle.status) state.sectionStatus[name] = bundle.status;
             }
         }));
+        try {
+            state.staffData = state.caches.staff ? normalizeStaffStatusPayload(state.caches.staff) : null;
+        } catch (error) {
+            state.caches.staff = null;
+            state.staffData = null;
+            state.lastRefreshBySection.staff = 0;
+            state.sectionStatus.staff = "Partial — saved Staff cache was invalid.";
+            warnLog("Saved Staff cache was discarded", { error: safeErrorMessage(error) });
+        }
 
         debugLog("Persisted state restored", {
             hasKey: !!getStoredKey(),
@@ -4336,7 +4413,7 @@
         const data = faction.warTargets || null;
         const war = faction.war || data?.war || null;
         if (!war) {
-            return `<div class="nfc-panel-card nfc-empty-card">No active Ranked War enemy faction.</div>`;
+            return `<div class="nfc-panel-card nfc-empty-card">No scheduled or active Ranked War enemy faction.</div>`;
         }
         if (!getStoredFFScouterKey()) {
             return `<div class="nfc-panel-card nfc-notice-card">Add and verify your separate FFScouter-linked Torn API key under <strong>Settings → Integrations</strong> to load projected stats and Fair Fight values.</div>`;
@@ -4369,6 +4446,14 @@
         const rangeActive = String(selectedRange.min).trim() !== "" || String(selectedRange.max).trim() !== "";
         const rangeLabel = rangeMetric === "bs" ? "Est. BS Range" : "FF Range";
         const rangeStep = rangeMetric === "bs" ? "1" : "0.01";
+        const phase = getRankedWarPhase(war);
+        const enabledViewFilters = Object.values(state.warTargetFilters).filter((enabled) => enabled !== false).length;
+        const rangeSummary = rangeActive
+            ? `${rangeLabel} ${selectedRange.min || "0"}–${selectedRange.max || "∞"}`
+            : `${rangeLabel} all`;
+        const sortAndViewSummary = `${activeSort.label} · ${sortDirection} · ${formatInteger(enabledViewFilters)} of ${formatInteger(Object.keys(WAR_TARGET_FILTER_DEFAULTS).length)} filters · ${rangeSummary}`;
+        const controlsCollapsed = state.warTargetControlsCollapsed === true;
+        const filterToggle = `<button type="button" class="nfc-secondary-action" data-action="toggle-war-target-controls" aria-expanded="${controlsCollapsed ? "false" : "true"}" title="${controlsCollapsed ? "Show Sort & View controls" : "Hide Sort & View controls"}">${controlsCollapsed ? "Show Sort & View" : "Hide Sort & View"}</button>`;
         const rangePanel = `
             <div class="ntc-war-ff-range" style="display:flex;align-items:center;gap:5px;flex:1 1 205px;min-width:0;flex-wrap:wrap;">
                 <span class="ntc-war-filter-group-label" style="color:#929eac;font-size:9px;font-weight:850;text-transform:uppercase;letter-spacing:.45px;min-width:48px;">Range</span>
@@ -4379,6 +4464,9 @@
                 <button id="clear-war-ff-range-btn" type="button" ${rangeActive ? "" : "disabled"} style="border:1px solid #3a424d;border-radius:5px;background:${rangeActive ? "#303944" : "#20262d"};color:${rangeActive ? "#d7dde5" : "#697582"};padding:4px 6px;font-size:9px;cursor:${rangeActive ? "pointer" : "default"};">${rangeActive ? "Clear" : "Off"}</button>
             </div>
         `;
+        const sortAndViewPanel = controlsCollapsed
+            ? `<div class="ntc-war-target-filter-panel nfc-ffscouter-filter-panel" style="display:flex;align-items:center;justify-content:space-between;gap:7px 12px;flex-wrap:wrap;"><div class="nfc-ffscouter-sort-summary" style="display:grid;gap:1px;min-width:0;"><span class="ntc-war-filter-heading" style="color:#fff;font-size:10px;font-weight:900;">Sort &amp; View</span><span style="color:#697582;font-size:8px;overflow-wrap:anywhere;">${escapeHtml(sortAndViewSummary)}</span></div>${filterToggle}</div>`
+            : `<div class="ntc-war-target-filter-panel nfc-ffscouter-filter-panel" style="display:flex;align-items:center;gap:7px 12px;flex-wrap:wrap;"><div class="nfc-ffscouter-sort-summary" style="display:grid;gap:1px;min-width:0;"><span class="ntc-war-filter-heading" style="color:#fff;font-size:10px;font-weight:900;">Sort &amp; View</span><span style="color:#697582;font-size:8px;overflow-wrap:anywhere;">${escapeHtml(sortAndViewSummary)}</span></div>${filterToggle}${filterPanel}${rangePanel}</div>`;
         const rows = targets.map((target) => {
             const online = String(target.lastAction?.status || "Unknown");
             const onlineColor = online === "Online" ? "#7fe18d" : online === "Idle" ? "#e0a25e" : "#9aa4b2";
@@ -4407,14 +4495,10 @@
                 <div class="ntc-ffscouter-summary-viewport" style="flex:0 0 auto;min-height:0;overflow:hidden;">
                     <div class="ntc-ffscouter-summary nfc-ffscouter-summary" style="display:grid;gap:8px;">
                         <div class="nfc-ffscouter-header-row" style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap;">
-                            <div class="nfc-ffscouter-heading"><div class="nfc-ffscouter-title">${escapeHtml(war.oppTag)} War Targets</div><div class="nfc-ffscouter-subtitle">${formatInteger(targets.length)} shown / ${formatInteger(allTargets.length)} members · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div><div class="nfc-ffscouter-guidance">Availability: Okay → Hospital (soonest first) → Traveling/Abroad · click headers to sort within groups</div><div class="nfc-ffscouter-guidance">Drag ⠿ to reorder columns · drag a header's right edge to resize</div></div>
+                            <div class="nfc-ffscouter-heading"><div class="nfc-ffscouter-title">${escapeHtml(war.oppTag)} War Targets</div><div class="nfc-ffscouter-subtitle">${formatInteger(targets.length)} shown / ${formatInteger(allTargets.length)} members · ${escapeHtml(phase.label)}${phase.detail ? ` · ${escapeHtml(phase.detail)}` : ""} · Live updated ${escapeHtml(refreshed)} · ${escapeHtml(data?.liveSource || "Torn")}</div><div class="nfc-ffscouter-guidance">Availability: Okay → Hospital (soonest first) → Traveling/Abroad · click headers to sort within groups</div><div class="nfc-ffscouter-guidance">Drag ⠿ to reorder columns · drag a header's right edge to resize</div></div>
                             <div class="nfc-ffscouter-actions" style="display:flex;gap:6px;flex-wrap:wrap;"><button id="refresh-war-live-btn" class="nfc-primary-action">Refresh Live Status</button></div>
                         </div>
-                        <div class="ntc-war-target-filter-panel nfc-ffscouter-filter-panel" style="display:flex;align-items:center;gap:7px 12px;flex-wrap:wrap;">
-                            <div class="nfc-ffscouter-sort-summary" style="display:grid;gap:1px;flex:0 0 auto;"><span class="ntc-war-filter-heading" style="color:#fff;font-size:10px;font-weight:900;">Sort &amp; View</span><span style="color:#697582;font-size:8px;white-space:nowrap;">${escapeHtml(activeSort.label)} · ${sortDirection}</span></div>
-                            ${filterPanel}
-                            ${rangePanel}
-                        </div>
+                        ${sortAndViewPanel}
                         <div class="nfc-ffscouter-stat-grid" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;">${buildStatCard("Online / Idle", onlineCount, "Live Torn status", "#7fe18d")}${buildStatCard("Healthy", okayCount, "Status: Okay", "#5ba7f7")}</div>
                         ${notices.map((notice) => `<div style="color:#e0a25e;font-size:10px;line-height:1.4;">⚠ ${escapeHtml(notice)}</div>`).join("")}
                     </div>
@@ -4471,7 +4555,6 @@
             </div>
         `;
         return `
-            ${renderSectionMeta("faction", "Faction")}
             <div class="nfc-subtabs">${subTabButtons}</div>
             ${activeSubTab === "ffscouter" ? renderFFScouterWarTargets(faction) : generalContent}
         `;
@@ -4694,14 +4777,16 @@
                 }
                 case "staff": {
                     if (!getStoredStaffApiBase()) {
-                        if (statusEl) statusEl.innerText = "⚠️ Set a Staff API base URL in Settings first.";
+                        state.sectionStatus.staff = "Not updated — configure the approved Staff Dashboard in Settings.";
+                        if (statusEl) statusEl.innerText = "Set the approved Staff Dashboard in Settings first.";
                         return false;
                     }
                     const staffData = await fetchStaffStatus();
                     if (!isCurrentPageScope(pageScopeEpoch)) return false;
                     state.staffData = staffData;
-                    state.lastRefreshBySection.staff = Date.now();
-                    state.staffStatus = `Updated ${new Date().toLocaleTimeString()}`;
+                    state.staffStatus = "Fresh — Staff Dashboard response received.";
+                    state.sectionStatus.staff = state.staffStatus;
+                    setSectionCache("staff", staffData);
                     break;
                 }
                 default:
@@ -4745,9 +4830,12 @@
         const dialogText = state.theme === "light" ? "#17202b" : "#f1f3f5";
         const dialogMuted = state.theme === "light" ? "#536170" : "#aeb7c2";
         const runtimeViewport = state.runtime.viewport || getViewportMetrics();
-        const runtimeLabel = state.runtime.isTornPDA ? "TornPDA" : (state.runtime.pdaCandidate && !state.runtime.nativeChecked ? "Checking TornPDA…" : compactRuntimeInfo().label);
+        const runtimeLabel = state.runtime.isTornPDA ? "TornPDA" : (state.runtime.pdaCandidate && !state.runtime.nativeChecked ? "Checking TornPDA…" : "Desktop");
         const runtimeDetail = `${runtimeViewport.orientation} · ${formatInteger(runtimeViewport.width)}×${formatInteger(runtimeViewport.height)}`;
-        const screenSize = `${formatInteger(runtimeViewport.width)} × ${formatInteger(runtimeViewport.height)} px`;
+        const panelRect = state.dashboard?.getBoundingClientRect?.();
+        const panelSize = panelRect ? `${formatInteger(panelRect.width)} × ${formatInteger(panelRect.height)} px` : "—";
+        const screenSize = `${formatInteger(runtimeViewport.width)} × ${formatInteger(runtimeViewport.height)} px screen · ${panelSize} panel`;
+        const layoutProfile = state.runtime.layoutProfile || getLayoutProfile();
         const storageMethod = getStorageMethodLabel();
         const injectedApiKeyActive = state.injectedApiKeyActive || Boolean(getInjectedTornPDAApiKey());
         const nativeReminderAvailable = canUseNativePdaFeatures();
@@ -4809,7 +4897,8 @@
                     <div style="border: 1px solid #3d3d3d; border-radius: 6px; padding: 10px; display: grid; gap: 8px;">
                         <div style="color: #fff; font-weight: 700; font-size: 12px;">Runtime &amp; Storage</div>
                         <div class="nfc-runtime-indicator" title="Runtime detection uses TornPDA's GM.info/native bridge signals, not touch or screen width."><span>Runtime</span><strong>${escapeHtml(runtimeLabel)}</strong><em>${escapeHtml(runtimeDetail)}</em></div>
-                        <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;color:#bfc7d1;font-size:11px;"><span>Screen Size</span><strong style="color:#f1f3f5;text-align:right;">${escapeHtml(screenSize)}</strong></div>
+                        <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;color:#bfc7d1;font-size:11px;"><span>Screen / Panel Size</span><strong style="color:#f1f3f5;text-align:right;">${escapeHtml(screenSize)}</strong></div>
+                        <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;color:#bfc7d1;font-size:11px;"><span>Layout Profile</span><strong style="color:#f1f3f5;text-align:right;text-transform:capitalize;">${escapeHtml(layoutProfile)}</strong></div>
                         <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.5fr);gap:8px;align-items:center;color:#bfc7d1;font-size:11px;"><span>Storage Method</span><strong id="storage-method-value" style="color:#f1f3f5;text-align:right;overflow-wrap:anywhere;">${escapeHtml(storageMethod)}</strong></div>
                         <label style="display:flex;align-items:flex-start;gap:7px;color:#f1f3f5;font-size:11px;line-height:1.35;cursor:${legacyStorageUnavailable ? "not-allowed" : "pointer"};">
                             <input id="use-legacy-gm-storage-input" type="checkbox" ${state.useLegacyGMStorage ? "checked" : ""}${legacyStorageUnavailable ? " disabled" : ""} />
@@ -4835,7 +4924,7 @@
                     </div>
                     <div style="color: #fff; font-weight: 700; font-size: 12px;">Naughty Faction Companion · Torn API Key</div>
                     <div style="display: flex; gap: 8px;">
-                        <input type="password" id="torn-api-key-input" value="${injectedApiKeyActive ? "" : escapeHtml(getStoredKey())}" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 1; font-size: 11px;" placeholder="${injectedApiKeyActive ? "Using TornPDA's injected API key" : "Enter Torn API key"}" ${injectedApiKeyActive ? "disabled" : ""} />
+                        <input type="password" id="torn-api-key-input" value="" autocomplete="new-password" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 1; font-size: 11px;" placeholder="${injectedApiKeyActive ? "Using TornPDA's injected API key" : getStoredKey() ? "Saved key — enter a replacement" : "Enter Torn API key"}" ${injectedApiKeyActive ? "disabled" : ""} />
                         <button id="save-api-key-btn" style="background: #3b5998; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;" ${injectedApiKeyActive ? "disabled" : ""}>Save</button>
                     </div>
                     ${injectedApiKeyActive ? '<div style="color:#7fe18d;font-size:10px;line-height:1.4;">Using TornPDA&#8217;s injected API key. Its value is not shown or saved by this companion.</div>' : ""}
@@ -4849,7 +4938,7 @@
                         <div style="color: #aaa; font-size: 11px; line-height: 1.45; margin-top: 3px;">Enter the Torn API key registered with FFScouter. This credential is stored separately and is never substituted for the Naughty Faction Companion Torn API key.</div>
                     </div>
                     <div style="display: flex; gap: 7px; flex-wrap: wrap;">
-                        <input type="password" id="ffscouter-api-key-input" value="${escapeHtml(getStoredFFScouterKey())}" maxlength="16" autocomplete="off" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 1 1 190px; min-width: 0; font-size: 11px;" placeholder="16-character FFScouter-linked Torn key" />
+                        <input type="password" id="ffscouter-api-key-input" value="" maxlength="16" autocomplete="new-password" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 1 1 190px; min-width: 0; font-size: 11px;" placeholder="${getStoredFFScouterKey() ? "Saved key — enter a replacement" : "16-character FFScouter-linked Torn key"}" />
                         <button id="save-ffscouter-key-btn" style="background: #3b5998; color: white; border: none; border-radius: 6px; padding: 8px 11px; font-size: 11px; cursor: pointer;">Save</button>
                         <button id="verify-ffscouter-key-btn" style="background: #2f6f50; color: white; border: none; border-radius: 6px; padding: 8px 11px; font-size: 11px; cursor: pointer;">Verify</button>
                         <button id="clear-ffscouter-key-btn" style="background: #7a3535; color: white; border: none; border-radius: 6px; padding: 8px 11px; font-size: 11px; cursor: pointer;">Clear</button>
@@ -4868,15 +4957,15 @@
                 <div style="border: 1px solid #3d3d3d; border-radius: 8px; padding: 11px; display: grid; gap: 9px; background: rgba(255,255,255,0.02);">
                     <div>
                         <div style="color: #fff; font-weight: 800; font-size: 13px;">Staff Dashboard</div>
-                        <div style="color: #aaa; font-size: 11px; line-height: 1.45; margin-top: 3px;">Enables the Staff tab. Base URL and token come from whoever runs your faction's NaughtyBot dashboard - ask a leader if you don't have these.</div>
+                        <div style="color: #aaa; font-size: 11px; line-height: 1.45; margin-top: 3px;">Enables the Staff tab through the approved NaughtyBot service. The optional token is sent in request headers, never in the address or console log.</div>
                     </div>
                     <div style="display: flex; gap: 7px; flex-wrap: wrap;">
-                        <input type="text" id="staff-api-base-input" value="${escapeHtml(getStoredStaffApiBase())}" autocomplete="off" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 2 1 220px; min-width: 0; font-size: 11px;" placeholder="https://your-dashboard-host" />
-                        <input type="password" id="staff-api-token-input" value="${escapeHtml(getStoredStaffApiToken())}" autocomplete="off" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 1 1 140px; min-width: 0; font-size: 11px;" placeholder="Token (if required)" />
+                        <input type="text" id="staff-api-base-input" value="${escapeHtml(getStoredStaffApiBase())}" inputmode="url" autocomplete="off" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 2 1 220px; min-width: 0; font-size: 11px;" placeholder="${STAFF_API_ORIGIN}" />
+                        <input type="password" id="staff-api-token-input" value="" autocomplete="new-password" style="background: #111; border: 1px solid #444; border-radius: 6px; color: #fff; padding: 8px; flex: 1 1 140px; min-width: 0; font-size: 11px;" placeholder="${getStoredStaffApiToken() ? "Saved token — enter a replacement" : "Token (if required)"}" />
                         <button id="save-staff-api-btn" style="background: #3b5998; color: white; border: none; border-radius: 6px; padding: 8px 11px; font-size: 11px; cursor: pointer;">Save</button>
                         <button id="clear-staff-api-btn" style="background: #7a3535; color: white; border: none; border-radius: 6px; padding: 8px 11px; font-size: 11px; cursor: pointer;">Clear</button>
                     </div>
-                    <div id="staff-api-status" style="color: #bfc7d1; font-size: 11px; line-height: 1.4;">${getStoredStaffApiBase() ? "Configured." : "Not configured - Staff tab is disabled."}</div>
+                    <div id="staff-api-status" style="color: #bfc7d1; font-size: 11px; line-height: 1.4;">${getStoredStaffApiBase() ? `Configured · ${STAFF_API_ORIGIN}` : `Use ${STAFF_API_ORIGIN} to enable Staff.`}</div>
                 </div>
             `;
         const refreshContent = `
@@ -4915,7 +5004,6 @@
             : (currentSubTab === "integrations" ? integrationsContent : (currentSubTab === "export" ? exportContent : controlsContent));
 
         return `
-            ${renderSectionMeta("settings", "Settings")}
             <div class="nfc-settings-layout" style="display: grid; gap: 10px;">
                 <div class="nfc-subtabs">${subTabButtons}</div>
                 ${content}
@@ -4956,12 +5044,38 @@
         `;
     }
 
+    function getSectionSourceLabel(section) {
+        if (section === "staff") return "NaughtyBot Staff Dashboard";
+        if (section === "settings") return "Local companion settings";
+        if (section === "warTargets") return "Torn API + FFScouter";
+        return "Torn API";
+    }
+
+    function getSectionFreshness(section, timestamp = state.lastRefreshBySection[section]) {
+        const updatedAt = Math.max(0, Number(timestamp) || 0);
+        const status = String(state.sectionStatus[section] || "");
+        if (!updatedAt) return { label: "Not updated", updatedAt: 0, status, source: getSectionSourceLabel(section) };
+        const age = Math.max(0, Date.now() - updatedAt);
+        const threshold = section === "staff" ? 60 * 1000 : section === "faction" ? 90 * 1000 : QUICK_REFRESH_MS;
+        const label = /partial|error|failed|unavailable|invalid/i.test(status) ? "Partial" : age > threshold ? "Stale" : "Fresh";
+        return { label, updatedAt, status, source: getSectionSourceLabel(section) };
+    }
+
+    function formatUtcTimestamp(timestamp) {
+        return timestamp ? new Date(timestamp).toISOString().replace(/\.\d{3}Z$/, " UTC") : "—";
+    }
+
     function renderSectionMeta(section, label) {
-        const status = state.sectionStatus[section] || "Not loaded";
+        const freshness = getSectionFreshness(section);
+        const subTab = section === "faction"
+            ? (state.factionSubTab === "ffscouter" ? "FFScouter" : "General")
+            : section === "staff"
+                ? (STAFF_SUBTABS.find((tab) => tab.id === state.staffSubTab)?.label || "Statuses")
+                : "";
         return `
-            <div class="nfc-section-meta">
+            <div class="nfc-section-meta" data-freshness="${freshness.label.toLowerCase().replace(/\s+/g, "-")}">
                 <span class="nfc-section-label">${escapeHtml(label)}</span>
-                <span class="nfc-section-status">${escapeHtml(status)}</span>
+                <span class="nfc-section-status"><strong>${escapeHtml(freshness.label)}</strong> · ${escapeHtml(formatUtcTimestamp(freshness.updatedAt))} · ${freshness.updatedAt ? escapeHtml(formatRelativeTime(Math.floor(freshness.updatedAt / 1000))) : "never"} · ${escapeHtml(freshness.source)}${subTab ? ` · ${escapeHtml(subTab)}` : ""}</span>
             </div>
         `;
     }
@@ -5083,8 +5197,13 @@
         if (saveButton && !saveButton.dataset.bound) {
             saveButton.dataset.bound = "true";
             saveButton.onclick = () => {
-                const apiKey = apiKeyInput ? apiKeyInput.value : getStoredKey();
+                const apiKey = String(apiKeyInput?.value || "").trim();
+                if (!apiKey) {
+                    setUserStatus(status, getStoredKey() ? "Saved API key retained. Enter a replacement before saving." : "Enter an API key before saving.", "info");
+                    return;
+                }
                 setStoredKey(apiKey);
+                if (apiKeyInput) apiKeyInput.value = "";
                 debugLog("API key saved", { length: String(apiKey || "").length });
                 setUserStatus(status, "API key saved locally.", "success");
             };
@@ -5094,8 +5213,14 @@
             saveFFScouterButton.dataset.bound = "true";
             saveFFScouterButton.onclick = () => {
                 try {
-                    const key = validateFFScouterKey(ffscouterKeyInput?.value);
+                    const entered = String(ffscouterKeyInput?.value || "").trim();
+                    if (!entered) {
+                        setFFScouterStatus(getStoredFFScouterKey() ? "Saved key retained. Enter a replacement before saving." : "Enter a FFScouter key before saving.");
+                        return;
+                    }
+                    const key = validateFFScouterKey(entered);
                     setStoredFFScouterKey(key);
+                    if (ffscouterKeyInput) ffscouterKeyInput.value = "";
                     setFFScouterStatus("Saved · Not verified");
                     setUserStatus(status, "FFScouter key saved separately.", "success");
                 } catch (error) {
@@ -5110,7 +5235,7 @@
                 verifyFFScouterButton.disabled = true;
                 setFFScouterStatus("Verifying with FFScouter...", "#9dd8ff");
                 try {
-                    const result = await verifyFFScouterKey(ffscouterKeyInput?.value);
+                    const result = await verifyFFScouterKey(String(ffscouterKeyInput?.value || "").trim() || getStoredFFScouterKey());
                     const details = getFFScouterVerificationDetails(result.data);
                     showFFScouterDialog(details);
                     if (!result.data?.is_registered) {
@@ -5153,12 +5278,19 @@
         if (saveStaffApiButton && !saveStaffApiButton.dataset.bound) {
             saveStaffApiButton.dataset.bound = "true";
             saveStaffApiButton.onclick = () => {
-                setStoredStaffApiBase(staffApiBaseInput ? staffApiBaseInput.value : getStoredStaffApiBase());
-                setStoredStaffApiToken(staffApiTokenInput ? staffApiTokenInput.value : getStoredStaffApiToken());
-                if (staffApiStatus) {
-                    staffApiStatus.textContent = getStoredStaffApiBase() ? "Configured." : "Not configured - Staff tab is disabled.";
+                const base = setStoredStaffApiBase(staffApiBaseInput ? staffApiBaseInput.value : getStoredStaffApiBase());
+                if (!base) {
+                    if (staffApiStatus) staffApiStatus.textContent = `Use the approved address: ${STAFF_API_ORIGIN}`;
+                    setUserStatus(status, `Staff Dashboard address must be ${STAFF_API_ORIGIN}.`, "error");
+                    return;
                 }
-                setUserStatus(status, "Staff API settings saved.", "success");
+                const replacementToken = String(staffApiTokenInput?.value || "").trim();
+                if (replacementToken) setStoredStaffApiToken(replacementToken);
+                if (staffApiTokenInput) staffApiTokenInput.value = "";
+                if (staffApiStatus) {
+                    staffApiStatus.textContent = `Configured · ${STAFF_API_ORIGIN}${getStoredStaffApiToken() ? " · token saved" : ""}.`;
+                }
+                setUserStatus(status, "Staff Dashboard settings saved.", "success");
             };
         }
 
@@ -5167,6 +5299,11 @@
             clearStaffApiButton.onclick = () => {
                 setStoredStaffApiBase("");
                 setStoredStaffApiToken("");
+                state.staffData = null;
+                state.caches.staff = null;
+                state.lastRefreshBySection.staff = 0;
+                state.sectionStatus.staff = "Not updated";
+                void deleteStoredValue(APP_STORAGE.sections.staff);
                 if (staffApiBaseInput) staffApiBaseInput.value = "";
                 if (staffApiTokenInput) staffApiTokenInput.value = "";
                 if (staffApiStatus) staffApiStatus.textContent = "Not configured - Staff tab is disabled.";
@@ -5554,6 +5691,18 @@
         return start > 0 && Date.now() >= start * 1000;
     }
 
+    function getRankedWarPhase(war, now = Date.now()) {
+        const startAt = Number(war?.start || 0) * 1000;
+        if (startAt > now) {
+            return {
+                isPreWar: true,
+                label: "Pre-war scouting",
+                detail: `Starts in ${formatDuration(Math.ceil((startAt - now) / 1000))}`
+            };
+        }
+        return { isPreWar: false, label: "Live Ranked War", detail: "" };
+    }
+
     async function refreshWarTargets() {
         if (!state.pageScopeActive || state.isMinimized) return false;
         const pageScopeEpoch = state.pageScopeEpoch;
@@ -5561,16 +5710,12 @@
         const faction = state.caches.faction || {};
         const war = faction.war || null;
         const apiKey = getStoredKey();
-        if (!apiKey || !war || !getStoredFFScouterKey()) return false;
-        const existing = faction.warTargets || {};
-        if (!hasRankedWarStarted(war)) {
-            state.caches.faction = {
-                ...faction,
-                warTargets: { ...existing, war: { ...war }, targets: [], error: "FFScouter targets load after the Ranked War begins." }
-            };
-            if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") renderTabContent();
+        if (!apiKey || !war || !getStoredFFScouterKey()) {
+            state.sectionStatus.warTargets = "Not updated — Torn key, FFScouter key, and a scheduled or active Ranked War are required.";
             return false;
         }
+        const existing = faction.warTargets || {};
+        const phase = getRankedWarPhase(war);
         const cacheMatchesWar = Number(existing.war?.warId || 0) === Number(war.warId || 0);
         const loadStatic = !cacheMatchesWar || !Number(existing.staticLookupAttemptedAt || 0);
         state.warTargetsRefreshInFlight = true;
@@ -5581,12 +5726,20 @@
             if (Number(currentFaction.war?.warId || 0) !== Number(war.warId || 0)) return false;
             state.caches.faction = { ...currentFaction, warTargets: { ...refreshed, war: { ...war } } };
             state.lastRefreshBySection.warTargets = Date.now();
+            state.sectionStatus.warTargets = refreshed.liveError
+                ? `Partial — ${refreshed.liveError}`
+                : phase.isPreWar
+                    ? "Fresh — Pre-war FFScouter target data updated."
+                    : "Fresh — FFScouter target data updated.";
             void gmSetValue(APP_STORAGE.sections.faction, {
                 data: state.caches.faction,
                 lastRefresh: state.lastRefreshBySection.faction,
                 status: state.sectionStatus.faction
             });
-            if (!refreshed.liveError) void syncWarHospitalAlertsFromFreshData();
+            if (!refreshed.liveError) {
+                if (hasRankedWarStarted(war)) void syncWarHospitalAlertsFromFreshData();
+                else void clearScheduledWarHospitalAlerts();
+            }
             if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") renderTabContent();
             return true;
         } catch (error) {
@@ -5604,6 +5757,7 @@
                     }
                 };
             }
+            state.sectionStatus.warTargets = `Partial — ${safeErrorMessage(error)}`;
             if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") renderTabContent();
             return false;
         } finally {
@@ -5614,6 +5768,12 @@
     function bindFactionControls() {
         const contentEl = document.getElementById("nfc-content");
         if (!contentEl || state.currentTab !== "faction") return;
+        const warTargetControlsToggle = contentEl.querySelector("[data-action='toggle-war-target-controls']");
+        if (warTargetControlsToggle) warTargetControlsToggle.onclick = () => {
+            state.warTargetControlsCollapsed = !state.warTargetControlsCollapsed;
+            setStoredDashboardState({ warTargetControlsCollapsed: state.warTargetControlsCollapsed });
+            renderTabContent();
+        };
         contentEl.querySelectorAll("[data-war-target-filter]").forEach((input) => {
             input.onchange = () => {
                 const key = input.getAttribute("data-war-target-filter");
@@ -5822,31 +5982,15 @@
         });
     }
 
-    // Only overview/personal/faction/company/inventory get this bar (settings has
-    // its own dedicated "Refresh all sections" control already). Auto-refreshable
-    // tabs (overview/personal-on-Info/faction) get a subtler note since they update
-    // themselves; the manual-only ones (company/inventory) get a slightly more
-    // prominent call to action since the button is their only path to fresh data.
-    // Activity tab has been removed entirely (redundant with Torn's own built-in
-    // notifications).
-    const AUTO_REFRESH_TAB_SECTIONS = new Set(["overview", "personal", "faction"]);
     function renderSectionRefreshHeader(sectionKey, label) {
-        const lastRefreshMs = state.lastRefreshBySection[sectionKey] || 0;
-        const updatedText = lastRefreshMs ? formatRelativeTime(Math.floor(lastRefreshMs / 1000)) : "never";
-        // Personal only actually auto-refreshes while the Info sub-tab is active —
-        // Skills/Education, Perks, and Awards don't trigger the periodic cycle, so
-        // the note needs to reflect that instead of always claiming "auto-refreshes".
-        const isPersonalOnInfo = sectionKey === "personal" && state.personalSubTab === "info";
-        const isAuto = sectionKey === "personal" ? isPersonalOnInfo : AUTO_REFRESH_TAB_SECTIONS.has(sectionKey);
-        const noteText = sectionKey === "personal"
-            ? (isPersonalOnInfo ? "auto-refreshes on Info" : "auto-refreshes only on Info sub-tab")
-            : sectionKey === "faction"
-                ? "live-updates (10s) while viewing"
-                : (isAuto ? "auto-refreshes" : "manual refresh only");
+        const sourceSection = sectionKey === "faction" && state.factionSubTab === "ffscouter" ? "warTargets" : sectionKey;
+        const freshness = getSectionFreshness(sourceSection);
+        const canRefresh = sectionKey !== "settings";
+        const scope = sourceSection === "warTargets" ? "FFScouter data" : sectionKey === "staff" ? "Staff data" : sectionKey === "faction" ? "Faction data" : `${label} data`;
         return `
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 10px;background:rgba(255,255,255,0.03);border-bottom:1px solid #333;font-size:10px;color:#999;flex-shrink:0;">
-                <span>UPDATED: <span data-section-updated="${sectionKey}" style="color:#ccc;">${escapeHtml(updatedText)}</span> <span style="color:#666;">(${label} ${noteText})</span></span>
-                <button data-section-refresh="${sectionKey}" style="background:${isAuto ? "#2f5b8a" : "#8f5a1f"};color:#fff;border:none;border-radius:4px;padding:4px 10px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;">🔄 Refresh</button>
+            <div class="nfc-tab-status" data-freshness="${freshness.label.toLowerCase().replace(/\s+/g, "-")}">
+                <div class="nfc-tab-status-copy"><strong>${escapeHtml(label)} · ${escapeHtml(freshness.label)}</strong><span>${escapeHtml(formatUtcTimestamp(freshness.updatedAt))} · ${freshness.updatedAt ? escapeHtml(formatRelativeTime(Math.floor(freshness.updatedAt / 1000))) : "never"} · ${escapeHtml(freshness.source)}</span></div>
+                ${canRefresh ? `<button data-section-refresh="${sourceSection}" class="nfc-primary-action" type="button">Refresh ${escapeHtml(scope)}</button>` : `<span class="nfc-tab-status-note">Settings saved locally</span>`}
             </div>
         `;
     }
@@ -5862,10 +6006,33 @@
                 debugLog("Per-tab refresh button clicked", { sectionKey });
                 button.disabled = true;
                 button.textContent = "Refreshing...";
-                await refreshSectionByKey(sectionKey, null);
+                if (sectionKey === "warTargets") await refreshWarTargets();
+                else await refreshSectionByKey(sectionKey, null);
                 renderTabContent();
             };
         });
+    }
+
+    function getHeaderRefreshTarget() {
+        if (state.currentTab === "staff") return { section: "staff", label: "Refresh Staff data" };
+        if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") return { section: "warTargets", label: "Refresh FFScouter data" };
+        if (state.currentTab === "faction") return { section: "faction", label: "Refresh Faction data" };
+        return { section: null, label: "Settings saved locally" };
+    }
+
+    function updateHeaderRefreshAction() {
+        const button = state.dashboard?.querySelector("#nfc-header-refresh-btn");
+        const status = state.dashboard?.querySelector("#nfc-header-status");
+        if (!button || !status) return;
+        const target = getHeaderRefreshTarget();
+        const sourceSection = target.section || "settings";
+        const freshness = getSectionFreshness(sourceSection);
+        button.textContent = target.label;
+        button.title = target.label;
+        button.disabled = !target.section;
+        button.dataset.sectionRefresh = target.section || "";
+        status.textContent = freshness.updatedAt ? `${freshness.label} · ${formatRelativeTime(Math.floor(freshness.updatedAt / 1000))}` : freshness.label;
+        status.dataset.freshness = freshness.label.toLowerCase().replace(/\s+/g, "-");
     }
 
     const SECTION_TAB_LABELS = {
@@ -5874,7 +6041,8 @@
         faction: "Faction",
         company: "Company",
         inventory: "Inventory",
-        staff: "Staff"
+        staff: "Staff",
+        settings: "Settings"
     };
 
     function renderTabContent() {
@@ -5912,8 +6080,8 @@
         bindFactionControls();
         bindStaffControls();
         bindSectionRefreshButtons();
+        updateHeaderRefreshAction();
         requestAnimationFrame(fitCurrentContentToWidget);
-        requestAnimationFrame(applyStaffAutoSize);
 
         if (state.currentTab === "faction") {
             startChainCountdownTimer();
@@ -5926,33 +6094,30 @@
         else stopWarTargetsRefreshTimer();
     }
 
-    // ── Staff tab (bot-fed, bare-bones - restyled later to match the rest
-    // of the panel) ──────────────────────────────────────────────────────
     function fetchStaffStatus() {
-        // Not secureCustomFetch: that helper has no timeout at all, so a slow
-        // backend response (the revive check's Torn API fan-out can genuinely
-        // take a while - see staff_status.py) left the Refresh button stuck
-        // on "Refreshing..." forever with no way out. 20s caps it, matching
-        // the backend's own 15s cap on the slow part of the same request.
         const base = getStoredStaffApiBase();
         const token = getStoredStaffApiToken();
-        const url = `${base}/api/staff/status${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+        if (!base) return Promise.reject(new Error("Use the approved Staff Dashboard address in Settings."));
+        const url = `${base}/api/staff/status`;
         const requestLog = startApiRequest("GET", url);
         return new Promise((resolve, reject) => {
             try {
                 crossOriginRequest({
                     method: "GET",
                     url: url,
-                    headers: { Accept: "application/json" },
+                    headers: {
+                        Accept: "application/json",
+                        ...(token ? { Authorization: `Bearer ${token}`, "X-Staff-Token": token } : {})
+                    },
                     timeout: 20000,
                     onload: function(response) {
                         if (response.status >= 200 && response.status < 300) {
                             try {
-                                const data = JSON.parse(response.responseText);
+                                const data = normalizeStaffStatusPayload(JSON.parse(response.responseText));
                                 finishApiRequest(requestLog, response);
                                 resolve(data);
                             } catch (error) {
-                                const failure = new Error("Failed to parse JSON");
+                                const failure = new Error("Staff Dashboard returned invalid JSON.");
                                 failApiRequest(requestLog, failure, response);
                                 reject(failure);
                             }
@@ -5985,20 +6150,36 @@
         { id: "bleeders", label: "Bleeders" },
         { id: "revives", label: "Revives" }
     ];
-    const STAFF_ROW_TEXT_STYLE = "color:#e8edf5;";
+
+    function getStaffPresenceTone(value, kind) {
+        const text = String(value || "").toLowerCase();
+        if (kind === "action") {
+            if (text.includes("online")) return "online";
+            if (text.includes("idle")) return "idle";
+            if (text.includes("offline")) return "offline";
+            return "unavailable";
+        }
+        if (text.includes("hospital")) return "hospital";
+        if (text.includes("travel") || text.includes("abroad")) return "travel";
+        if (text.includes("jail")) return "jail";
+        if (text.includes("okay")) return "okay";
+        return "unavailable";
+    }
+
+    function renderStaffPresence(label, value, kind) {
+        const display = String(value || "Unavailable");
+        const tone = getStaffPresenceTone(display, kind);
+        return `<span class="nfc-staff-presence nfc-staff-presence--${tone}" title="${escapeHtml(`${label}: ${display}`)}"><i aria-hidden="true"></i><span class="nfc-staff-presence-label">${escapeHtml(label)}</span><span>${escapeHtml(display)}</span></span>`;
+    }
 
     function renderStaffPanel() {
         if (!getStoredStaffApiBase()) {
-            return `
-                <div style="padding: 14px; color: #bfc7d1; font-size: 12px; line-height: 1.5;">
-                    Set a Staff API base URL (and token, if required) in the Settings tab to enable this tab.
-                </div>
-            `;
+            return `<section class="nfc-panel-card nfc-empty-card nfc-staff-empty">Configure the approved Staff Dashboard under <strong>Settings → Integrations</strong> to use this tab.</section>`;
         }
 
         const data = state.staffData;
         if (!data) {
-            return `<div style="padding: 14px; color: #bfc7d1; font-size: 12px;">${escapeHtml(state.staffStatus)}</div>`;
+            return `<section class="nfc-panel-card nfc-empty-card nfc-staff-empty">${escapeHtml(state.staffStatus || "Staff Dashboard has not been updated yet.")}</section>`;
         }
 
         const members = data.members || [];
@@ -6010,16 +6191,14 @@
         const hospitalizedCount = Number(data.hospitalized_count ?? revives.length);
 
         const warsHtml = wars.map((war) => {
-            const surge = war.surge
-                ? `<div style="color:#ffce54;font-weight:700;">⚡ +${war.surge.amount} surge (${war.surge.seconds_ago}s ago)</div>`
-                : "";
+            const surge = war.surge ? `<div class="nfc-staff-surge">⚡ +${formatInteger(war.surge.amount)} surge · ${formatInteger(war.surge.seconds_ago)} seconds ago</div>` : "";
             return `
-                <div style="border:1px solid #3d3d3d;border-radius:6px;padding:8px;margin-bottom:6px;font-size:11px;">
-                    <div style="font-weight:700;color:#fff;">vs ${escapeHtml(war.enemy_name || "Enemy")}</div>
-                    <div style="${STAFF_ROW_TEXT_STYLE}">Us: 🟢${war.our.online} 🟡${war.our.idle} ⚫${war.our.offline}</div>
-                    <div style="${STAFF_ROW_TEXT_STYLE}">Them: 🟢${war.enemy.online} 🟡${war.enemy.idle} ⚫${war.enemy.offline}</div>
+                <article class="nfc-staff-war-card">
+                    <div class="nfc-staff-row-title">vs ${escapeHtml(war.enemy_name || "Enemy")}</div>
+                    <div class="nfc-staff-detail">Us: 🟢 ${formatInteger(war.our?.online)} · 🟡 ${formatInteger(war.our?.idle)} · ⚫ ${formatInteger(war.our?.offline)}</div>
+                    <div class="nfc-staff-detail">Them: 🟢 ${formatInteger(war.enemy?.online)} · 🟡 ${formatInteger(war.enemy?.idle)} · ⚫ ${formatInteger(war.enemy?.offline)}</div>
                     ${surge}
-                </div>
+                </article>
             `;
         }).join("");
 
@@ -6027,35 +6206,35 @@
             <button data-staff-subtab="${id}" class="nfc-subtab${state.staffSubTab === id ? " is-active" : ""}" aria-current="${state.staffSubTab === id ? "page" : "false"}">${label}</button>
         `).join("");
 
-        // A rigid multi-column table doesn't work at this panel's default width -
-        // four columns of real names/dates just get clipped instead of wrapping.
-        // Stacked rows (name on one line, detail on the next, wrapping freely)
-        // stay readable at any width, same idea as the bleeders/revives rows below.
-        const membersHtml = members.length ? members.map((m) => `
-            <div style="border-top:1px solid #2c3648;padding:4px 0;font-size:11px;${STAFF_ROW_TEXT_STYLE}">
-                <div style="font-weight:600;">${escapeHtml(m.name)} [${m.id}] <span style="font-weight:400;color:#9fb0c3;">· Lvl ${m.level ?? "?"}</span></div>
-                <div style="color:#9fb0c3;">${escapeHtml(m.status?.description || m.status?.state || "?")} · last action ${escapeHtml(m.last_action?.status || "?")}</div>
-            </div>
-        `).join("") : `<div style="color:#9fb0c3;font-size:11px;">No member data.</div>`;
+        const membersHtml = members.length ? members.map((m) => {
+            const status = m.status?.description || m.status?.state || "Unavailable";
+            const lastAction = m.last_action?.status || "Unavailable";
+            return `
+                <article class="nfc-staff-row">
+                    <div class="nfc-staff-row-title">${escapeHtml(m.name || "Unknown member")} <span>ID ${formatIdentifier(m.id)}</span> · Level ${formatOptionalInteger(m.level)}</div>
+                    <div class="nfc-staff-detail nfc-staff-presence-row">${renderStaffPresence("Status", status, "status")}<span class="nfc-staff-presence-divider" aria-hidden="true">·</span>${renderStaffPresence("Last action", lastAction, "action")}</div>
+                </article>
+            `;
+        }).join("") : `<div class="nfc-staff-empty">No member data is available.</div>`;
 
         const armoryKeyConfigured = data.armory_key_configured !== false;
         let loansNote = "";
         if (!armoryKeyConfigured) {
-            loansNote = `<div style="color:#e0a25e;font-size:10px;margin-bottom:5px;">⚠ No armory-access Torn key registered with the bot (TORN_ARMORY_API_KEY) - can't read live loan status.</div>`;
+            loansNote = `<div class="nfc-staff-note is-attention">Armory access is unavailable to the Staff service, so live loan status cannot be checked.</div>`;
         }
-        // Read straight from Torn's live armory state (same "Loaned" column as
-        // the in-game armory page) rather than reconstructed history, so there's
-        // no loan date to show here - only who currently has each item out.
         const loansHtml = loans.length ? loans.map((l) => `
-            <div style="border-top:1px solid #2c3648;padding:4px 0;font-size:11px;${STAFF_ROW_TEXT_STYLE}">
-                <div style="font-weight:600;">${escapeHtml(l.weapon_name || "?")}</div>
-                <div style="color:#9fb0c3;">Loaned to ${escapeHtml(l.borrower_name || "?")}</div>
-            </div>
-        `).join("") : (armoryKeyConfigured ? `<div style="color:#9fb0c3;font-size:11px;">No items currently loaned out.</div>` : "");
+            <article class="nfc-staff-row">
+                <div class="nfc-staff-row-title">${escapeHtml(l.weapon_name || "Unnamed item")}</div>
+                <div class="nfc-staff-detail">Loaned to ${escapeHtml(l.borrower_name || "Unknown member")}</div>
+            </article>
+        `).join("") : (armoryKeyConfigured ? `<div class="nfc-staff-empty">No items are currently loaned out.</div>` : "");
 
         const bleedersHtml = bleeders.length ? bleeders.map((b) => `
-            <div style="font-size:11px;padding:3px 0;${STAFF_ROW_TEXT_STYLE}">🩸 ${escapeHtml(b.name)} [${b.id}] - offline ${Math.round(b.minutes_offline)}m, ${b.bleeds} bleeds</div>
-        `).join("") : `<div style="color:#9fb0c3;font-size:11px;">No one is currently bleeding.</div>`;
+            <article class="nfc-staff-row">
+                <div class="nfc-staff-row-title">🩸 ${escapeHtml(b.name || "Unknown member")} <span>ID ${formatIdentifier(b.id)}</span></div>
+                <div class="nfc-staff-detail">Offline ${formatInteger(b.minutes_offline)} minutes · ${formatInteger(b.bleeds)} bleeds</div>
+            </article>
+        `).join("") : `<div class="nfc-staff-empty">No one is currently bleeding.</div>`;
 
         // Three genuinely different states get collapsed into "the list is empty"
         // otherwise, and they mean very different things to a leader: the bot has
@@ -6063,31 +6242,31 @@
         // or nobody's hospitalised in the first place. Surface which one this is.
         let revivesNote = "";
         if (!reviveKeyConfigured) {
-            revivesNote = `<div style="color:#e0a25e;font-size:10px;margin-bottom:5px;">⚠ No revive-capable Torn key registered with the bot (TORN_REVIVE_API_KEY) - showing hospitalised members only, revive status unknown.</div>`;
+            revivesNote = `<div class="nfc-staff-note is-attention">Revive access is unavailable to the Staff service; revive status is unknown.</div>`;
         } else if (hospitalizedCount === 0) {
-            revivesNote = `<div style="color:#9fb0c3;font-size:10px;margin-bottom:5px;">No faction members are currently hospitalised.</div>`;
+            revivesNote = `<div class="nfc-staff-note">No faction members are currently hospitalised.</div>`;
         } else if (!revives.length) {
-            revivesNote = `<div style="color:#9fb0c3;font-size:10px;margin-bottom:5px;">${hospitalizedCount} hospitalised, checked individually - none currently revivable.</div>`;
+            revivesNote = `<div class="nfc-staff-note">${formatInteger(hospitalizedCount)} hospitalised · none are currently revivable.</div>`;
         }
         const revivesHtml = revives.length ? revives.map((r) => `
-            <div style="font-size:11px;padding:3px 0;${STAFF_ROW_TEXT_STYLE}">${r.revive_type === "global" ? "🌐" : r.revive_type === "faction" ? "👤" : "❔"} ${escapeHtml(r.name)} [${r.id}] - Lvl ${r.level ?? "?"} (${escapeHtml(r.revive_type)})${r.in_hospital ? ' <span style="color:#ff8a8a;">🏥 in hospital now</span>' : ""}</div>
+            <article class="nfc-staff-row">
+                <div class="nfc-staff-row-title">${r.revive_type === "global" ? "🌐" : r.revive_type === "faction" ? "👤" : "❔"} ${escapeHtml(r.name || "Unknown member")} <span>ID ${formatIdentifier(r.id)}</span> · Level ${formatOptionalInteger(r.level)}</div>
+                <div class="nfc-staff-detail">${escapeHtml(r.revive_type || "Unknown")} revive${r.in_hospital ? " · In hospital now" : ""}</div>
+            </article>
         `).join("") : "";
 
         const sections = {
-            statuses: `<div><div style="color:#fff;font-weight:700;font-size:12px;margin-bottom:4px;">Statuses</div>${membersHtml}</div>`,
-            loans: `<div><div style="color:#fff;font-weight:700;font-size:12px;margin-bottom:4px;">Active Weapon Loans</div>${loansNote}${loansHtml}</div>`,
-            bleeders: `<div><div style="color:#fff;font-weight:700;font-size:12px;margin-bottom:4px;">Bleeders</div>${bleedersHtml}</div>`,
-            revives: `<div>
-                <div style="color:#fff;font-weight:700;font-size:12px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;">
-                    <span>Revive Still On</span>
-                    <button id="staff-copy-revive-msg-btn" type="button" style="background:#3b5998;color:#fff;border:none;border-radius:6px;padding:5px 9px;font-size:10px;cursor:pointer;">Copy Message</button>
-                </div>
+            statuses: `<section class="nfc-staff-section"><div class="nfc-card-title">Statuses</div>${membersHtml}</section>`,
+            loans: `<section class="nfc-staff-section"><div class="nfc-card-title">Active weapon loans</div>${loansNote}${loansHtml}</section>`,
+            bleeders: `<section class="nfc-staff-section"><div class="nfc-card-title">Bleeders</div>${bleedersHtml}</section>`,
+            revives: `<section class="nfc-staff-section">
+                <div class="nfc-staff-section-heading"><span class="nfc-card-title">Revives still on</span><button id="staff-copy-revive-msg-btn" type="button" class="nfc-primary-action">Copy message</button></div>
                 ${revivesNote}${revivesHtml}
-            </div>`
+            </section>`
         };
 
         return `
-            <div style="padding: 10px; display: grid; gap: 10px; align-content: start; overflow-y: auto;">
+            <div class="nfc-staff-panel">
                 ${warsHtml}
                 <div class="nfc-subtabs">${subtabsHtml}</div>
                 ${sections[state.staffSubTab] || sections.statuses}
@@ -6459,9 +6638,7 @@
         const due = !!target && !!setting?.enabled && now - lastRefresh >= setting.seconds * 1000;
 
         if (due && target.section === "staff") {
-            // Staff feed authenticates with its own API token, not the user's
-            // personal Torn API key - must not be gated on that key existing.
-            void refreshSectionByKey(target.section, null);
+            if (getStoredStaffApiBase()) void refreshSectionByKey(target.section, null);
         } else if (due && target.section !== "warTargets" && target.id !== "faction:general") {
             // Faction General and FFScouter use their dedicated view timers below.
             const apiKey = getStoredKey();
@@ -6533,13 +6710,7 @@
         const maxHeight = Math.max(1, bounds.maxBottom - bounds.minTop);
         return {
             minWidth: Math.min(380, maxWidth),
-            // Was 620 - fine for content-heavy tabs (Faction/Statuses), but it's
-            // a hard floor on every tab's resize, including sparse ones (Staff's
-            // Bleeders/Revives when empty) that only need a couple hundred px.
-            // Lowering it doesn't shrink anything by itself - each tab still
-            // remembers its own size independently (getWidgetLayoutKey) - it
-            // just allows a sparse tab to actually be resized down to fit.
-            minHeight: Math.min(280, maxHeight),
+            minHeight: Math.min(420, maxHeight),
             maxWidth,
             maxHeight
         };
@@ -6661,52 +6832,11 @@
         dashboard.style.minHeight = `${limits.minHeight}px`;
         dashboard.style.maxWidth = `${limits.maxWidth}px`;
         dashboard.style.maxHeight = `${limits.maxHeight}px`;
-        if (state.currentTab === "staff") {
-            // This function has 10+ call sites (tab/subtab switches, viewport
-            // resize/scroll handling, etc.) - live-debugged case: a caller
-            // outside the normal render pipeline (syncViewportLayout, fired on
-            // visualViewport "scroll", which happens on ordinary page scrolling
-            // with no actual resize involved) was reading Staff's untrustworthy
-            // stored width independently of applyStaffAutoSize's fix, reviving
-            // the same bad width. Delegating here instead of duplicating the
-            // logic means every caller gets the same correct behavior instead
-            // of only the ones someone remembered to patch.
-            applyStaffAutoSize();
-        } else {
-            const size = isCompactRuntime() ? { width: limits.maxWidth, height: limits.maxHeight } : getCurrentWidgetSize();
-            dashboard.style.width = `${size.width}px`;
-            dashboard.style.height = `${size.height}px`;
-        }
+        const size = isCompactRuntime() ? { width: limits.maxWidth, height: limits.maxHeight } : getCurrentWidgetSize();
+        dashboard.style.width = `${size.width}px`;
+        dashboard.style.height = `${size.height}px`;
         applyWidgetPosition();
         requestAnimationFrame(fitCurrentContentToWidget);
-    }
-
-    function applyStaffAutoSize() {
-        // Staff sub-tabs vary too wildly in length for the normal resize-and-
-        // remember model (Statuses: potentially 90+ rows; Bleeders/Revives when
-        // there's nothing to report: two lines) - rather than making the user
-        // manually shrink the panel every time they land on a sparse sub-tab,
-        // measure what the content actually needs and size to that directly.
-        //
-        // Width is pinned to a fixed sane default rather than read from the
-        // normal per-tab stored size at all - live-debugged case: a staff:*
-        // layout key ended up storing a ~1908px (full viewport) width, which
-        // fed the #nfc-content container-query font-size clamp and cascaded
-        // into an inflated-looking header even after the height fix, since
-        // that fix never touched width. Root cause of *how* it got that wide
-        // wasn't pinned down, so rather than trust that stored value at all
-        // for this tab, it's just never read here.
-        const dashboard = state.dashboard;
-        if (!dashboard || state.currentTab !== "staff" || state.isMinimized) return;
-        const limits = getWidgetSizeLimits();
-        const targetWidth = Math.min(480, limits.maxWidth);
-        dashboard.style.width = `${targetWidth}px`;
-        // Reading scrollHeight here forces a synchronous layout against the
-        // width just set above, so this reflects the correct height for that
-        // width rather than a stale one measured before the resize.
-        const naturalHeight = dashboard.scrollHeight;
-        const targetHeight = Math.min(limits.maxHeight, Math.max(limits.minHeight, naturalHeight));
-        dashboard.style.height = `${targetHeight}px`;
     }
 
     function fitCurrentContentToWidget() {
@@ -6715,71 +6845,15 @@
         const content = dashboard?.querySelector("#nfc-content");
         if (!widgetBody || !content || state.isMinimized) return;
 
-        content.style.zoom = "1";
+        content.style.zoom = "";
         content.classList.toggle("nfc-faction-general-active", state.currentTab === "faction" && state.factionSubTab === "general");
-        const useSettingsScroll = state.currentTab === "settings" && isCompactRuntime();
-        content.classList.toggle("nfc-settings-scroll", useSettingsScroll);
-        if (useSettingsScroll) {
-            content.setAttribute("tabindex", "0");
-            content.setAttribute("role", "region");
-            content.setAttribute("aria-label", "Faction settings. Scroll for more options.");
-            return;
-        }
+        content.classList.toggle("ntc-ffscouter-active", state.currentTab === "faction" && state.factionSubTab === "ffscouter");
+        widgetBody.setAttribute("tabindex", "0");
+        widgetBody.setAttribute("role", "region");
+        widgetBody.setAttribute("aria-label", `${SECTION_TAB_LABELS[state.currentTab] || "Faction"} content. Scroll for more.`);
         content.removeAttribute("tabindex");
         content.removeAttribute("role");
         content.removeAttribute("aria-label");
-        if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") {
-            const layout = content.querySelector(".ntc-ffscouter-layout");
-            const summaryViewport = layout?.querySelector(".ntc-ffscouter-summary-viewport");
-            const summary = layout?.querySelector(".ntc-ffscouter-summary");
-            const tableWrap = layout?.querySelector(".ntc-war-target-table-wrap");
-            if (!layout || !summaryViewport || !summary || !tableWrap) return;
-
-            summary.style.zoom = "1";
-            summaryViewport.style.height = "auto";
-            summaryViewport.style.flex = "0 0 auto";
-            const compact = content.clientWidth <= 430;
-            const tableHeaderHeight = compact ? 25 : 28;
-            const tableRowHeight = compact ? 42 : 48;
-            const preferredTableHeight = tableHeaderHeight + (tableRowHeight * 4) + 4;
-            const minimumTableHeight = tableHeaderHeight + (tableRowHeight * 3) + 4;
-            const minimumSummaryHeight = compact ? 120 : 145;
-            const layoutHeight = Math.max(0, layout.clientHeight);
-            const layoutGap = Math.min(compact ? 6 : 9, layoutHeight);
-            const maximumTableHeight = Math.max(0, Math.floor(layoutHeight - layoutGap));
-            const tableHeight = Math.min(
-                preferredTableHeight,
-                maximumTableHeight,
-                Math.max(minimumTableHeight, Math.floor(layoutHeight - minimumSummaryHeight - layoutGap))
-            );
-            const availableSummaryHeight = Math.max(0, Math.floor(layoutHeight - tableHeight - layoutGap));
-            const requiredSummaryHeight = Math.max(summary.scrollHeight, summary.offsetHeight);
-            const reservedSummaryHeight = Math.min(requiredSummaryHeight, availableSummaryHeight);
-            summary.style.zoom = String(reservedSummaryHeight / Math.max(1, requiredSummaryHeight));
-            summaryViewport.style.height = `${reservedSummaryHeight}px`;
-            summaryViewport.style.flex = `0 0 ${reservedSummaryHeight}px`;
-            tableWrap.style.setProperty("min-height", `${tableHeight}px`, "important");
-            tableWrap.style.flex = "1 1 0";
-            return;
-        }
-
-        const bodyRect = widgetBody.getBoundingClientRect();
-        const contentRect = content.getBoundingClientRect();
-        const availableHeight = Math.max(1, bodyRect.bottom - contentRect.top);
-        const requiredHeight = Math.max(content.scrollHeight, content.offsetHeight);
-        if (!isCompactRuntime()) {
-            // Desktop has room to resize the panel and a real scrollbar works fine -
-            // only PDA's small, scroll-unfriendly webview needs the shrink-to-fit
-            // zoom below. Reusing nfc-settings-scroll's overflow-y:auto rule here
-            // since it's generic (its name is a holdover from settings being the
-            // first tab that needed it).
-            content.classList.add("nfc-settings-scroll");
-            content.setAttribute("tabindex", "0");
-            content.setAttribute("role", "region");
-            content.setAttribute("aria-label", "Scroll for more.");
-            return;
-        }
-        content.style.zoom = String(Math.min(1, availableHeight / Math.max(1, requiredHeight)));
     }
 
     function pauseWindowActivity() {
@@ -6955,6 +7029,34 @@
                     transition: filter .15s ease, transform .15s ease;
                 }
                 #nfc-faction-wrapper #nfc-toggle-view-btn:hover { filter: brightness(1.18); transform: translateY(-1px); }
+                #nfc-faction-wrapper .nfc-header-refresh {
+                    min-width:0;
+                    border:1px solid #48b79e;
+                    border-radius:6px;
+                    background:#0f6c5d;
+                    color:#effffb;
+                    padding:6px 9px;
+                    font-size:10px;
+                    font-weight:800;
+                    line-height:1.2;
+                    cursor:pointer;
+                    overflow-wrap:anywhere;
+                }
+                #nfc-faction-wrapper .nfc-header-refresh:hover { filter:brightness(1.12); }
+                #nfc-faction-wrapper .nfc-header-refresh:disabled { cursor:default; opacity:.72; }
+                #nfc-faction-wrapper .nfc-header-status {
+                    min-width:0;
+                    color:#8ee2b2;
+                    font-size:9px;
+                    font-weight:750;
+                    line-height:1.2;
+                    overflow-wrap:anywhere;
+                }
+                #nfc-faction-wrapper .nfc-header-status[data-freshness="partial"] { color:#f1cb82; }
+                #nfc-faction-wrapper .nfc-header-status[data-freshness="stale"],
+                #nfc-faction-wrapper .nfc-header-status[data-freshness="not-updated"] { color:#b9c7d8; }
+                #nfc-faction-wrapper[data-minimized="true"] .nfc-header-refresh { display:none !important; }
+                #nfc-faction-wrapper[data-minimized="true"] .nfc-header-status { display:none !important; }
                 #nfc-faction-wrapper #nfc-main-body {
                     background: linear-gradient(180deg, rgba(14,20,30,.44), rgba(11,16,25,.18));
                 }
@@ -7848,9 +7950,199 @@
                     border-left: 2px solid #777;
                     border-top: 2px solid #777;
                 }
+                /* Shared Companion shell: keep the header compact and let one body
+                   scroller own all vertical movement on desktop and TornPDA. */
+                #nfc-faction-wrapper #nfc-drag-handle {
+                    flex:0 0 auto;
+                    min-height:0;
+                    flex-wrap:wrap;
+                    align-content:center;
+                }
+                #nfc-faction-wrapper #nfc-title {
+                    white-space:normal;
+                    overflow:visible;
+                    text-overflow:clip;
+                    overflow-wrap:anywhere;
+                }
+                #nfc-faction-wrapper #nfc-main-body {
+                    display:block !important;
+                    flex:1 1 auto;
+                    min-width:0;
+                    min-height:0;
+                    overflow-x:hidden !important;
+                    overflow-y:auto !important;
+                    overscroll-behavior:contain;
+                    touch-action:pan-y pinch-zoom;
+                    -webkit-overflow-scrolling:touch;
+                    scrollbar-width:none;
+                    -ms-overflow-style:none;
+                }
+                #nfc-faction-wrapper #nfc-main-body::-webkit-scrollbar { display:none; width:0; height:0; }
+                #nfc-faction-wrapper #nfc-content {
+                    display:grid !important;
+                    width:100%;
+                    min-width:0;
+                    max-width:100%;
+                    flex:0 0 auto !important;
+                    min-height:0 !important;
+                    max-height:none !important;
+                    overflow:visible !important;
+                    touch-action:pan-y pinch-zoom;
+                }
+                #nfc-faction-wrapper #nfc-content.ntc-ffscouter-active,
+                #nfc-faction-wrapper #nfc-content.ntc-inventory-active,
+                #nfc-faction-wrapper #nfc-content .ntc-ffscouter-layout,
+                #nfc-faction-wrapper #nfc-content .ntc-inventory-layout,
+                #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout {
+                    height:auto !important;
+                    min-height:0 !important;
+                    overflow:visible !important;
+                }
+                #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout {
+                    display:flex !important;
+                    flex-direction:column !important;
+                    align-items:stretch;
+                    align-content:flex-start;
+                    gap:8px;
+                }
+                #nfc-faction-wrapper #nfc-content .nfc-faction-general-layout > * {
+                    position:relative !important;
+                    inset:auto !important;
+                    flex:0 0 auto !important;
+                    width:100%;
+                    margin:0 !important;
+                }
+                #nfc-faction-wrapper #nfc-content .ntc-ffscouter-summary-viewport,
+                #nfc-faction-wrapper #nfc-content .ntc-war-target-table-wrap,
+                #nfc-faction-wrapper #nfc-content .ntc-inventory-table-wrap {
+                    height:auto !important;
+                    min-height:0 !important;
+                    flex:0 0 auto !important;
+                    overflow:visible !important;
+                    max-height:none !important;
+                }
+                #nfc-faction-wrapper #nfc-content .ntc-war-target-table,
+                #nfc-faction-wrapper #nfc-content .ntc-inventory-table-wrap table {
+                    width:100% !important;
+                    max-width:100% !important;
+                    table-layout:fixed !important;
+                }
+                #nfc-faction-wrapper #nfc-content .nfc-war-target-sort-header,
+                #nfc-faction-wrapper #nfc-content .nfc-war-target-cell,
+                #nfc-faction-wrapper #nfc-content .nfc-war-target-cell div {
+                    white-space:normal !important;
+                    overflow:visible !important;
+                    text-overflow:clip !important;
+                    overflow-wrap:anywhere;
+                }
+                #nfc-faction-wrapper #nfc-content .nfc-ffscouter-subtitle {
+                    white-space:normal !important;
+                    overflow:visible !important;
+                    text-overflow:clip !important;
+                    overflow-wrap:anywhere;
+                }
+                #nfc-faction-wrapper .nfc-tab-status {
+                    display:flex;
+                    align-items:center;
+                    justify-content:space-between;
+                    gap:8px;
+                    width:100%;
+                    min-width:0;
+                    margin:0 0 8px;
+                    padding:7px 9px;
+                    border:1px solid #34445e;
+                    border-radius:8px;
+                    background:rgba(32,47,69,.5);
+                    font-size:10px;
+                    line-height:1.35;
+                }
+                #nfc-faction-wrapper .nfc-tab-status-copy {
+                    display:grid;
+                    min-width:0;
+                    gap:2px;
+                    color:#b9c7d8;
+                    overflow-wrap:anywhere;
+                }
+                #nfc-faction-wrapper .nfc-tab-status-copy strong { color:#8ee2b2; font-weight:850; }
+                #nfc-faction-wrapper .nfc-tab-status[data-freshness="partial"] .nfc-tab-status-copy strong { color:#f1cb82; }
+                #nfc-faction-wrapper .nfc-tab-status[data-freshness="stale"] .nfc-tab-status-copy strong,
+                #nfc-faction-wrapper .nfc-tab-status[data-freshness="not-updated"] .nfc-tab-status-copy strong { color:#b9c7d8; }
+                #nfc-faction-wrapper .nfc-tab-status-note { color:#b9c7d8; white-space:normal; text-align:right; }
+                #nfc-faction-wrapper .nfc-section-status {
+                    overflow:visible !important;
+                    text-overflow:clip !important;
+                    white-space:normal !important;
+                    overflow-wrap:anywhere;
+                }
+                #nfc-faction-wrapper .nfc-staff-panel,
+                #nfc-faction-wrapper .nfc-staff-section {
+                    display:grid;
+                    gap:8px;
+                    width:100%;
+                    min-width:0;
+                }
+                #nfc-faction-wrapper .nfc-staff-section {
+                    padding:10px 11px;
+                    border:1px solid #34445e;
+                    border-radius:9px;
+                    background:linear-gradient(145deg,rgba(34,50,76,.82),rgba(17,24,36,.78));
+                }
+                #nfc-faction-wrapper .nfc-staff-section-heading {
+                    display:flex;
+                    align-items:center;
+                    justify-content:space-between;
+                    gap:8px;
+                    flex-wrap:wrap;
+                }
+                #nfc-faction-wrapper .nfc-staff-war-card,
+                #nfc-faction-wrapper .nfc-staff-row {
+                    display:grid;
+                    gap:3px;
+                    width:100%;
+                    min-width:0;
+                    padding:8px 0;
+                    border-top:1px solid #2c3b53;
+                }
+                #nfc-faction-wrapper .nfc-staff-war-card:first-child,
+                #nfc-faction-wrapper .nfc-staff-row:first-of-type { border-top:0; }
+                #nfc-faction-wrapper .nfc-staff-war-card {
+                    padding:9px 10px;
+                    border:1px solid #34445e;
+                    border-radius:8px;
+                    background:rgba(10,15,24,.5);
+                }
+                #nfc-faction-wrapper .nfc-staff-row-title { color:#edf4ff; font-size:11px; font-weight:800; overflow-wrap:anywhere; }
+                #nfc-faction-wrapper .nfc-staff-row-title span { color:#9bb0c8; font-weight:600; }
+                #nfc-faction-wrapper .nfc-staff-detail,
+                #nfc-faction-wrapper .nfc-staff-note,
+                #nfc-faction-wrapper .nfc-staff-empty { color:#b9c7d8; font-size:10px; line-height:1.4; overflow-wrap:anywhere; }
+                #nfc-faction-wrapper .nfc-staff-presence-row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+                #nfc-faction-wrapper .nfc-staff-presence { --nfc-presence-color:#9aa4b2; display:inline-flex; align-items:center; gap:4px; min-width:0; color:var(--nfc-presence-color); font-weight:750; overflow-wrap:anywhere; }
+                #nfc-faction-wrapper .nfc-staff-presence i { width:7px; height:7px; flex:0 0 7px; border-radius:50%; background:var(--nfc-presence-color); box-shadow:0 0 0 2px rgba(255,255,255,.07); }
+                #nfc-faction-wrapper .nfc-staff-presence-label { color:#9bb0c8; font-weight:650; }
+                #nfc-faction-wrapper .nfc-staff-presence-divider { color:#617088; }
+                #nfc-faction-wrapper .nfc-staff-presence--okay,
+                #nfc-faction-wrapper .nfc-staff-presence--online { --nfc-presence-color:#7fe18d; }
+                #nfc-faction-wrapper .nfc-staff-presence--travel,
+                #nfc-faction-wrapper .nfc-staff-presence--idle { --nfc-presence-color:#e0a25e; }
+                #nfc-faction-wrapper .nfc-staff-presence--hospital { --nfc-presence-color:#e05959; }
+                #nfc-faction-wrapper .nfc-staff-presence--jail { --nfc-presence-color:#c9a0ff; }
+                #nfc-faction-wrapper .nfc-staff-presence--offline,
+                #nfc-faction-wrapper .nfc-staff-presence--unavailable { --nfc-presence-color:#9aa4b2; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-staff-presence-label { color:#4c6076; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-staff-presence-divider { color:#73869c; }
+                #nfc-faction-wrapper .nfc-staff-note.is-attention,
+                #nfc-faction-wrapper .nfc-staff-surge { color:#f1cb82; font-size:10px; line-height:1.4; }
+                #nfc-faction-wrapper .nfc-staff-empty { min-height:0; padding:10px; }
+                #nfc-faction-wrapper[data-layout-profile="narrow"] .nfc-primary-nav,
+                #nfc-faction-wrapper[data-layout-profile="compact"] .nfc-primary-nav { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+                #nfc-faction-wrapper[data-layout-profile="narrow"] .nfc-tab-status { align-items:stretch; flex-direction:column; }
+                #nfc-faction-wrapper[data-layout-profile="narrow"] .nfc-tab-status .nfc-primary-action { width:100%; }
             </style>
             <header id="nfc-drag-handle">
                 <span id="nfc-title">🧭 Naughty Faction Companion v${VERSION}</span>
+                <span id="nfc-header-status" class="nfc-header-status" aria-live="polite">Not updated</span>
+                <button id="nfc-header-refresh-btn" type="button" class="nfc-header-refresh" title="Refresh faction data">Refresh Faction data</button>
                 <button id="nfc-toggle-view-btn" type="button" title="Minimize Naughty Faction Companion" aria-label="Minimize Naughty Faction Companion">−</button>
             </header>
 
@@ -7865,6 +8157,15 @@
 
         document.body.appendChild(dashboard);
         state.dashboard = dashboard;
+        state.layoutObserver?.disconnect?.();
+        if (typeof ResizeObserver === "function") {
+            state.layoutObserver = new ResizeObserver(() => {
+                if (!state.dashboard || state.isMinimized) return;
+                publishRuntimeState();
+                requestAnimationFrame(fitCurrentContentToWidget);
+            });
+            state.layoutObserver.observe(dashboard);
+        }
         enableNativeKeyboardOverlay();
         publishRuntimeState();
         applyDashboardTheme();
@@ -7879,6 +8180,19 @@
             state.isMinimized = !state.isMinimized;
             setStoredDashboardState({ isMinimized: state.isMinimized, windowSizes: state.windowSizes });
             applyWidgetView();
+        });
+
+        const headerRefreshButton = document.getElementById("nfc-header-refresh-btn");
+        headerRefreshButton?.addEventListener("click", async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const section = headerRefreshButton.dataset.sectionRefresh;
+            if (!section || headerRefreshButton.disabled) return;
+            headerRefreshButton.disabled = true;
+            headerRefreshButton.textContent = "Refreshing…";
+            if (section === "warTargets") await refreshWarTargets();
+            else await refreshSectionByKey(section, null);
+            renderTabContent();
         });
 
         const dragHandle = document.getElementById("nfc-drag-handle");
@@ -7908,7 +8222,7 @@
 
         dragHandle.addEventListener(interactionEvents.down, (e) => {
             if (!isPrimaryInteraction(e)) return;
-            if (e.target.closest("#nfc-toggle-view-btn")) return;
+            if (e.target.closest("button, input, select, label, a")) return;
             e.preventDefault();
             isDragging = true;
             didDrag = false;
@@ -8111,18 +8425,18 @@
             });
         });
 
-        state.sectionStatus.settings = "Faction General and FFScouter auto-refresh settings are configurable in Settings › Auto Refresh.";
+        state.sectionStatus.settings = "Fresh — local settings loaded. Auto-refresh controls are available in Settings › Auto Refresh.";
         renderTabContent();
 
         if (getStoredKey() && isAutomaticRefreshAllowed()) {
-            const hasAnyCache = Object.values(state.caches).some((cache) => cache !== null);
-            if (!hasAnyCache) {
+            const hasFactionCache = state.caches.faction !== null;
+            if (!hasFactionCache) {
                 // Fresh install: load only the faction data required by this helper.
                 void refreshAllSections({ silent: true });
             } else {
                 // Returning session — restored data is already showing; only refresh
                 // whichever sections are actually stale per their own threshold.
-                const staleSections = Object.keys(APP_STORAGE.sections).filter((name) => isSectionStale(name));
+                const staleSections = Object.keys(APP_STORAGE.sections).filter((name) => name !== "staff" || (state.currentTab === "staff" && isSectionStale(name)));
                 debugLog("Startup staleness check", { staleSections });
                 staleSections.forEach((name) => {
                     void refreshSectionByKey(name, null);

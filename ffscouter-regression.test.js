@@ -15,7 +15,7 @@ const makeBaseNormalizer = new Function("STAFF_API_ORIGIN", "URL", `${baseNormal
 const makePayloadNormalizer = new Function(`${payloadNormalizerSource}\nreturn normalizeStaffStatusPayload;`);
 
 test("metadata and runtime fallback identify this release", () => {
-    assert.match(source, /^\/\/ @version\s+1\.1\.85$/m);
+    assert.match(source, /^\/\/ @version\s+1\.1\.86$/m);
     assert.match(source, /const VERSION = \(typeof GM_info !== "undefined"/);
     assert.match(source, /^\/\/ @run-at\s+document-start$/m);
     assert.match(source, /^\/\/ @license\s+MIT$/m);
@@ -118,6 +118,18 @@ test("FFScouter supports pre-war scouting and collapsible Sort & View controls",
     assert.match(source, /Hide Sort & View/);
 });
 
+test("only the header owns section refresh while FFScouter keeps live status refresh", () => {
+    const statusHeaderSource = section("function renderSectionRefreshHeader", "function getHeaderRefreshTarget");
+    assert.doesNotMatch(statusHeaderSource, /data-section-refresh/);
+    assert.doesNotMatch(source, /data-refresh-section/);
+    assert.doesNotMatch(source, /function bindSectionRefreshButtons/);
+    assert.doesNotMatch(source, /bindSectionRefreshButtons\(\);/);
+    assert.match(source, /id="refresh-war-live-btn" class="nfc-primary-action">Refresh Live Status<\/button>/);
+    assert.match(source, /class="nfc-secondary-action nfc-ffscouter-toggle"/);
+    assert.match(source, /\.nfc-secondary-action \{[^}]*color:#edf4ff/);
+    assert.match(source, /data-theme="light"\] \.nfc-secondary-action \{[^}]*color:#172033/);
+});
+
 test("every active parent and subtab uses the shared header/status vocabulary", () => {
     for (const label of ["Faction", "Staff", "Settings", "General", "FFScouter", "Statuses", "Loans", "Bleeders", "Revives", "Controls", "Auto Refresh", "Integrations", "Exports"]) {
         assert.match(source, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -146,11 +158,13 @@ test("responsive shell keeps headers compact and owns scrolling in the main body
 });
 
 test("refresh header updates cleanly for the active tab", () => {
-    const state = { currentTab: "staff" };
+    const state = { currentTab: "staff", factionSubTab: "general" };
     const getHeaderRefreshTarget = new Function("state", `${headerRefreshSource}\nreturn getHeaderRefreshTarget;`)(state);
     assert.deepEqual(getHeaderRefreshTarget(), { section: "staff", label: "Refresh Staff data" });
     state.currentTab = "faction";
     assert.deepEqual(getHeaderRefreshTarget(), { section: "faction", label: "Refresh Faction data" });
+    state.factionSubTab = "ffscouter";
+    assert.deepEqual(getHeaderRefreshTarget(), { section: "warTargets", label: "Refresh FFScouter data" });
     state.currentTab = "settings";
     assert.deepEqual(getHeaderRefreshTarget(), { section: null, label: "Settings saved locally" });
 });

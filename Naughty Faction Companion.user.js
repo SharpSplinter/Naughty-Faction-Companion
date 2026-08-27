@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.1.85
+// @version      1.1.86
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -31,7 +31,7 @@
 
     // Kept in sync with the @version header above on every bump — displayed in the
     // settings tab version can be confirmed, without relying on console access.
-    const VERSION = (typeof GM_info !== "undefined" && GM_info?.script?.version) ? GM_info.script.version : "1.1.85";
+    const VERSION = (typeof GM_info !== "undefined" && GM_info?.script?.version) ? GM_info.script.version : "1.1.86";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -4453,7 +4453,7 @@
             : `${rangeLabel} all`;
         const sortAndViewSummary = `${activeSort.label} · ${sortDirection} · ${formatInteger(enabledViewFilters)} of ${formatInteger(Object.keys(WAR_TARGET_FILTER_DEFAULTS).length)} filters · ${rangeSummary}`;
         const controlsCollapsed = state.warTargetControlsCollapsed === true;
-        const filterToggle = `<button type="button" class="nfc-secondary-action" data-action="toggle-war-target-controls" aria-expanded="${controlsCollapsed ? "false" : "true"}" title="${controlsCollapsed ? "Show Sort & View controls" : "Hide Sort & View controls"}">${controlsCollapsed ? "Show Sort & View" : "Hide Sort & View"}</button>`;
+        const filterToggle = `<button type="button" class="nfc-secondary-action nfc-ffscouter-toggle" data-action="toggle-war-target-controls" aria-expanded="${controlsCollapsed ? "false" : "true"}" title="${controlsCollapsed ? "Show Sort & View controls" : "Hide Sort & View controls"}">${controlsCollapsed ? "Show Sort & View" : "Hide Sort & View"}</button>`;
         const rangePanel = `
             <div class="ntc-war-ff-range" style="display:flex;align-items:center;gap:5px;flex:1 1 205px;min-width:0;flex-wrap:wrap;">
                 <span class="ntc-war-filter-group-label" style="color:#929eac;font-size:9px;font-weight:850;text-transform:uppercase;letter-spacing:.45px;min-width:48px;">Range</span>
@@ -4850,9 +4850,6 @@
             <button data-export-section="${key}" style="background: #2f5d3d; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Download ${label} to .csv</button>
         `).join("");
 
-        const refreshMarkup = snapshotButtons.map(({ key, label }) => `
-            <button data-refresh-section="${key}" style="background: #6058b8; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;">Refresh ${label}</button>
-        `).join("");
         const pendingBackup = state.pendingBackupRestore;
         const backupRestoreMarkup = `
                 <div style="border:1px solid #3d3d3d;border-radius:8px;padding:11px;display:grid;gap:8px;background:rgba(255,255,255,0.02);min-width:0;">
@@ -4928,7 +4925,6 @@
                         <button id="save-api-key-btn" style="background: #3b5998; color: white; border: none; border-radius: 6px; padding: 8px 12px; font-size: 11px; cursor: pointer;" ${injectedApiKeyActive ? "disabled" : ""}>Save</button>
                     </div>
                     ${injectedApiKeyActive ? '<div style="color:#7fe18d;font-size:10px;line-height:1.4;">Using TornPDA&#8217;s injected API key. Its value is not shown or saved by this companion.</div>' : ""}
-                    <div style="display: grid; gap: 6px;">${refreshMarkup}</div>
                 </div>
             `;
         const integrationsContent = `
@@ -5133,7 +5129,6 @@
         const closeFFScouterDialogButton = document.getElementById("close-ffscouter-dialog-btn");
         const status = document.getElementById("fetch-status-bar");
         const exportButtons = contentEl.querySelectorAll("[data-export-section]");
-        const refreshSectionButtons = contentEl.querySelectorAll("[data-refresh-section]");
         const subTabButtons = contentEl.querySelectorAll("[data-settings-subtab]");
         const autoRefreshEnabledInputs = contentEl.querySelectorAll("[data-auto-refresh-enabled]");
         const autoRefreshSecondsInputs = contentEl.querySelectorAll("[data-auto-refresh-seconds]");
@@ -5642,17 +5637,6 @@
             };
         });
 
-        refreshSectionButtons.forEach((button) => {
-            if (button.dataset.bound === "true") return;
-            button.dataset.bound = "true";
-            button.onclick = async () => {
-                const key = button.getAttribute("data-refresh-section");
-                if (!key) return;
-                debugLog("Section refresh button clicked", { key });
-                await refreshSectionByKey(key, status);
-            };
-        });
-
         exportButtons.forEach((button) => {
             if (button.dataset.bound === "true") return;
             button.dataset.bound = "true";
@@ -5985,32 +5969,11 @@
     function renderSectionRefreshHeader(sectionKey, label) {
         const sourceSection = sectionKey === "faction" && state.factionSubTab === "ffscouter" ? "warTargets" : sectionKey;
         const freshness = getSectionFreshness(sourceSection);
-        const canRefresh = sectionKey !== "settings";
-        const scope = sourceSection === "warTargets" ? "FFScouter data" : sectionKey === "staff" ? "Staff data" : sectionKey === "faction" ? "Faction data" : `${label} data`;
         return `
             <div class="nfc-tab-status" data-freshness="${freshness.label.toLowerCase().replace(/\s+/g, "-")}">
                 <div class="nfc-tab-status-copy"><strong>${escapeHtml(label)} · ${escapeHtml(freshness.label)}</strong><span>${escapeHtml(formatUtcTimestamp(freshness.updatedAt))} · ${freshness.updatedAt ? escapeHtml(formatRelativeTime(Math.floor(freshness.updatedAt / 1000))) : "never"} · ${escapeHtml(freshness.source)}</span></div>
-                ${canRefresh ? `<button data-section-refresh="${sourceSection}" class="nfc-primary-action" type="button">Refresh ${escapeHtml(scope)}</button>` : `<span class="nfc-tab-status-note">Settings saved locally</span>`}
             </div>
         `;
-    }
-
-    function bindSectionRefreshButtons() {
-        const dashboard = state.dashboard;
-        if (!dashboard) return;
-        dashboard.querySelectorAll("[data-section-refresh]").forEach((button) => {
-            if (button.dataset.bound === "true") return;
-            button.dataset.bound = "true";
-            button.onclick = async () => {
-                const sectionKey = button.getAttribute("data-section-refresh");
-                debugLog("Per-tab refresh button clicked", { sectionKey });
-                button.disabled = true;
-                button.textContent = "Refreshing...";
-                if (sectionKey === "warTargets") await refreshWarTargets();
-                else await refreshSectionByKey(sectionKey, null);
-                renderTabContent();
-            };
-        });
     }
 
     function getHeaderRefreshTarget() {
@@ -6079,7 +6042,6 @@
         bindSettingsControls();
         bindFactionControls();
         bindStaffControls();
-        bindSectionRefreshButtons();
         updateHeaderRefreshAction();
         requestAnimationFrame(fitCurrentContentToWidget);
 
@@ -7193,6 +7155,10 @@
                 #nfc-faction-wrapper .nfc-ffscouter-guidance { margin-top:3px; color:#8fa2ba; font-size:9px; line-height:1.35; }
                 #nfc-faction-wrapper .nfc-primary-action { border:1px solid #4a92d6; border-radius:6px; background:#356da5; color:#fff; padding:6px 9px; font-size:10px; font-weight:800; cursor:pointer; white-space:nowrap; }
                 #nfc-faction-wrapper .nfc-primary-action:hover { background:#4081c2; }
+                #nfc-faction-wrapper .nfc-secondary-action { border:1px solid #5c7799; border-radius:6px; background:#263b59; color:#edf4ff; padding:6px 9px; font-size:10px; font-weight:800; line-height:1.2; cursor:pointer; white-space:normal; overflow-wrap:anywhere; }
+                #nfc-faction-wrapper .nfc-secondary-action:hover { border-color:#7da6d5; background:#315078; color:#fff; }
+                #nfc-faction-wrapper .nfc-secondary-action:focus-visible { outline:2px solid #9dd8ff; outline-offset:2px; }
+                #nfc-faction-wrapper[data-theme="light"] .nfc-secondary-action { border-color:#7c94b3; background:#e2ebf5; color:#172033; }
                 #nfc-faction-wrapper .nfc-ffscouter-filter-panel { border:1px solid #3c4d65; border-radius:8px; padding:7px 8px; background:rgba(10,15,24,.68); }
                 #nfc-faction-wrapper .nfc-settings-layout [style*="#3d3d3d"] { border-color:#34445e !important; border-radius:9px !important; background:linear-gradient(145deg,rgba(34,50,76,.72),rgba(17,24,36,.7)) !important; box-shadow:inset 0 1px rgba(255,255,255,.025); }
                 #nfc-faction-wrapper .nfc-ffscouter-stat-grid .nfc-stat-card { min-height:76px; padding:8px 9px; }

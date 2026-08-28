@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.1.92
+// @version      1.1.93
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -31,7 +31,7 @@
 
     // Kept in sync with the @version header above on every bump — displayed in the
     // settings tab version can be confirmed, without relying on console access.
-    const VERSION = (typeof GM_info !== "undefined" && GM_info?.script?.version) ? GM_info.script.version : "1.1.92";
+    const VERSION = (typeof GM_info !== "undefined" && GM_info?.script?.version) ? GM_info.script.version : "1.1.93";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -301,6 +301,7 @@
     const AUTO_REFRESH_MS = 15 * 60 * 1000;
     const QUICK_REFRESH_MS = 5 * 60 * 1000;
     const AUTO_REFRESH_POLL_MS = 1000;
+    const LIVE_CHAIN_SYNC_MS = 2000;
 
     // Views that have remote data. Sub-tabs sharing a source are intentionally
     // deduplicated: one response refreshes every view backed by that source.
@@ -445,6 +446,8 @@
         staffStatus: "Not loaded",
         autoRefreshTimer: null,
         chainCountdownTimer: null,
+        chainLiveSyncTimer: null,
+        chainLiveSyncInFlight: false,
         cooldownCountdownTimer: null,
         factionLiveRefreshTimer: null,
         warTargetsRefreshTimer: null,
@@ -3122,6 +3125,22 @@
         target.bonusRespect += value.bonusRespect;
     }
 
+    function normalizeLiveChain(raw, fetchedAt = Date.now()) {
+        return {
+            id: Number(raw?.id || 0),
+            current: Number(raw?.current || 0),
+            max: Number(raw?.max || 0),
+            timeout: Number(raw?.timeout || 0),
+            // Torn supplies cooldown as an absolute Unix timestamp, unlike the
+            // relative timeout value above.
+            cooldown: Number(raw?.cooldown || 0),
+            modifier: Number(raw?.modifier || 0),
+            start: Number(raw?.start || 0),
+            end: Number(raw?.end || 0),
+            fetchedAt: Number(fetchedAt || Date.now())
+        };
+    }
+
     async function fetchFactionData(apiKey) {
         setSectionStatus("faction", "Refreshing...");
         debugLog("Fetching faction data");
@@ -3143,9 +3162,12 @@
                 fetchJson(withKey(`${BASE_URL}faction/news`, apiKey, {
                     cat: "main,armoryDeposit,armoryAction,territoryWar,rankedWar,territoryGain,chain,crime,membership"
                 })).catch(() => null),
-                fetchJson(withKey(`${BASE_URL}faction/chain`, apiKey))
-                    .then((data) => ({ data, fetchedAt: factionRequestedAt }))
-                    .catch(() => ({ data: null, fetchedAt: factionRequestedAt })),
+                // A timestamp opts out of Torn's response cache. Chain timeout is
+                // relative, so re-using a cached value would reset the countdown
+                // behind Torn's own live timer on every full refresh.
+                fetchJson(withKey(`${BASE_URL}faction/chain`, apiKey, { timestamp: Math.floor(Date.now() / 1000) }))
+                    .then((data) => ({ data, fetchedAt: Date.now() }))
+                    .catch(() => ({ data: null, fetchedAt: Date.now() })),
                 fetchJson(withKey(`${BASE_URL}faction/wars`, apiKey)).catch(() => null)
             ]);
 
@@ -3154,17 +3176,7 @@
             const ownFactionId = Number(factionBasicData.id || userFactionData.id || userFactionData.faction_id || 0);
 
             const chainRaw = factionChainResponse?.data?.chain || factionChainResponse?.data || {};
-            const chain = {
-                id: Number(chainRaw.id || 0),
-                current: Number(chainRaw.current || 0),
-                max: Number(chainRaw.max || 0),
-                timeout: Number(chainRaw.timeout || 0),
-                cooldown: Number(chainRaw.cooldown || 0),
-                modifier: Number(chainRaw.modifier || 0),
-                start: Number(chainRaw.start || 0),
-                end: Number(chainRaw.end || 0),
-                fetchedAt: factionChainResponse?.fetchedAt || factionRequestedAt
-            };
+            const chain = normalizeLiveChain(chainRaw, factionChainResponse?.fetchedAt || factionRequestedAt);
 
             const warsRequestFailed = factionWarsResponse === null;
             const warsData = factionWarsResponse?.wars || factionWarsResponse || {};
@@ -4098,7 +4110,8 @@
         const max = Number(chain.max || 0);
         const fetchedAt = Number(chain.fetchedAt || Date.now());
         const timeoutRemaining = getCountdownRemaining(chain.timeout, fetchedAt, 0);
-        const cooldownRemaining = getCountdownRemaining(chain.cooldown, fetchedAt, 0);
+        const cooldownUntilMs = Math.max(0, Number(chain.cooldown || 0) * 1000);
+        const cooldownRemaining = getCountdownRemaining(chain.cooldown, fetchedAt, cooldownUntilMs);
         const pct = max > 0 ? Math.min(100, Math.round((current / max) * 100)) : 0;
         const barColor = pct >= 90 ? "#e05959" : pct >= 60 ? "#e0a25e" : "#7fe18d";
 
@@ -4116,8 +4129,8 @@
                     <div class="nfc-chain-fill" style="width:${pct}%;background:${barColor};"></div>
                 </div>
                 <div class="nfc-chain-timers">
-                    <span>Breaks in <span id="faction-chain-countdown" class="nfc-chain-countdown${timeoutRemaining > 0 ? " is-active" : ""}" data-chain-seconds="${Number(chain.timeout || 0)}" data-fetched-at="${fetchedAt}" data-expired-text="0s" data-active-color="#ccc" data-expired-color="#e05959" style="color:${timeoutRemaining > 0 ? "#ccc" : "#e05959"};">${formatDuration(Math.ceil(timeoutRemaining))}</span></span>
-                    <span>Cooldown <span id="faction-chain-cooldown" class="nfc-chain-countdown${cooldownRemaining > 0 ? " is-active" : ""}" data-chain-seconds="${Number(chain.cooldown || 0)}" data-fetched-at="${fetchedAt}" data-expired-text="Ready" data-active-color="#ccc" data-expired-color="#7fe18d" style="color:${cooldownRemaining > 0 ? "#ccc" : "#7fe18d"};">${cooldownRemaining > 0 ? formatDuration(Math.ceil(cooldownRemaining)) : "Ready"}</span></span>
+                    <span>Breaks in <span id="faction-chain-countdown" class="nfc-chain-countdown${timeoutRemaining > 0 ? " is-active" : ""}" data-chain-seconds="${Number(chain.timeout || 0)}" data-chain-until-ms="0" data-fetched-at="${fetchedAt}" data-expired-text="0s" data-active-color="#ccc" data-expired-color="#e05959" style="color:${timeoutRemaining > 0 ? "#ccc" : "#e05959"};">${formatDuration(Math.ceil(timeoutRemaining))}</span></span>
+                    <span>Cooldown <span id="faction-chain-cooldown" class="nfc-chain-countdown${cooldownRemaining > 0 ? " is-active" : ""}" data-chain-seconds="${Number(chain.cooldown || 0)}" data-chain-until-ms="${cooldownUntilMs}" data-fetched-at="${fetchedAt}" data-expired-text="Ready" data-active-color="#ccc" data-expired-color="#7fe18d" style="color:${cooldownRemaining > 0 ? "#ccc" : "#7fe18d"};">${cooldownRemaining > 0 ? formatDuration(Math.ceil(cooldownRemaining)) : "Ready"}</span></span>
                 </div>
             </section>
         `;
@@ -6090,6 +6103,8 @@
             stopChainCountdownTimer();
             stopFactionLiveRefreshTimer();
         }
+        if (state.currentTab === "faction" && state.factionSubTab === "general") startLiveChainSync();
+        else stopLiveChainSync();
         if (state.currentTab === "faction" && state.factionSubTab === "ffscouter") startWarTargetsRefreshTimer();
         else stopWarTargetsRefreshTimer();
     }
@@ -6311,26 +6326,111 @@
         }
     }
 
+    function updateChainCountdownElements() {
+        document.querySelectorAll("[data-chain-seconds]").forEach((el) => {
+            const seconds = Number(el.dataset.chainSeconds || 0);
+            const fetchedAt = Number(el.dataset.fetchedAt || Date.now());
+            const untilMs = Number(el.dataset.chainUntilMs || 0);
+            const remaining = getCountdownRemaining(seconds, fetchedAt, untilMs);
+            el.textContent = remaining > 0 ? formatDuration(Math.ceil(remaining)) : (el.dataset.expiredText || "0s");
+            el.classList.toggle("is-active", remaining > 0);
+            el.style.color = remaining > 0 ? (el.dataset.activeColor || "#ccc") : (el.dataset.expiredColor || "#e05959");
+        });
+    }
+
     function startChainCountdownTimer() {
         stopChainCountdownTimer();
         if (state.isMinimized || !state.pageScopeActive) return;
         const updateCountdown = () => {
-            const elements = document.querySelectorAll("[data-chain-seconds]");
-            if (state.isMinimized || !state.pageScopeActive || !elements.length || state.currentTab !== "faction") {
+            if (state.isMinimized || !state.pageScopeActive || !document.querySelector("[data-chain-seconds]") || state.currentTab !== "faction") {
                 stopChainCountdownTimer();
                 return;
             }
-            elements.forEach((el) => {
-                const seconds = Number(el.dataset.chainSeconds || 0);
-                const fetchedAt = Number(el.dataset.fetchedAt || Date.now());
-                const remaining = getCountdownRemaining(seconds, fetchedAt, 0);
-                el.textContent = remaining > 0 ? formatDuration(Math.ceil(remaining)) : (el.dataset.expiredText || "0s");
-                el.classList.toggle("is-active", remaining > 0);
-                el.style.color = remaining > 0 ? (el.dataset.activeColor || "#ccc") : (el.dataset.expiredColor || "#e05959");
-            });
+            updateChainCountdownElements();
         };
         updateCountdown();
         state.chainCountdownTimer = setInterval(updateCountdown, 250);
+    }
+
+    function updateLiveChainDisplay(chain) {
+        const dashboard = state.dashboard;
+        const hasLiveChain = !!(chain.max || chain.current || chain.timeout || chain.cooldown);
+        const card = dashboard?.querySelector(".nfc-chain-card");
+        if (!dashboard || ((!card && hasLiveChain) || (card && !hasLiveChain))) {
+            renderTabContent();
+            return;
+        }
+        if (!card) return;
+
+        const current = Number(chain.current || 0);
+        const max = Number(chain.max || 0);
+        const pct = max > 0 ? Math.min(100, Math.round((current / max) * 100)) : 0;
+        const color = pct >= 90 ? "#e05959" : pct >= 60 ? "#e0a25e" : "#7fe18d";
+        const total = card.querySelector(".nfc-chain-total");
+        const fill = card.querySelector(".nfc-chain-fill");
+        if (total) total.textContent = `${formatInteger(current)} / ${formatInteger(max)} hits`;
+        if (fill) {
+            fill.style.width = `${pct}%`;
+            fill.style.background = color;
+        }
+
+        const timeout = card.querySelector("#faction-chain-countdown");
+        const cooldown = card.querySelector("#faction-chain-cooldown");
+        if (timeout) {
+            timeout.dataset.chainSeconds = String(chain.timeout || 0);
+            timeout.dataset.chainUntilMs = "0";
+            timeout.dataset.fetchedAt = String(chain.fetchedAt || Date.now());
+        }
+        if (cooldown) {
+            cooldown.dataset.chainSeconds = String(chain.cooldown || 0);
+            cooldown.dataset.chainUntilMs = String(Math.max(0, Number(chain.cooldown || 0) * 1000));
+            cooldown.dataset.fetchedAt = String(chain.fetchedAt || Date.now());
+        }
+        updateChainCountdownElements();
+    }
+
+    function stopLiveChainSync() {
+        if (state.chainLiveSyncTimer) {
+            clearTimeout(state.chainLiveSyncTimer);
+            state.chainLiveSyncTimer = null;
+        }
+    }
+
+    function canSyncLiveChain() {
+        return isAutomaticRefreshAllowed()
+            && state.currentTab === "faction"
+            && state.factionSubTab === "general"
+            && !!getStoredKey();
+    }
+
+    async function syncLiveChain() {
+        if (state.chainLiveSyncInFlight || !canSyncLiveChain()) return false;
+        state.chainLiveSyncInFlight = true;
+        try {
+            const apiKey = getStoredKey();
+            const response = await fetchJson(withKey(`${BASE_URL}faction/chain`, apiKey, { timestamp: Math.floor(Date.now() / 1000) }));
+            if (!canSyncLiveChain()) return false;
+            const chain = normalizeLiveChain(response?.chain || response, Date.now());
+            const faction = state.caches.faction || {};
+            state.caches.faction = { ...faction, chain };
+            updateLiveChainDisplay(chain);
+            return true;
+        } catch (error) {
+            warnLog("Live chain sync failed", { error: safeErrorMessage(error) });
+            return false;
+        } finally {
+            state.chainLiveSyncInFlight = false;
+        }
+    }
+
+    function startLiveChainSync() {
+        stopLiveChainSync();
+        if (!canSyncLiveChain()) return;
+        const schedule = async () => {
+            await syncLiveChain();
+            if (canSyncLiveChain()) state.chainLiveSyncTimer = setTimeout(schedule, LIVE_CHAIN_SYNC_MS);
+        };
+        void schedule();
     }
 
     function stopCooldownCountdownTimer() {
@@ -6463,6 +6563,7 @@
         if (state.autoRefreshTimer) clearTimeout(state.autoRefreshTimer);
         state.autoRefreshTimer = null;
         stopFactionLiveRefreshTimer();
+        stopLiveChainSync();
         stopWarTargetsRefreshTimer();
         if (changed) debugLog("Automatic refresh paused", { reason });
     }
@@ -6866,6 +6967,7 @@
         resumeAutomaticRefresh("window-restored");
         if (state.currentTab !== "faction") return;
         startChainCountdownTimer();
+        if (state.factionSubTab === "general") startLiveChainSync();
         startFactionLiveRefreshTimer();
         if (state.factionSubTab === "ffscouter") startWarTargetsRefreshTimer();
     }

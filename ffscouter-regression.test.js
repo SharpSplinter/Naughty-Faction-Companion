@@ -14,6 +14,8 @@ const fairFightFormatterSource = section("const formatFairFight", "const formatO
 const respectFormatterSource = section("const formatRespect", "const formatFairFight");
 const pdaTouchWidthSource = section("function getWarTargetColumnTouchWidthBonus", "function computeResponsiveColumnWidths");
 const reportedContributionSource = section("function getReportedChainContribution", "function addContribution");
+const chainNormalizerSource = section("function normalizeLiveChain", "async function fetchFactionData");
+const countdownRemainingSource = section("function getCountdownRemaining", "function buildCountdownStatCard");
 
 const makeBaseNormalizer = new Function("STAFF_API_ORIGIN", "URL", `${baseNormalizerSource}\nreturn normalizeStaffApiBase;`);
 const makePayloadNormalizer = new Function(`${payloadNormalizerSource}\nreturn normalizeStaffStatusPayload;`);
@@ -21,9 +23,11 @@ const makeFairFightFormatter = new Function(`${fairFightFormatterSource}\nreturn
 const makeRespectFormatter = new Function(`${respectFormatterSource}\nreturn formatRespect;`);
 const makePdaTouchWidth = new Function("isTornPDAEnvironment", "isTornPDACandidate", `${pdaTouchWidthSource}\nreturn getWarTargetColumnTouchWidthBonus;`);
 const makeReportedContribution = new Function(`${reportedContributionSource}\nreturn getReportedChainContribution;`);
+const makeChainNormalizer = new Function("Date", `${chainNormalizerSource}\nreturn normalizeLiveChain;`);
+const makeCountdownRemaining = new Function("Date", `${countdownRemainingSource}\nreturn getCountdownRemaining;`);
 
 test("metadata and runtime fallback identify this release", () => {
-    assert.match(source, /^\/\/ @version\s+1\.1\.92$/m);
+    assert.match(source, /^\/\/ @version\s+1\.1\.93$/m);
     assert.match(source, /const VERSION = \(typeof GM_info !== "undefined"/);
     assert.match(source, /^\/\/ @run-at\s+document-start$/m);
     assert.match(source, /^\/\/ @license\s+MIT$/m);
@@ -51,6 +55,21 @@ test("chain reports preserve recorded War Respect cents and War Hits", () => {
     }, 315311);
     assert.deepEqual(contribution, { hits: 16, chainHits: 18, respect: 198.94, bonusHits: 1, bonusRespect: 40 });
     assert.equal(formatRespect(198.94), "198.94");
+});
+
+test("live Chain timer bypasses cache and treats cooldown as an absolute deadline", () => {
+    const normalizeChain = makeChainNormalizer(Date);
+    const getRemaining = makeCountdownRemaining(Date);
+    assert.deepEqual(normalizeChain({ id: 4, current: 18, max: 25, timeout: 90, cooldown: 1_700_000_060 }, 1_700_000_000_000), {
+        id: 4, current: 18, max: 25, timeout: 90, cooldown: 1_700_000_060, modifier: 0, start: 0, end: 0, fetchedAt: 1_700_000_000_000
+    });
+    assert.equal(getRemaining(90, 1_700_000_000_000, 0, 1_700_000_001_000), 89);
+    assert.equal(getRemaining(1_700_000_060, 1_700_000_000_000, 1_700_000_060_000, 1_700_000_001_000), 59);
+    assert.match(source, /const LIVE_CHAIN_SYNC_MS = 2000/);
+    assert.match(source, /faction\/chain`, apiKey, \{ timestamp:/);
+    assert.match(source, /data-chain-until-ms/);
+    assert.match(source, /function startLiveChainSync\(\)/);
+    assert.match(source, /stopLiveChainSync\(\);/);
 });
 
 test("disabling hospital alerts invalidates delayed work", () => {

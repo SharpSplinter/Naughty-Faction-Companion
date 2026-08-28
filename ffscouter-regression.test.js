@@ -27,7 +27,7 @@ const makeChainNormalizer = new Function("Date", `${chainNormalizerSource}\nretu
 const makeCountdownRemaining = new Function("Date", `${countdownRemainingSource}\nreturn getCountdownRemaining;`);
 
 test("metadata and runtime fallback identify this release", () => {
-    assert.match(source, /^\/\/ @version\s+1\.1\.93$/m);
+    assert.match(source, /^\/\/ @version\s+1\.1\.94$/m);
     assert.match(source, /const VERSION = \(typeof GM_info !== "undefined"/);
     assert.match(source, /^\/\/ @run-at\s+document-start$/m);
     assert.match(source, /^\/\/ @license\s+MIT$/m);
@@ -57,7 +57,7 @@ test("chain reports preserve recorded War Respect cents and War Hits", () => {
     assert.equal(formatRespect(198.94), "198.94");
 });
 
-test("live Chain timer bypasses cache and treats cooldown as an absolute deadline", () => {
+test("live Chain timer uses a bounded API budget and treats cooldown as an absolute deadline", () => {
     const normalizeChain = makeChainNormalizer(Date);
     const getRemaining = makeCountdownRemaining(Date);
     assert.deepEqual(normalizeChain({ id: 4, current: 18, max: 25, timeout: 90, cooldown: 1_700_000_060 }, 1_700_000_000_000), {
@@ -65,10 +65,15 @@ test("live Chain timer bypasses cache and treats cooldown as an absolute deadlin
     });
     assert.equal(getRemaining(90, 1_700_000_000_000, 0, 1_700_000_001_000), 89);
     assert.equal(getRemaining(1_700_000_060, 1_700_000_000_000, 1_700_000_060_000, 1_700_000_001_000), 59);
-    assert.match(source, /const LIVE_CHAIN_SYNC_MS = 2000/);
+    assert.match(source, /const LIVE_CHAIN_SYNC_MS = 10 \* 1000/);
+    assert.match(source, /const FACTION_GENERAL_REFRESH_MIN_SECONDS = 60/);
+    assert.match(source, /defaultSeconds: FACTION_GENERAL_REFRESH_MIN_SECONDS/);
+    assert.match(source, /function normalizeAutoRefreshSeconds|const normalizeAutoRefreshSeconds/);
+    assert.match(source, /normalizeAutoRefreshSeconds\(target\.id, saved\.seconds, target\.defaultSeconds\)/);
     assert.match(source, /faction\/chain`, apiKey, \{ timestamp:/);
     assert.match(source, /data-chain-until-ms/);
     assert.match(source, /function startLiveChainSync\(\)/);
+    assert.match(source, /LIVE_CHAIN_SYNC_MS - \(Date\.now\(\) - lastChainFetch\)/);
     assert.match(source, /stopLiveChainSync\(\);/);
 });
 

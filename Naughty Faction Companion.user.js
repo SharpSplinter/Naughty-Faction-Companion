@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Faction Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Faction-Companion
-// @version      1.1.93
+// @version      1.1.94
 // @description  Standalone Torn faction, ranked-war, chain, and FFScouter companion.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -31,7 +31,7 @@
 
     // Kept in sync with the @version header above on every bump — displayed in the
     // settings tab version can be confirmed, without relying on console access.
-    const VERSION = (typeof GM_info !== "undefined" && GM_info?.script?.version) ? GM_info.script.version : "1.1.93";
+    const VERSION = (typeof GM_info !== "undefined" && GM_info?.script?.version) ? GM_info.script.version : "1.1.94";
 
     const BASE_URL = "https://api.torn.com/v2/";
     const FFSCOUTER_BASE_URL = "https://ffscouter.com/api/v1";
@@ -301,12 +301,13 @@
     const AUTO_REFRESH_MS = 15 * 60 * 1000;
     const QUICK_REFRESH_MS = 5 * 60 * 1000;
     const AUTO_REFRESH_POLL_MS = 1000;
-    const LIVE_CHAIN_SYNC_MS = 2000;
+    const LIVE_CHAIN_SYNC_MS = 10 * 1000;
+    const FACTION_GENERAL_REFRESH_MIN_SECONDS = 60;
 
     // Views that have remote data. Sub-tabs sharing a source are intentionally
     // deduplicated: one response refreshes every view backed by that source.
     const AUTO_REFRESH_TARGETS = [
-        { id: "faction:general", label: "Faction › General", section: "faction", defaultEnabled: true, defaultSeconds: 10 },
+        { id: "faction:general", label: "Faction › General", section: "faction", defaultEnabled: true, defaultSeconds: FACTION_GENERAL_REFRESH_MIN_SECONDS },
         { id: "faction:ffscouter", label: "Faction › FFScouter", section: "warTargets", defaultEnabled: true, defaultSeconds: 30 },
         { id: "staff:overview", label: "Staff › Overview", section: "staff", defaultEnabled: true, defaultSeconds: 20 }
     ];
@@ -314,6 +315,11 @@
         enabled: target.defaultEnabled,
         seconds: target.defaultSeconds
     }]));
+    const getAutoRefreshMinimumSeconds = (targetId) => targetId === "faction:general" ? FACTION_GENERAL_REFRESH_MIN_SECONDS : 5;
+    const normalizeAutoRefreshSeconds = (targetId, value, fallback) => Math.max(
+        getAutoRefreshMinimumSeconds(targetId),
+        Math.min(86400, Number(value) || fallback)
+    );
 
     // Staleness thresholds checked ONLY when restoring a section's cache at dashboard
     // init (i.e. "is this cached data too old to show without refreshing first?").
@@ -1375,7 +1381,7 @@
                 const saved = payload.autoRefreshSettings[target.id] || {};
                 return [target.id, {
                     enabled: typeof saved.enabled === "boolean" ? saved.enabled : target.defaultEnabled,
-                    seconds: Math.max(5, Math.min(86400, Number(saved.seconds) || target.defaultSeconds))
+                    seconds: normalizeAutoRefreshSeconds(target.id, saved.seconds, target.defaultSeconds)
                 }];
             }));
         }
@@ -1615,7 +1621,7 @@
             const saved = dashboardState.autoRefreshSettings?.[target.id] || {};
             return [target.id, {
                 enabled: typeof saved.enabled === "boolean" ? saved.enabled : target.defaultEnabled,
-                seconds: Math.max(5, Math.min(86400, Number(saved.seconds) || target.defaultSeconds))
+                seconds: normalizeAutoRefreshSeconds(target.id, saved.seconds, target.defaultSeconds)
             }];
         }));
         state.nativeReminderMinutes = Math.max(1, Math.min(1440, Number(dashboardState.nativeReminderMinutes) || state.nativeReminderMinutes));
@@ -4861,7 +4867,7 @@
         const saved = state.autoRefreshSettings?.[targetId] || {};
         return {
             enabled: typeof saved.enabled === "boolean" ? saved.enabled : !!target?.defaultEnabled,
-            seconds: Math.max(5, Math.min(86400, Number(saved.seconds) || target?.defaultSeconds || 300))
+            seconds: normalizeAutoRefreshSeconds(targetId, saved.seconds, target?.defaultSeconds || 300)
         };
     }
 
@@ -5026,7 +5032,7 @@
                             const setting = getAutoRefreshSetting(target.id);
                             return `<label style="display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:9px;border:1px solid #3d3d3d;border-radius:7px;padding:8px 9px;background:rgba(255,255,255,0.02);">
                                 <span style="color:#f1f3f5;font-size:11px;font-weight:700;overflow-wrap:anywhere;">${target.label}</span>
-                                <input type="number" data-auto-refresh-seconds="${target.id}" value="${setting.seconds}" min="5" max="86400" step="1" aria-label="${target.label} refresh interval in seconds" style="width:72px;background:#111;border:1px solid #444;border-radius:5px;color:#fff;padding:6px;font-size:11px;" />
+                                <input type="number" data-auto-refresh-seconds="${target.id}" value="${setting.seconds}" min="${getAutoRefreshMinimumSeconds(target.id)}" max="86400" step="1" aria-label="${target.label} refresh interval in seconds" style="width:72px;background:#111;border:1px solid #444;border-radius:5px;color:#fff;padding:6px;font-size:11px;" />
                                 <span style="display:flex;align-items:center;gap:5px;color:#bfc7d1;font-size:10px;white-space:nowrap;"><input type="checkbox" data-auto-refresh-enabled="${target.id}" ${setting.enabled ? "checked" : ""} /> On</span>
                             </label>`;
                         }).join("")}
@@ -5638,7 +5644,7 @@
                 const seconds = contentEl.querySelector(`[data-auto-refresh-seconds="${target.id}"]`);
                 return [target.id, {
                     enabled: !!enabled?.checked,
-                    seconds: Math.max(5, Math.min(86400, Number(seconds?.value) || target.defaultSeconds))
+                    seconds: normalizeAutoRefreshSeconds(target.id, seconds?.value, target.defaultSeconds)
                 }];
             }));
             state.autoRefreshSettings = next;
@@ -6430,7 +6436,12 @@
             await syncLiveChain();
             if (canSyncLiveChain()) state.chainLiveSyncTimer = setTimeout(schedule, LIVE_CHAIN_SYNC_MS);
         };
-        void schedule();
+        // The full Faction refresh already includes this endpoint. Avoid a second
+        // request immediately after that refresh, then keep the lightweight chain
+        // sync to six requests per minute at most.
+        const lastChainFetch = Number(state.caches.faction?.chain?.fetchedAt || 0);
+        const delay = Math.max(0, LIVE_CHAIN_SYNC_MS - (Date.now() - lastChainFetch));
+        state.chainLiveSyncTimer = setTimeout(schedule, delay);
     }
 
     function stopCooldownCountdownTimer() {
@@ -6766,8 +6777,10 @@
     // Near-real-time Faction data refresh while the Faction tab is actually being
     // viewed — separate from and much faster than the general auto-refresh cadence
     // above, so Chain/War progress bars stay close to as fresh as the client-side
-    // countdown timers (startChainCountdownTimer) that tick every 250ms. 10s is a
-    // deliberate balance: each faction refresh now makes several sequential calls
+    // countdown timers (startChainCountdownTimer) tick every 250ms locally. Full
+    // Faction refreshes are rate-capped because each one makes several calls;
+    // `syncLiveChain` supplies the one lightweight live source between them.
+    // The full refresh makes several sequential calls
     // (user/faction, faction/basic, faction/stats, faction/members, faction/news,
     // faction/chain, faction/wars, plus — since the chainreport rework — user/basic,
     // faction/chains, and faction/{id}/chainreport for the personal contribution

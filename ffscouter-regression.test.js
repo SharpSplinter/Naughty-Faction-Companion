@@ -27,7 +27,7 @@ const makeChainNormalizer = new Function("Date", `${chainNormalizerSource}\nretu
 const makeCountdownRemaining = new Function("Date", `${countdownRemainingSource}\nreturn getCountdownRemaining;`);
 
 test("metadata and runtime fallback identify this release", () => {
-    assert.match(source, /^\/\/ @version\s+1\.1\.94$/m);
+    assert.match(source, /^\/\/ @version\s+1\.1\.95$/m);
     assert.match(source, /const VERSION = \(typeof GM_info !== "undefined"/);
     assert.match(source, /^\/\/ @run-at\s+document-start$/m);
     assert.match(source, /^\/\/ @license\s+MIT$/m);
@@ -75,6 +75,18 @@ test("live Chain timer uses a bounded API budget and treats cooldown as an absol
     assert.match(source, /function startLiveChainSync\(\)/);
     assert.match(source, /LIVE_CHAIN_SYNC_MS - \(Date\.now\(\) - lastChainFetch\)/);
     assert.match(source, /stopLiveChainSync\(\);/);
+});
+
+test("auto-refresh settings report storage failures and preserve the configured interval", () => {
+    assert.match(source, /const snapshotStoredDashboardState = \(\) => JSON\.parse\(JSON\.stringify\(getStoredDashboardState\(\)\)\);/);
+    assert.match(source, /const setStoredDashboardState = async \(payload\) =>/);
+    assert.match(source, /const saved = await gmSetValue\(APP_STORAGE\.dashboard, snapshotStoredDashboardState\(\)\);/);
+    assert.match(source, /id="auto-refresh-settings-status"/);
+    assert.match(source, /const saveAutoRefreshSettings = async/);
+    assert.match(source, /const saved = await setStoredDashboardState\(\{ autoRefreshSettings: next \}\);/);
+    assert.match(source, /Auto-refresh settings could not be saved:/);
+    assert.match(source, /const effectiveSeconds = Math\.max\(FACTION_GENERAL_REFRESH_MIN_SECONDS, setting\.seconds\);/);
+    assert.match(source, /const normalizeAutoRefreshSeconds = \(_targetId, value, fallback\) => Math\.max\(\s*5,/);
 });
 
 test("disabling hospital alerts invalidates delayed work", () => {
